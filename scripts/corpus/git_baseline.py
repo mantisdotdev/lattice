@@ -102,16 +102,21 @@ def main() -> int:
         import threading
 
         def feed():
-            for oid, _ in wanted:
-                proc.stdin.write((oid + "\n").encode())
-            proc.stdin.close()
+            try:
+                for oid, _ in wanted:
+                    proc.stdin.write((oid + "\n").encode())
+                proc.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass  # reader stopped early; nothing left to feed
         t = threading.Thread(target=feed, daemon=True)
         t.start()
 
         for oid, _sz in wanted:
             header = proc.stdout.readline().decode(errors="replace").split()
-            if len(header) < 3:
+            if not header:
                 break
+            if len(header) < 3:
+                continue  # "<oid> missing" — skip, keep reading the stream
             size = int(header[2])
             data = proc.stdout.read(size)
             proc.stdout.read(1)  # trailing newline
@@ -119,7 +124,11 @@ def main() -> int:
             d.mkdir(exist_ok=True)
             (d / oid).write_bytes(data)
             total_raw += len(data)
-        proc.wait(timeout=60)
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, ValueError):
+            pass
+        proc.wait(timeout=120)
 
         # (4) chunk side.
         cb = run(str(CHUNKBENCH), str(extract), "--max-bytes", str(64 << 30),

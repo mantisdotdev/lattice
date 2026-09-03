@@ -27,3 +27,4 @@ netty/netty	Java	Java, long history
 spring-projects/spring-framework	Java	Java, extensive package restructuring
 tokio-rs/tokio	Rust	Rust async runtime; crate reorganisations
 rust-lang/rust	Rust	bors-merge history: an unusually rich merge corpus
+opencv/opencv_extra	Binary	real test media (images, video); also the G0.5 binary-heavy base

@@ -6,12 +6,19 @@ Build the G0.5 composite reference repository from hash-pinned public bases.
 one binary-heavy, one deep-history) and composite them by committed script into
 a ~100k-file, ~2 GB-history reference repo."
 
-Method: each base's real history is streamed through `git fast-export`, its paths
-are rewritten under a per-base prefix, and the result is `git fast-import`ed into
-one composite repository. Real commits, real content, real authorship — the
-composite is a genuine repository, not a synthetic one. Each base keeps its own
-ref, so the three histories are disjoint and the composite's working tree is the
-union of the three tips.
+Method: fetch each base's full history into one object database under its own
+ref, then build a single composite commit whose tree places each base's tip
+under its own prefix (`git read-tree --prefix`). The result is a genuine
+repository: real commits, real content, real authorship, real history depth —
+the working set is the union of the tips, and every base's complete history is
+present and walkable.
+
+An earlier version streamed each base through fast-export/fast-import to prefix
+historical paths too. That was abandoned: exporting a commit range emits `from`
+lines referencing parents outside the range, which no fresh repository can
+resolve, and exporting full history for four bases costs hours for no
+measurement benefit — nothing any gate measures depends on historical paths
+being prefixed.
 """
 from __future__ import annotations
 import argparse
@@ -26,54 +33,21 @@ REPOS = REPO / "corpus" / "data" / "repos"
 DEST = REPO / "corpus" / "data" / "reference-repo"
 PINS = REPO / "corpus" / "manifests" / "g0-5-pins.json"
 
+# Per the amended statistics contract.
 BASES = [
-    ("symfony/symfony", "source", "src-heavy", 9000),
-    ("opencv/opencv_extra", "binary", "bin-heavy", 6000),
-    ("git/git", "history", "deep-history", 40000),
+    ("microsoft/TypeScript", "source", "src-typescript"),
+    ("symfony/symfony", "source", "src-symfony"),
+    ("opencv/opencv_extra", "binary", "bin-media"),
+    ("git/git", "history", "deep-history"),
 ]
 
 
-def rewrite_paths(stream, prefix: str, out):
-    """Rewrite a fast-export stream so every path sits under `prefix/`.
-
-    Only path-bearing commands are touched. Data blocks are copied through by
-    declared length so binary content is never misinterpreted as commands —
-    getting this wrong silently corrupts the corpus.
-    """
-    def q(p: bytes) -> bytes:
-        if p.startswith(b'"'):
-            return b'"' + prefix.encode() + b"/" + p[1:]
-        return prefix.encode() + b"/" + p
-
-    while True:
-        line = stream.readline()
-        if not line:
-            break
-        if line.startswith(b"data "):
-            out.write(line)
-            n = int(line[5:].strip())
-            remaining = n
-            while remaining > 0:
-                buf = stream.read(min(1 << 20, remaining))
-                if not buf:
-                    break
-                out.write(buf)
-                remaining -= len(buf)
-            continue
-        if line.startswith(b"M "):
-            parts = line.rstrip(b"\n").split(b" ", 3)
-            if len(parts) == 4:
-                out.write(b" ".join(parts[:3]) + b" " + q(parts[3]) + b"\n")
-                continue
-        elif line.startswith(b"D "):
-            out.write(b"D " + q(line[2:].rstrip(b"\n")) + b"\n")
-            continue
-        elif line[:2] in (b"C ", b"R "):
-            parts = line.rstrip(b"\n").split(b" ")
-            if len(parts) == 3:
-                out.write(parts[0] + b" " + q(parts[1]) + b" " + q(parts[2]) + b"\n")
-                continue
-        out.write(line)
+def git(*args, cwd=None, timeout=7200, check=False):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                       errors="replace", timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args[:3])} failed: {r.stderr[:300]}")
+    return r
 
 
 def main() -> int:
@@ -81,61 +55,67 @@ def main() -> int:
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
-    if DEST.exists() and not args.force:
-        print(f"{DEST} exists; pass --force to rebuild", file=sys.stderr)
-        return 1
     if DEST.exists():
+        if not args.force:
+            print(f"{DEST} exists; pass --force to rebuild", file=sys.stderr)
+            return 1
         subprocess.run(["rm", "-rf", str(DEST)])
     DEST.mkdir(parents=True)
-    subprocess.run(["git", "init", "--quiet", str(DEST)], check=True)
-    subprocess.run(["git", "-C", str(DEST), "config", "user.name", "Lattice Corpus"])
-    subprocess.run(["git", "-C", str(DEST), "config", "user.email", "corpus@lattice.invalid"])
+    git("init", "--quiet", str(DEST), check=True)
+    git("-C", str(DEST), "config", "user.name", "Lattice Corpus")
+    git("-C", str(DEST), "config", "user.email", "corpus@lattice.invalid")
+    git("-C", str(DEST), "config", "gc.auto", "0")
 
-    pins = {}
-    for slug, role, prefix, max_commits in BASES:
+    pins, prefixes = {}, []
+    for slug, role, prefix in BASES:
         src = REPOS / (slug.replace("/", "__") + ".git")
         if not (src / "HEAD").exists():
             print(f"SKIP {slug}: not cloned", file=sys.stderr)
             continue
-        head = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"],
-                              capture_output=True, text=True).stdout.strip()
-        count = subprocess.run(["git", "-C", str(src), "rev-list", "--count", "HEAD"],
-                               capture_output=True, text=True).stdout.strip()
-        pins[slug] = {"role": role, "prefix": prefix, "head": head,
-                      "total_commits": int(count or 0), "max_commits": max_commits}
-        print(f"exporting {slug} ({role}) head={head[:12]} "
-              f"commits={count} cap={max_commits} …", file=sys.stderr, flush=True)
-
+        head = git("-C", str(src), "rev-parse", "HEAD").stdout.strip()
+        commits = int(git("-C", str(src), "rev-list", "--count", "--all").stdout.strip() or 0)
+        print(f"fetching {slug} ({role}) head={head[:12]} commits={commits:,} …",
+              file=sys.stderr, flush=True)
         t0 = time.time()
-        exporter = subprocess.Popen(
-            ["git", "-C", str(src), "fast-export", "--no-data" if False else "--progress=20000",
-             "--signed-tags=strip", "--tag-of-filtered-object=drop",
-             "--reference-excluded-parents", f"--refspec=refs/heads/*:refs/heads/{prefix}/*",
-             f"HEAD~{max_commits}..HEAD" if int(count or 0) > max_commits else "HEAD"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        importer = subprocess.Popen(
-            ["git", "-C", str(DEST), "fast-import", "--quiet", "--force"],
-            stdin=subprocess.PIPE)
-        try:
-            rewrite_paths(exporter.stdout, prefix, importer.stdin)
-        finally:
-            importer.stdin.close()
-            exporter.wait()
-            importer.wait()
+        # Local transport: objects are copied or hardlinked, not re-transferred.
+        r = git("-C", str(DEST), "fetch", "--quiet", "--no-tags",
+                str(src), f"+refs/heads/*:refs/bases/{prefix}/*", check=False)
+        if r.returncode != 0:
+            print(f"  fetch failed: {r.stderr[:200]}", file=sys.stderr)
+            continue
+        git("-C", str(DEST), "update-ref", f"refs/bases/{prefix}/TIP", head)
+        pins[slug] = {"role": role, "prefix": prefix, "head": head,
+                      "commits": commits}
+        prefixes.append((prefix, head))
         print(f"  done in {time.time()-t0:.0f}s", file=sys.stderr, flush=True)
 
-    # A single commit whose tree is the union of the three tips gives the
-    # composite a working set of the required size.
-    refs = subprocess.run(["git", "-C", str(DEST), "for-each-ref", "--format=%(refname)"],
-                          capture_output=True, text=True).stdout.split()
-    print(f"refs imported: {len(refs)}", file=sys.stderr)
-    subprocess.run(["git", "-C", str(DEST), "gc", "--quiet"], timeout=7200)
+    if len(prefixes) < 3:
+        print("fewer than 3 bases available", file=sys.stderr)
+        return 1
 
+    print("composing working tree …", file=sys.stderr, flush=True)
+    git("-C", str(DEST), "read-tree", "--empty", check=True)
+    for prefix, head in prefixes:
+        git("-C", str(DEST), "read-tree", f"--prefix={prefix}/", f"{head}^{{tree}}",
+            check=True)
+    tree = git("-C", str(DEST), "write-tree", check=True).stdout.strip()
+    msg = ("Composite reference repository (G0.5)\n\n"
+           + "\n".join(f"{p}: {s} @ {h}" for (p, h), (s, _) in
+                       zip(prefixes, [(k, v) for k, v in pins.items()])))
+    commit = git("-C", str(DEST), "commit-tree", tree, "-m", msg, check=True).stdout.strip()
+    git("-C", str(DEST), "update-ref", "refs/heads/main", commit, check=True)
+    git("-C", str(DEST), "symbolic-ref", "HEAD", "refs/heads/main")
+    print("checking out …", file=sys.stderr, flush=True)
+    git("-C", str(DEST), "checkout", "--quiet", "--force", "main", timeout=7200, check=True)
+
+    depth = int(git("-C", str(DEST), "rev-list", "--all", "--count").stdout.strip() or 0)
     PINS.write_text(json.dumps({
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "bases": pins, "refs": refs,
+        "composite_commit": commit, "composite_tree": tree,
+        "history_depth": depth, "bases": pins,
     }, indent=2) + "\n")
-    print(json.dumps(pins, indent=2))
+    print(json.dumps({"composite_commit": commit, "history_depth": depth,
+                      "bases": pins}, indent=2))
     return 0
 
 

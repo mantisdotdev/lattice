@@ -27,11 +27,34 @@ hash-pinned snapshots of three public repositories, one per required character.
 Pins are recorded in `corpus/manifests/g0-5-pins.json` at build time (commit SHA
 per base) and asserted on every rebuild.
 
-| Role | Repository | Why |
-|---|---|---|
-| source-heavy | `symfony/symfony` | ~40k source files, deep directory nesting, PHP monorepo shape |
-| binary-heavy | `opencv/opencv_extra` | real test media — images and video, genuinely incompressible |
-| deep-history | `git/git` | >70k commits; the deepest freely available history of a real codebase |
+| Role | Repository | Tip files | Commits | Why |
+|---|---|---:|---:|---|
+| source-heavy | `microsoft/TypeScript` | 65,988 | 42,055 | very large real source tree; deep nesting |
+| source-heavy (2) | `symfony/symfony` | 15,008 | 83,279 | second source character: PHP monorepo component layout |
+| binary-heavy | `opencv/opencv_extra` | 12,894 | 2,141 | real test media — images and video, genuinely incompressible |
+| deep-history | `git/git` | 4,850 | 85,525 | the deepest freely available history of a real codebase |
+
+### AMENDMENT 1 — four bases, not three
+
+**Recorded because this file was frozen and hash-pinned, and this change moved
+the pin.** The original table named three bases: `symfony/symfony`,
+`opencv/opencv_extra`, `git/git`. On building the composite, those three were
+measured to contribute **32,752 files at their tips** — against this contract's
+own `file_count ≥ 90,000` bound. The contract as first frozen was therefore
+**unsatisfiable**, and the error was in the base selection, not in the bound.
+
+The bound is unchanged; §5.7's "~100k files" is the requirement and weakening it
+to fit the corpus I happened to clone would be precisely the manipulation the
+hash pin exists to prevent. Instead `microsoft/TypeScript` is added as a second
+source-heavy base, bringing the composite to ~98,700 files.
+
+§6 requires "≥ 3 named public repos", a floor rather than a cap, so four bases
+are faithful to the brief. Under §0.3's classification this amendment is
+**equivalent in strictness**: no bound moved, and the corpus it produces is
+strictly larger and more varied than the one originally named.
+
+The superseded pin was `a3109bd2b4db370c…`; the current pin is recorded in
+`corpus/manifests/g0-5-statistics-contract.sha256`.
 
 ## The contract
 

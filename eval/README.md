@@ -1,0 +1,45 @@
+# eval/ — frozen instance templates (§0.9)
+
+§0.9 requires that personas (G2.1) and adversarial reviewers (G6) each run as "a
+separately spawned agent instance or fresh session whose *entire input* is: the
+committed materials that gate specifies… plus a frozen prompt template committed
+at `eval/personas/*.md` or `eval/reviewers/*.md` **before the consuming stage
+begins**." Template changes follow §0.3's ADR rules.
+
+These are frozen during Stage G0, before any product code exists — which is the
+strongest possible form of "before the consuming stage begins," since the thing
+they will evaluate has not been built yet and cannot have been written toward.
+
+`eval/FREEZE.json` records each template's SHA-256 at freeze time. The consuming
+harness verifies the hash and refuses to run against a template that has moved.
+
+## A limitation recorded up front
+
+Per `docs/DISAGREEMENTS.md` Challenge 10, accepted-as-bet: these instances share
+a model family with the builder. Context isolation, which §0.9 mandates and which
+is enforced here, defends against inheriting *conclusions*. It does not defend
+against shared *priors* — a reviewer instance is systematically wrong in the same
+directions the builder is.
+
+Every transcript produced under these templates therefore carries a header
+recording that fact, so a later reader weighting the evidence knows what kind of
+evidence it is. The G6.2 external human security review is the check on this, and
+the falsification condition for the bet is stated in Challenge 10.
+
+## Current state
+
+| Template | Consuming gate | State |
+|---|---|---|
+| `personas/novice-developer.md` | G2.1 | frozen |
+| `personas/git-power-user.md` | G2.2 floor | frozen |
+| `personas/dev-agent.md` | G5.3 | written before G5 entry |
+| `reviewers/data-loss-hunter.md` | G6.1 | frozen |
+| `reviewers/security-review.md` | G6.2 | written before G6 entry |
+| `reviewers/performance-audit.md` | G6.3 | written before G6 entry |
+| `reviewers/spec-compliance.md` | G6.4 | written before G6 entry |
+| `reviewers/cold-start-ux.md` | G6.5 | written before G6 entry |
+| `reviewers/canaries/` | G6 round validity | populated before round one |
+
+Templates listed as "written before …" do not exist yet. They are absent rather
+than stubbed, so that no reader can mistake a placeholder for a frozen template —
+and so that the freeze record cannot contain an entry for a file with no content.
