@@ -343,6 +343,7 @@ impl Repo {
     // ------------------------------------------------------------ snapshot
 
     fn snapshot_dir(&mut self, dir: &Path, packer: &mut PackWriter) -> Result<String> {
+        let at_root = dir == self.root.as_path();
         let mut tree = Tree::new();
         let mut names: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
         // Sort by raw name bytes so the tree is canonical regardless of the
@@ -352,7 +353,10 @@ impl Repo {
         for entry in names {
             let name = entry.file_name();
             let raw = name.as_encoded_bytes().to_vec();
-            if raw == REPO_DIR.as_bytes() {
+            // The repository's own directory is skipped, but ONLY at the root.
+            // A user directory named ".lattice" nested anywhere below is real
+            // content and must be captured — silently dropping it is data loss.
+            if at_root && raw == REPO_DIR.as_bytes() {
                 continue;
             }
             let path = entry.path();
@@ -395,7 +399,7 @@ impl Repo {
         Ok(report)
     }
 
-    fn restore_tree(&self, tree_id: &str, dest: &Path, report: &mut CheckoutReport) -> Result<u64> {
+    fn restore_tree(&self, tree_id: &str, dest: &Path, report: &mut CheckoutReport) -> Result<()> {
         let Some(id) = ChunkId::from_hex(tree_id) else {
             return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
         };
@@ -405,13 +409,27 @@ impl Repo {
             )));
         };
         let tree = Tree::from_bytes(&bytes)?;
-        let mut written = 0u64;
         // Names this checkout has already placed in THIS directory, keyed by
         // the exact bytes. Used to tell "the filesystem folded two names
-        // together" apart from "we are overwriting our own earlier write".
+        // together" apart from "an unrelated file was already there".
         let mut placed: Vec<Vec<u8>> = Vec::new();
 
         for (name, node) in &tree.entries {
+            // A tree entry name is a single path component by construction.
+            // A "..", a separator, or a NUL can only reach here from a corrupt
+            // or hostile repository, and joining it would let a checkout write
+            // OUTSIDE the destination — arbitrary file write. Refuse it.
+            if !is_safe_component(name) {
+                report.collisions.push(Collision {
+                    path: String::from_utf8_lossy(name).into_owned(),
+                    collided_with: String::new(),
+                    reason: "refused: not a single path component (a corrupt or \
+                             hostile repository cannot escape the destination)"
+                        .to_string(),
+                });
+                continue;
+            }
+
             // Windows names are UTF-16, so a byte sequence that is not valid
             // UTF-8 has no faithful representation there. Reported rather than
             // approximated: a silently renamed file is a lost file.
@@ -428,33 +446,33 @@ impl Repo {
             };
             let path = dest.join(&name_os);
 
-            // If the target already exists but this checkout has not written
-            // that exact name, the filesystem has folded two distinct names
-            // into one. Writing anyway would destroy the sibling we already
-            // placed.
-            if !placed.contains(name) && fs::symlink_metadata(&path).is_ok() {
-                let sibling = placed
-                    .iter()
-                    .find(|prior| folds_together(prior, name))
-                    .map(|p| String::from_utf8_lossy(p).into_owned())
-                    .unwrap_or_else(|| "an earlier entry".to_string());
-                report.collisions.push(Collision {
-                    path: String::from_utf8_lossy(name).into_owned(),
-                    collided_with: sibling,
-                    reason: "this filesystem does not distinguish these names \
-                             (case folding or Unicode normalisation)"
-                        .to_string(),
-                });
-                continue;
+            // A fold collision is specifically: the path already exists AND a
+            // DIFFERENT name we placed in this directory folds together with
+            // this one on this filesystem. A pre-existing but unrelated file is
+            // not that — checkout overwrites it, which is the point of writing
+            // a checkpoint into a directory. The earlier code skipped any
+            // pre-existing path, silently dropping whole subtrees on a
+            // re-checkout or a populated destination.
+            if fs::symlink_metadata(&path).is_ok() {
+                if let Some(sibling) = placed.iter().find(|prior| folds_together(prior, name)) {
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::from_utf8_lossy(sibling).into_owned(),
+                        reason: "this filesystem does not distinguish these names \
+                                 (case folding or Unicode normalisation)"
+                            .to_string(),
+                    });
+                    continue;
+                }
             }
             placed.push(name.clone());
             match node {
                 Node::Directory { tree } => {
                     fs::create_dir_all(&path)?;
-                    written += self.restore_tree(tree, &path, report)?;
+                    self.restore_tree(tree, &path, report)?;
                 }
                 Node::Symlink { target } => {
-                    if path.exists() || fs::symlink_metadata(&path).is_ok() {
+                    if fs::symlink_metadata(&path).is_ok() {
                         fs::remove_file(&path).ok();
                     }
                     let Some(target_os) = platform::os_string_from_bytes(target) else {
@@ -470,7 +488,7 @@ impl Repo {
                         continue;
                     };
                     platform::symlink(Path::new(&target_os), &path)?;
-                    written += 1;
+                    report.entries_written += 1;
                 }
                 Node::File { chunks, size, mode } => {
                     let mut content = Vec::with_capacity(*size as usize);
@@ -508,11 +526,11 @@ impl Repo {
                             ),
                         });
                     }
-                    written += 1;
+                    report.entries_written += 1;
                 }
             }
         }
-        Ok(written)
+        Ok(())
     }
 
     // -------------------------------------------------------------- verify
@@ -682,6 +700,30 @@ pub struct Status {
     pub packs: u64,
 }
 
+/// Is this tree entry name a single, safe path component?
+///
+/// Names come from `snapshot_dir`, which reads one `file_name()` per entry, so
+/// a legitimate name is never `..`, `.`, empty, or separator-bearing. Any of
+/// those reaching `restore_tree` means the tree is corrupt or hostile, and
+/// joining it onto the destination would escape that directory — a checkout
+/// writing to an arbitrary path. This is the guard that makes checking out an
+/// untrusted repository safe.
+fn is_safe_component(name: &[u8]) -> bool {
+    if name.is_empty() || name == b".." || name == b"." {
+        return false;
+    }
+    // '/' and NUL separate or terminate a path on every platform Lattice runs
+    // on; '\\' does so on Windows but is a legal byte in a Unix filename, so it
+    // is only rejected where it is actually a separator.
+    if name.iter().any(|&b| b == b'/' || b == 0) {
+        return false;
+    }
+    if cfg!(windows) && name.contains(&b'\\') {
+        return false;
+    }
+    true
+}
+
 /// Would these two names be the same file on a folding filesystem?
 ///
 /// ASCII case folding plus a coarse NFC/NFD equivalence. Deliberately
@@ -847,6 +889,95 @@ mod tests {
             full.errors
         );
         let _ = dir;
+    }
+
+    #[test]
+    fn unsafe_component_names_are_rejected() {
+        assert!(!is_safe_component(b""));
+        assert!(!is_safe_component(b".."));
+        assert!(!is_safe_component(b"."));
+        assert!(!is_safe_component(b"a/b"));
+        assert!(!is_safe_component(&[b'a', 0, b'b']));
+        assert!(is_safe_component(b"normal.txt"));
+        assert!(is_safe_component("café".as_bytes()));
+    }
+
+    #[test]
+    fn checkout_refuses_to_escape_the_destination() {
+        let (dir, mut repo) = repo();
+        // A tree whose entry name is "..", pointing at a file — the shape a
+        // hostile or corrupt repository would use to write outside dest.
+        let mut packer = PackWriter::new();
+        let node = tree::file_node(b"pwned", 0o644, &mut packer);
+        let mut t = Tree::new();
+        t.entries.insert(b"..".to_vec(), node);
+        let tree_id = t.write(&mut packer).unwrap();
+        repo.store.write_pack(packer).unwrap();
+
+        let out = dir.path().join("dest");
+        fs::create_dir_all(&out).unwrap();
+        let mut report = CheckoutReport {
+            entries_written: 0,
+            collisions: Vec::new(),
+        };
+        repo.restore_tree(&tree_id, &out, &mut report).unwrap();
+
+        assert!(
+            !out.parent().unwrap().join("pwned").exists(),
+            "checkout must not write outside the destination directory"
+        );
+        assert_eq!(report.entries_written, 0);
+        assert!(report.collisions.iter().any(|c| c.path == ".."));
+    }
+
+    #[test]
+    fn checkout_into_a_populated_directory_overwrites_rather_than_skipping() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"one").unwrap();
+        fs::write(dir.path().join("b.txt"), b"two").unwrap();
+        let cp = repo.save("two files").unwrap();
+
+        let out = dir.path().join("dest");
+        fs::create_dir_all(&out).unwrap();
+        // A pre-existing unrelated file, and a stale copy of one of ours.
+        fs::write(out.join("pre-existing.txt"), b"keep").unwrap();
+        fs::write(out.join("a.txt"), b"STALE").unwrap();
+
+        let report = repo.checkout(&cp.id, &out).unwrap();
+        assert_eq!(
+            report.entries_written, 2,
+            "both checkpoint files must be written, not skipped as collisions"
+        );
+        assert!(
+            report.collisions.is_empty(),
+            "a pre-existing unrelated file is not a fold collision: {:?}",
+            report.collisions
+        );
+        assert_eq!(
+            fs::read(out.join("a.txt")).unwrap(),
+            b"one",
+            "a stale file is overwritten with checkpoint content"
+        );
+        assert_eq!(
+            fs::read(out.join("pre-existing.txt")).unwrap(),
+            b"keep",
+            "an unrelated file is left alone"
+        );
+    }
+
+    #[test]
+    fn a_nested_dot_lattice_directory_is_captured() {
+        let (dir, mut repo) = repo();
+        fs::create_dir_all(dir.path().join("sub/.lattice")).unwrap();
+        fs::write(dir.path().join("sub/.lattice/config"), b"nested").unwrap();
+        let cp = repo.save("nested dot-lattice").unwrap();
+        let out = dir.path().join("dest");
+        repo.checkout(&cp.id, &out).unwrap();
+        assert_eq!(
+            fs::read(out.join("sub/.lattice/config")).unwrap(),
+            b"nested",
+            "a .lattice directory nested below the root must round-trip"
+        );
     }
 
     #[test]
