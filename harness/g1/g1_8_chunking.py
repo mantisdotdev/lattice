@@ -95,7 +95,12 @@ def make_file(kind: str, size: int, rng: random.Random) -> bytes:
     raise ValueError(kind)
 
 
-KERNEL = REPO / "prototypes" / "chunkbench" / "target" / "release" / "g1_8"
+# Declared as literal paths so the freeze closure can see them. Built from
+# path segments they were invisible to it, leaving the binary this gate
+# actually executes -- and the source it is built from -- unpinned.
+KERNEL_REL = "prototypes/chunkbench/target/release/g1_8"
+KERNEL_SRC_REL = "prototypes/chunkbench/src/bin/g1_8.rs"
+KERNEL = REPO / KERNEL_REL
 
 
 def run_design_kernel() -> dict:

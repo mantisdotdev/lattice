@@ -107,7 +107,16 @@ class Gate:
         FAIL(stale). A freeze that covers one file of four is not a freeze.
 
         Closure = the entry script, plus every harness/lib module it imports
-        (transitively), plus any harness/lib/** file it names as a string.
+        (transitively), plus any harness/lib/** or prototypes/** file it names
+        as a string, plus the COMPILED ARTIFACTS those sources build into.
+
+        Hashing sources alone left the real instrument unpinned: G1.1 executes
+        libiofault.dylib and G1.8 executes the chunkbench g1_8 binary, and
+        either could be replaced without touching a byte of frozen source. A
+        rebuild therefore requires an explicit `gauntlet freeze --refreeze`,
+        which is the strict reading of §0.3 -- a different binary is a
+        different measurement instrument unless the build is reproducible, and
+        ours is not guaranteed to be.
         """
         seen: set[Path] = set()
         pending = [self.harness_path]
@@ -129,8 +138,8 @@ class Gate:
                 cand = lib / (module.replace(".", "/") + ".py")
                 if cand.exists():
                     pending.append(cand)
-            for ref in re.findall(r"harness/lib/[\w./-]+", text):
-                cand = REPO / ref
+            for ref in re.findall(r"(?:harness/lib|prototypes)/[\w./-]+", text):
+                cand = REPO / ref.rstrip("/.")
                 if cand.exists() and cand.is_file():
                     pending.append(cand)
                 elif cand.is_dir():
@@ -141,6 +150,9 @@ class Gate:
                         c for c in cand.iterdir() if c.is_file()
                         and (c.suffix in (".py", ".c", ".h")
                              or c.name in ("Makefile", "makefile")))
+                    # Compiled artifacts alongside the sources.
+                    pending.extend(c for c in cand.iterdir() if c.is_file()
+                                   and c.suffix in (".dylib", ".so"))
         return sorted(seen)
 
     @property

@@ -294,6 +294,13 @@ def powerloss_trial(work: Path, rng: random.Random, trial: int,
     shutil.rmtree(snapshot, ignore_errors=True)
     shutil.copytree(repo / ".lattice", snapshot, symlinks=True)
 
+    # Reset the journal so it holds ONLY the operation under test. Until now it
+    # also contained `init` and the baseline `save`, and replay.py picks its
+    # crash point from every record it is given -- so a cut could land entirely
+    # inside the setup and the trial would replay only records the snapshot
+    # already contains, testing nothing while reporting a clean survival.
+    journal.unlink(missing_ok=True)
+
     (repo / f"edit-{trial}.bin").write_bytes(
         seeded_bytes(rng, rng.randrange(1024, 1 << 20)))
     argv = rng.choice(OPERATION_POOL)
