@@ -81,35 +81,77 @@ we did not prove. We accept this because the alternative trades a testable
 weakness for an adoption risk the prior art has already demonstrated twice.
 
 **Consequence for measurement.** G4.4's denominator is now known: the measured
-line-based conflict rate on the G0.3 corpus is **5.66%** (CI95 5.30–6.04%, n =
-14,981). "Auto-resolve ≥20% of line-level conflicts" therefore means resolving
-roughly 1.1% of all merges — a modest absolute number, which is worth stating
-plainly so nobody mistakes G4.4 for a claim that structural merge transforms
-everyday merging.
+line-based conflict rate on the G0.3 corpus is **8.67%** (CI95 8.24–9.11%, n =
+15,983). "Auto-resolve ≥20% of line-level conflicts" therefore means resolving
+roughly 1.7% of all merges — a modest absolute number, worth stating plainly so
+nobody mistakes G4.4 for a claim that structural merge transforms everyday
+merging.
+
+**Consequence for the semantic layer's launch languages.** The conflict rate is
+not uniform, and the spread is large enough to drive §5.2's language selection:
+
+| Language | n | line conflict rate |
+|---|---:|---:|
+| JavaScript | 255 | 41.96% |
+| Java | 1,212 | 19.47% |
+| TypeScript | 1,926 | 15.89% |
+| PHP | 915 | 14.32% |
+| C | 1,830 | 8.91% |
+| Go | 3,094 | 7.56% |
+| Rust | 1,041 | 3.94% |
+| Ruby | 961 | 3.54% |
+| Python | 4,088 | 2.69% |
+| *Binary* (opencv/opencv_extra) | 671 | 3.43% |
+
+The last row is not a programming language: `opencv/opencv_extra` is the
+binary-heavy media corpus, labelled `Binary` in the manifest. It is listed so the
+counts reconcile — the nine language rows sum to 15,322 and the corpus replayed
+15,993, the difference being exactly these 671. The semantic layer will never
+parse this material, so it is excluded from launch-language reasoning but not
+from the totals.
+
+Structural merge can only help where line merge conflicts, so its value is
+concentrated in Java, TypeScript, PHP and JavaScript — and is nearly irrelevant
+in Python, which has the largest sample and the lowest conflict rate. The
+JavaScript figure rests on only 255 replayed merges and should not be leaned on.
+This argues for prioritising TypeScript/JavaScript and Java in the launch
+language set, and against treating Python's popularity as a reason to lead with
+it. Recorded here because §5.2 says to confirm the launch languages "by data",
+and this is the data.
 
 ## Evidence
 
-**Measured, this repository.** `corpus/data/merge-baselines.json` — 128,544
-two-parent merges mined from 14 repositories across 8 languages; 14,990 replayed
+**Measured, this repository.** Harness output:
+`corpus/data/merge-baselines.json` (raw), produced by
+`scripts/corpus/replay_merges.py`; gate result in `bench/results/` for the
+iteration in which G0.3 was measured. Reproduce with:
+
+```bash
+python3 scripts/corpus/mine_merges.py && python3 scripts/corpus/replay_merges.py
+python3 harness/g0/g0_3_merge_corpus.py
+```
+
+`corpus/data/merge-baselines.json` — 284,316
+two-parent merges mined from 24 repositories across 10 languages; 15,993 replayed
 under the frozen oracle (`corpus/manifests/g0-3-oracle.md`, sha256
 `61f114e9…`), seed 20260903:
 
 | Bucket | Count | Share |
 |---|---:|---:|
-| `CLEAN_MATCH` | 14,056 | 93.77% |
-| `REPLAY_CONFLICT` | 848 | 5.66% |
-| `EXCLUDED_EVIL` | 55 | 0.37% |
-| `CLEAN_DIVERGE` | 21 | 0.14% |
-| `CLEAN_DIVERGE_NORMALIZED` | 1 | 0.01% |
-| `ERROR` | 9 | 0.06% |
+| `CLEAN_MATCH` | 14,496 | 90.64% |
+| `REPLAY_CONFLICT` | 1,385 | 8.66% |
+| `EXCLUDED_EVIL` | 57 | 0.36% |
+| `CLEAN_DIVERGE` | 43 | 0.27% |
+| `ERROR` | 10 | 0.06% |
+| `CLEAN_DIVERGE_NORMALIZED` | 2 | 0.01% |
 
-Two facts from this table drove the decision. First, **93.77% of real merges
+Two facts from this table drove the decision. First, **90.64% of real merges
 replay to a byte-identical tree under plain line-based three-way merge.** The
-population where any merge algebra could differ is small, which caps the value of
-a more powerful merge model and argues against paying a structural cost for it.
-Second, the conflict rate varies by language from 0.93% (Go) to 25.18% (Rust,
-n=139) — so a merge model must degrade well across languages rather than be tuned
-for one.
+population where any merge algebra could differ is under a tenth of all merges,
+which caps the value of a more powerful merge model and argues against paying a
+structural cost for it. Second, the conflict rate varies by language across an
+order of magnitude (Python 2.69% to Java 19.47% at usable sample sizes), so a
+merge model must degrade well across languages rather than be tuned for one.
 
 **Literature.** Pijul's design rationale and its pushout formulation:
 <https://pijul.org/manual/theory.html>. Darcs's exponential-merge history and the

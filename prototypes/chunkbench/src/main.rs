@@ -74,6 +74,12 @@ struct SweepRow {
     /// its advantage, and is the strategy Challenge 9's bet named.
     pack_long_bytes: u64,
     pack_long_total_store_bytes: u64,
+    /// Segmented packs: the pack is compressed in bounded independent frames,
+    /// so a random chunk read decompresses at most one segment instead of the
+    /// whole pack. This is the size/random-access trade-off, measured.
+    seg_1mib_total_bytes: u64,
+    seg_4mib_total_bytes: u64,
+    seg_16mib_total_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -249,6 +255,22 @@ fn sweep_one(files: &[Vec<u8>], p: Params, level: i32, wholefile: u64) -> SweepR
         enc.write_all(&pack).ok();
         enc.finish().map(|v| v.len() as u64).unwrap_or(pack.len() as u64)
     };
+
+    // Independently-decompressible segments: the price of random access.
+    let segment_bytes = |seg: usize| -> u64 {
+        pack.chunks(seg)
+            .map(|s| {
+                let mut enc = zstd::Encoder::new(Vec::new(), level).unwrap();
+                enc.long_distance_matching(true).ok();
+                enc.window_log(27).ok();
+                enc.write_all(s).ok();
+                enc.finish().map(|v| v.len() as u64).unwrap_or(s.len() as u64)
+            })
+            .sum()
+    };
+    let seg_1 = segment_bytes(1 << 20);
+    let seg_4 = segment_bytes(4 << 20);
+    let seg_16 = segment_bytes(16 << 20);
     drop(pack);
 
     // Edit locality on the largest file available.
@@ -272,6 +294,9 @@ fn sweep_one(files: &[Vec<u8>], p: Params, level: i32, wholefile: u64) -> SweepR
         edit_locality_p95_bytes: p95(locality),
         pack_long_bytes,
         pack_long_total_store_bytes: pack_long_bytes + index_bytes,
+        seg_1mib_total_bytes: seg_1 + index_bytes,
+        seg_4mib_total_bytes: seg_4 + index_bytes,
+        seg_16mib_total_bytes: seg_16 + index_bytes,
     }
 }
 

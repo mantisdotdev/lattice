@@ -1,0 +1,36 @@
+{
+  "iteration": 3,
+  "timestamp": "2026-09-03T04:47:45Z",
+  "stages_measured": [
+    "G0"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "G0.4 is FAIL"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G0": "BLOCKED"
+  },
+  "results": [
+    {
+      "gate": "G0.4",
+      "stage": "G0",
+      "title": "Refactoring corpus",
+      "metric": "ground-truthed rename/move instances (\u226510 repos, \u22653 languages)",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 1000.0,
+      "cmp": ">=",
+      "unit": "instances",
+      "value": 0.0,
+      "status": "FAIL",
+      "note": "corpus/data/refactorings.jsonl not built",
+      "evidence": [],
+      "detail": {},
+      "duration_s": 0.069
+    }
+  ]
+}

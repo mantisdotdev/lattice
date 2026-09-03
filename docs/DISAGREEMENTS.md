@@ -188,6 +188,34 @@ entities. The vocabulary lint's noun list is therefore exactly the seven, and th
 lint is enforced against help text, docs, and every error string — including the
 ones this resolution creates.
 
+### Amendment, after independent review
+
+An independent review of the brief raised the same defect and counted **two
+further nouns I had missed**, which this resolution now covers. It proposed
+raising the cap to about ten; I am keeping seven, and the reasoning for each of
+the two is different rather than uniform, so both are stated:
+
+- **`version`** (§4.2: a change "has versions"). This one is genuinely
+  user-facing — amend a change and you need to refer to what it was before.
+  It is resolved not as an eighth noun but as **an ordinal on an existing one**:
+  the surface says *"change `qpvz`, third version"*, the way one says "line 12"
+  without `line-number` being a concept. `ltx log --forensic` shows a change's
+  versions as rows under it. The user learns nothing new; they read an index.
+- **`retraction`** (§5.6). Here the review is right that a noun exists, and
+  wrong that it is user-facing on the normal path. `ltx retract` is a **verb**,
+  and the retraction *record* is an op-log entry — plumbing, reachable at
+  `ltx internals`. The one place it must surface is Challenge 8's
+  `remote_effects_not_undone`, which names the *command* to run, not the record
+  it creates. A user is told "run `ltx retract`", never "inspect the retraction".
+
+The cap stays at seven because raising it is the wrong direction of travel for a
+CONSTRAINT whose entire purpose is resisting exactly this pressure — every
+individual noun looks necessary at the moment it is added. If a later noun
+genuinely cannot be folded in, that is an ADR-11 re-scope with the stakeholder,
+not a quiet increment. What makes seven defensible rather than stubborn is that
+G2.3 is HARD and machine-checked: if this resolution is wrong, the vocabulary
+lint fails on Lattice's own help text and says so.
+
 ---
 
 ## Challenge 4 — `ltx verify` is undefined on a partial clone, which is the v1 default
@@ -507,6 +535,280 @@ the final report.
 
 ---
 
+---
+
+## Challenges 11–16 — from an independent spec review
+
+The six challenges below were **not found by me**. The stakeholder commissioned
+an independent review of the original brief and supplied its findings; these are
+the ones that survived checking, restated in this memo's format so they carry the
+same obligations as the rest. Provenance is recorded because a memo that quietly
+absorbs someone else's findings misrepresents who reviewed what — and because
+§0.9's whole concern is knowing what kind of evidence a finding is.
+
+The same review raised claims I checked and rejected; they are recorded at the
+end of this section with the evidence against them, because a disagreements memo
+that only records agreements is not doing its job either.
+
+---
+
+## Challenge 11 — §0.9 lets a HARD gate be downgraded on the agent's own say-so
+
+**Claim challenged:** §0.9 concludes: "If your environment cannot spawn instances
+whose context you do not share, those gates convert to [S]: deliver the kit."
+§0.5 states "**HARD gates can never be waived.**"
+
+**Evidence:** The conversion clause is an unguarded escape hatch through the
+strongest rule in the protocol. The gates §0.9 governs are G2.1 and **all of
+G6** — including G6.1 (data-loss hunter), G6.2 (security) and G6.4 (the
+spec-compliance audit that is supposed to catch exactly this kind of evasion).
+Every G6 gate except G6.2 is HARD [A].
+
+The trigger is a claim about the environment, made by the party the gates
+exist to audit, requiring no evidence. On that unverified claim, a HARD [A] gate
+becomes [S], and an [S] gate reaches PASS-PENDING-HUMAN on delivery of a kit —
+which §0.1 makes "sufficient for stage CLEAR and for both delivery states." So a
+run could reach CHAMPION with every adversarial review unperformed, having
+asserted once that it could not spawn instances. G6.4, the gate that would notice,
+is itself convertible by the same clause.
+
+I want to be clear that this did not arise here: 22 independent instances were
+spawned for G0.1 alone, so the clause never fired. The hole is in the protocol,
+not in this run, and it is worth closing before a later run under different
+conditions finds it.
+
+**Resolution:** ACCEPTED — conversion becomes waiver-equivalent, not assertion-
+equivalent. Three requirements, all mechanically checkable:
+
+1. **A committed incapability reproducer.** A script that demonstrates the
+   spawn failure on the reference environment, committed alongside its output,
+   exactly as §0.1 requires of any other claim ("a claim without harness output
+   attached is a lie").
+2. **An ADR** classifying the conversion, and a **G6.4 ruling** of VALID or
+   INVALID on it — the same adjudication §0.5 waivers receive.
+3. **G6.4 is non-convertible.** The auditor may not convert itself. If G6.4
+   cannot run as [A], the delivery is EXHAUSTED at best, never CHAMPION.
+
+Additionally, a converted HARD gate counts toward **EXHAUSTED only**. This
+repository already implements part of the guard by construction: gate class is
+frozen in `harness/gates.toml`, so converting one requires editing the registry,
+which is a re-scope under §0.4 and needs an ADR. That was accidental rather than
+designed; it is now deliberate, and `harness/lib/validate_registry.py` enforces
+the non-convertibility of G6.4.
+
+---
+
+## Challenge 12 — "every state-changing command is undoable" is false for redaction and thinning, and must be
+
+**Claim challenged:** §4.3, marked CONSTRAINT: "**Universal undo:** every
+state-changing command undoable via `ltx undo`." §2(b) specifies redaction for
+"secrets get committed; GDPR exists." §2(c) specifies policy-driven thinning.
+
+**Evidence:** Challenge 8 addressed `sync`. Two harder cases were missed, and
+they run the opposite way — there the promise was too weak, here it is too
+strong.
+
+**Redaction must not be undoable.** Its entire purpose is destroying content
+that must not exist: a leaked credential, or personal data under a GDPR erasure
+request. A working `ltx undo` immediately after `ltx redact` would resurrect it.
+Worse, it would make the erasure claim false in a legally consequential way — a
+controller who says data was erased, from a system that can un-erase it on one
+command, has not erased it.
+
+**Thinning is not undoable either.** §2(c) defines thinning as deleting ephemeral
+data under policy; the data is gone. The op-log records that it happened, which
+is audit, not reversal.
+
+So the CONSTRAINT as written is not merely hard to implement — it is a promise
+that must be broken for two operations, and G1.3's equality domain quietly
+sidesteps this by excluding ephemeral autosnapshots without ever saying that
+redaction is outside the guarantee.
+
+**Resolution:** ACCEPTED — undo is scoped precisely, and the exclusions are
+enumerated in the gate rather than left implicit.
+
+- `ltx undo` is **local causal undo**: it reverses the local effect of an
+  operation on user-visible state.
+- **Redaction and thinning are explicitly non-undoable**, and both say so at the
+  point of use — `ltx redact` requires confirmation naming the irreversibility,
+  and its own output states that undo will not restore the content.
+- **Undo of a sync** is a compensating retraction, per Challenge 8.
+- **G1.3's harness enumerates the non-undoable set** and asserts that (a) every
+  command outside it is undoable, and (b) every command inside it *refuses*
+  undo with an explanatory error rather than silently doing nothing. A
+  silently-ineffective undo is worse than a refused one.
+
+The list of non-undoable operations is frozen in the harness, so adding a third
+one later is a visible change to a HARD gate rather than a quiet exemption.
+
+---
+
+## Challenge 13 — the operation log grows without bound and nothing in the spec stops it
+
+**Claim challenged:** §5.3 defines the op-log as "append-only, Merkle-linked
+record of every repo-level operation." §2(c) identifies unbounded growth as a
+real problem and answers it with three durability tiers and policy-driven
+thinning.
+
+**Evidence:** §2(c)'s answer covers **snapshots**. It does not cover the op-log.
+Every `ltx` invocation appends; §5.4's continuous auto-snapshotting appends on a
+watcher debounce; and undo appends rather than truncating, since undo is itself
+an operation. On an active repository this is a monotonically growing metadata
+structure with no specified bound, and it is on the read path of `ltx undo` and
+`ltx trace`.
+
+The spec appears to assume compaction exists without specifying it: §6's coverage
+contract requires fault injectors to "demonstrate hits in every declared critical
+section (store write, **compaction**, thinning, merge, sync)." Compaction is
+named as a critical section that must be fault-injected — but no ADR defines it,
+no gate measures the log's size, and §7's ADR list has no entry for it. A
+subsystem exists in the test plan and nowhere else.
+
+**Resolution:** ACCEPTED — a new ADR is required before G1 harness freeze
+(**ADR-13, op-log compaction and retention**), specifying epoch snapshots plus
+archive packs: the live log holds operations since the last epoch; older segments
+compact into an archive pack that preserves the Merkle chain and remains
+verifiable; **redaction tombstones are never compacted**, since their audit value
+is precisely their permanence.
+
+A corresponding gate is added: **live op-log size must be bounded** under the
+G2.8 year-long retention traces, measured rather than asserted. G2.8 already
+simulates a year of usage and already checks that no checkpointed data is
+collected; extending it to assert a bound on log growth costs one more assertion
+over a trace that is already being generated.
+
+---
+
+## Challenge 14 — §0.5's plateau formula grants a waiver to a gate that is actively getting worse
+
+**Claim challenged:** §0.5, plateau condition 3: "improvement over the last 3
+iterations — the fraction of the remaining gap closed,
+max(0, (|v_{i−3} − target| − |v_i − target|) / |v_{i−3} − target|) — is < **2%**."
+
+**Evidence:** Work the arithmetic for a gate that is regressing. If `v_i` is
+further from target than `v_{i−3}`, the numerator is negative, `max(0, ·)`
+clamps it to 0, and 0 < 2% — so the plateau condition is **satisfied**. A gate
+moving steadily in the wrong direction qualifies for a waiver on exactly the same
+footing as one that has genuinely converged.
+
+The `max(0, ·)` was presumably meant to stop a negative improvement from reading
+as an improvement. Its actual effect is to make regression and convergence
+indistinguishable at the point where the protocol decides whether to stop trying.
+This is the one place in an otherwise well-designed protocol where the honest
+outcome and the convenient outcome are scored identically, which is precisely
+where a gaming pressure would concentrate.
+
+**Resolution:** ACCEPTED — an anti-stall rule, enforced in
+`harness/lib/gauntlet.py`'s `validate_waiver`:
+
+- The waiver is **invalid if `v_i` is worse than `v_{i−3}`** by more than
+  measurement noise. A regressing gate has not plateaued; it has broken, and the
+  response is diagnosis, not a waiver.
+- Each of the ≥5 targeted iterations must **link a committed change** (a code or
+  configuration commit) and name the gate it targeted. Iterations that changed
+  nothing do not count toward the threshold, which closes the variant where five
+  re-measurements of an unchanged system satisfy the protocol.
+- The **direction of travel is reported in the waiver** alongside the achieved
+  value, so a reader sees whether the gate was converging or drifting.
+
+---
+
+## Challenge 15 — "deleting every lens loses zero information" is not true as stated
+
+**Claim challenged:** §5.3, marked CONSTRAINT: "lenses are read-path only;
+deleting every lens loses zero information." §5.3 also describes lenses as
+"named, versioned, shareable **data** — declarative rules."
+
+**Evidence:** The two sentences contradict each other. If a lens is data that a
+user authors, names, versions and shares, then deleting it destroys that data.
+What survives is the *history*; what is lost is the user's curation of it — which
+may represent real effort and, for a shared `releases` lens, a team-wide
+convention.
+
+This matters more than a wording quibble because G2.7 is a HARD gate that
+property-tests the claim over ≥10,000 generated cases. A harness written against
+the literal sentence would have to assert that deleting a lens loses nothing,
+which is false, so the harness would either be wrong or would quietly test
+something narrower than the sentence says.
+
+**Resolution:** ACCEPTED — the constraint is restated to say what it actually
+guarantees, which is the property that matters: **deleting every lens loses zero
+information about the recorded history; the raw graph is unchanged and every
+lensed view is reconstructible from it.** Lens definitions are themselves user
+data, are stored durably, participate in sync, and are recoverable by `ltx undo`
+like any other user-authored object.
+
+G2.7's harness tests the restated property in two parts: that the raw graph is
+byte-identical before and after lens deletion, and that any lensed view
+reconstructs bit-identically from the raw graph plus the lens definition. That is
+strictly more than the original sentence asked for, since it also pins the
+reconstruction.
+
+---
+
+## Challenge 16 — no gate checks that Lattice may legally ship
+
+**Claim challenged:** §8: "Apache-2.0 (check tree-sitter grammar licenses)."
+§5.1 names RocksDB as a store-backend candidate; §5.2 requires 5–8 tree-sitter
+grammars; §8 permits gitoxide as a component.
+
+**Evidence:** §8 recognises the risk — it explicitly flags grammar licences — and
+then leaves it as a parenthetical with no gate behind it. The exposure is
+concrete: tree-sitter grammars are individually licensed and several widely-used
+ones are not permissive; RocksDB is dual-licensed GPLv2/Apache-2.0; libgit2 is
+GPLv2-with-linking-exception, which is why `docs/prior-art/rust-git-implementations.md`
+was briefed to address the licence question as a hard constraint.
+
+Every other project-level obligation in this brief has a gate. This one has a
+parenthesis. A licence violation discovered after launch is not a bug that can be
+fixed by a patch release — it can require removing a language, or a backend, from
+a shipped product.
+
+**Resolution:** ACCEPTED — a **licence-compatibility gate** is added to the
+registry as HARD [A], measured by `cargo-deny` plus an SBOM over the full
+dependency tree including tree-sitter grammars, with an allowlist of licences
+compatible with Apache-2.0 distribution. Value = count of dependencies outside
+the allowlist; target 0.
+
+This is a gate the brief does not contain, so adding it is a scope *addition*
+rather than a re-scope, which §0.4 does not forbid — it forbids re-scoping
+downward. It is recorded in `STAKEHOLDER/001` as an addition for the
+stakeholder's awareness, since adding gates on my own authority is a liberty and
+should be visible as one.
+
+---
+
+## Rejected claims from the same review, with evidence
+
+Three findings from the independent review did not survive checking. They are
+recorded here rather than dropped, because a review's misses are as much part of
+the audit trail as its hits.
+
+**"G1.9's `git gc --aggressive` baseline is a strawman."** Rejected, with
+measurement. On 400 commits of `django/django` (146,344 unique blobs, 2,924 MiB
+of raw content) an aggressive repack produced **108.5 MiB — a 26.9× compression
+ratio** — and beat naive content-defined chunking by **2.83×**. It is the hardest
+baseline in the brief, not a soft one; see `docs/adr/adr-2-chunk-parameters.md`
+and `bench/results/raw/adr2-git-baseline-django.json`. The claim is the opposite
+of what the data shows.
+
+**"The *perf* markers are never placed (§0.5 → §6)."** Rejected. §6 places them
+explicitly: "Perf gates … G1.5–G1.9, G4.6, G5.4, G5.8; of these, G1.5–G1.7, G4.6,
+and G5.4 are timing gates for §0.4's tolerances."
+`harness/lib/validate_registry.py` asserts the registry's perf and timing sets
+match those lists exactly, and CI fails if they diverge.
+
+**"G4.1's ≥99% entity-match precision is unpassable and mandates failure
+analysis."** Rejected as stated. §5.2 mandates the escape that makes it
+reachable: "below-threshold confidence ⇒ record 'new entity', never guess."
+Precision is therefore tunable against recall by construction — a matcher can
+always raise precision by declining more matches — and recall is the SOFT gate at
+75%. The real risk is that G4.2's recall target becomes unreachable while G4.1
+holds, which is a different finding with a different remedy, and it is why G4.2
+requires the full precision/recall operating curve in the scorecard so
+threshold-cranking is visible.
+
+
 ## Summary
 
 | # | Challenge | Resolution | Changes |
@@ -521,10 +823,25 @@ the final report.
 | 8 | Undo of `sync` does not mean what users will assume | ACCEPTED | product (`remote_effects_not_undone`) |
 | 9 | G1.9(b)'s 1.5× text bar fights the all-CDC constraint | ACCEPTED-AS-BET | falsifiable at 1.5×; expect 1.15–1.45× |
 | 10 | §0.9 instances share the builder's blind spots | ACCEPTED-AS-BET | falsifiable via G6.2 external review |
+| 11 | §0.9 lets a HARD gate be downgraded on bare assertion | ACCEPTED | protocol (conversion becomes waiver-equivalent; G6.4 non-convertible) |
+| 12 | Undo cannot cover redaction or thinning, and must not | ACCEPTED | product (undo scoped; non-undoable set frozen in G1.3) |
+| 13 | The op-log grows without bound; compaction is untested and unspecified | ACCEPTED | new ADR-13 + a log-size bound measured by G2.8 |
+| 14 | §0.5's plateau formula grants waivers to regressing gates | ACCEPTED | protocol (anti-stall rule enforced in the runner) |
+| 15 | "Deleting every lens loses zero information" is false as stated | ACCEPTED | restated; G2.7 tests strictly more |
+| 16 | No gate checks that Lattice may legally ship | ACCEPTED | new HARD licence-compatibility gate |
 
-Seven challenges change what is built or how it is measured. Three of the
-measurement changes make a gate **stricter** than the spec's literal text
-(Challenges 1, 5, 7); none makes any gate looser, which §0.4 would forbid for
-HARD gates in any case.
+Thirteen challenges change what is built, how it is measured, or how the protocol
+governs itself. The measurement changes make gates **stricter** than the spec's
+literal text (Challenges 1, 5, 7, 11, 12, 14, 15); none makes any gate looser,
+which §0.4 would forbid for HARD gates in any case. Two new gates are added
+(Challenges 13 and 16), which is a scope addition rather than a re-scope.
 
 Two are bets I may lose, and both say in advance what losing looks like.
+
+Challenges 1–10 are mine. Challenges 11–16 came from an independent review the
+stakeholder commissioned; three further claims from that review were checked and
+rejected, with the evidence recorded above. **Of the ten findings that review
+raised, five had already been found independently in Challenges 1–8** — the noun
+cap (3), undo-vs-sync (8), the G4.3 dual-AND (1, 2), redaction under sync (4, 6,
+7), and the daemon question (5) — which is a reasonable calibration signal for
+both reviews.

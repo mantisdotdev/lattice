@@ -1,0 +1,18 @@
+{
+  "frozen_at": "2026-09-03T04:31:32Z",
+  "note": "\u00a70.9 requires templates be frozen before the consuming stage begins. Templates absent here are not yet written; a consuming harness must treat an absent entry as 'not frozen', never as 'unchanged'.",
+  "templates": {
+    "eval/personas/git-power-user.md": {
+      "bytes": 2385,
+      "sha256": "bde77aff1e193024221b0de4ff925f6542f1c8bf833809b015c0b5668bd3a5ab"
+    },
+    "eval/personas/novice-developer.md": {
+      "bytes": 3161,
+      "sha256": "5995d00772124ecd3b91ccb1fe1f15410ba9d7c12504c8ec1640cfb295896051"
+    },
+    "eval/reviewers/data-loss-hunter.md": {
+      "bytes": 3720,
+      "sha256": "3dc1f7e4b6f1ccda7727238c8a030066ba90475dbd397e31b7272fd3775ea95a"
+    }
+  }
+}

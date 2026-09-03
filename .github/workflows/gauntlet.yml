@@ -34,7 +34,14 @@ jobs:
         run: python3 harness/lib/check_scorecard_integrity.py
 
   measure:
-    name: measure available gates
+    # CI measures ONLY the gates whose inputs live in the repository. The
+    # corpus-dependent gates (G0.3, G0.4, G0.5, G0.7) read multi-gigabyte
+    # corpora that are deliberately not committed, so measuring them here would
+    # report a FAIL that means "the corpus is not in this checkout" rather than
+    # "the gate does not hold". The scorecard of record is produced on the
+    # reference environment in bench/ENVIRONMENT.md; this job is a smoke test
+    # that the harnesses still run.
+    name: measure repo-only gates (smoke test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -43,12 +50,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - name: Measure (fast gates only in CI)
+      - name: Measure gates whose inputs are committed
         env:
-          GAUNTLET_FAST: '1'
           GAUNTLET_HARNESS_TIMEOUT: '900'
         run: |
-          python3 scripts/gauntlet measure --no-ratchet-update || true
+          python3 scripts/gauntlet measure G0.1 G0.2 G0.6 G0.8 --no-ratchet-update
           python3 scripts/gauntlet scorecard
       - uses: actions/upload-artifact@v4
         with:

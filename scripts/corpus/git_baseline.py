@@ -82,11 +82,17 @@ def main() -> int:
             ["git", "-C", str(gitside), "cat-file", "--batch-check"],
             input="\n".join(o for o, _ in blobs), capture_output=True, text=True,
             errors="replace", timeout=1800)
+        oid_path = {}
+        for oid, path in blobs:
+            oid_path.setdefault(oid, path)
         blob_oids = []
         for line in check.stdout.splitlines():
             p = line.split()
             if len(p) >= 3 and p[1] == "blob":
                 blob_oids.append((p[0], int(p[2])))
+        # Sort by the path the blob appeared at, then by size — the same
+        # locality heuristic git's pack writer uses.
+        blob_oids.sort(key=lambda t: (oid_path.get(t[0], ""), t[1]))
 
         extract = work / "blobs"
         extract.mkdir()
@@ -102,24 +108,37 @@ def main() -> int:
         import threading
 
         def feed():
-            for oid, _ in wanted:
-                proc.stdin.write((oid + "\n").encode())
-            proc.stdin.close()
+            try:
+                for oid, _ in wanted:
+                    proc.stdin.write((oid + "\n").encode())
+                proc.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass  # reader stopped early; nothing left to feed
         t = threading.Thread(target=feed, daemon=True)
         t.start()
 
         for oid, _sz in wanted:
             header = proc.stdout.readline().decode(errors="replace").split()
-            if len(header) < 3:
+            if not header:
                 break
+            if len(header) < 3:
+                continue  # "<oid> missing" — skip, keep reading the stream
             size = int(header[2])
             data = proc.stdout.read(size)
             proc.stdout.read(1)  # trailing newline
-            d = extract / oid[:2]
+            # Directory per source path so a walk visits every version of one
+            # file consecutively.
+            safe = "".join(c if c.isalnum() or c in "._-" else "_"
+                           for c in oid_path.get(oid, "unknown"))[-120:]
+            d = extract / (safe or "unknown")
             d.mkdir(exist_ok=True)
             (d / oid).write_bytes(data)
             total_raw += len(data)
-        proc.wait(timeout=60)
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, ValueError):
+            pass
+        proc.wait(timeout=120)
 
         # (4) chunk side.
         cb = run(str(CHUNKBENCH), str(extract), "--max-bytes", str(64 << 30),
@@ -139,6 +158,12 @@ def main() -> int:
                 "pack_long_store_bytes": r.get("pack_long_total_store_bytes"),
                 "pack_long_ratio_vs_git": round(
                     r.get("pack_long_total_store_bytes", 0) / max(git_bytes, 1), 4),
+                "seg_1mib_ratio_vs_git": round(
+                    r.get("seg_1mib_total_bytes", 0) / max(git_bytes, 1), 4),
+                "seg_4mib_ratio_vs_git": round(
+                    r.get("seg_4mib_total_bytes", 0) / max(git_bytes, 1), 4),
+                "seg_16mib_ratio_vs_git": round(
+                    r.get("seg_16mib_total_bytes", 0) / max(git_bytes, 1), 4),
                 "dedup_ratio": r["dedup_ratio"],
                 "chunks_unique": r["chunks_unique"],
             })

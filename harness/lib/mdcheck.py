@@ -14,20 +14,31 @@ CODE_FENCE = re.compile(r"```.*?```", re.S)
 
 
 def sections(text: str) -> dict[str, str]:
-    """Map heading text -> body under it, for headings of any level."""
-    out: dict[str, str] = {}
+    """Map heading text -> the body beneath it, INCLUDING nested subsections.
+
+    A section runs until the next heading of the same or higher level, which is
+    how a reader understands document structure. An earlier version ended a
+    section at the next heading of ANY level, so a `## Question` whose content
+    lives under `### Sub-points` measured as empty -- it reported 0 words for
+    sections containing thousands. That measured heading adjacency, not content,
+    which is a different thing from the criterion the consuming gates state.
+    See docs/adr/adr-12-mdcheck-section-nesting.md.
+    """
     lines = text.splitlines()
-    current, buf = None, []
-    for line in lines:
+    heads: list[tuple[int, str, int]] = []  # (level, title, line index)
+    for i, line in enumerate(lines):
         m = re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
         if m:
-            if current is not None:
-                out[current] = "\n".join(buf)
-            current, buf = m.group(2), []
-        elif current is not None:
-            buf.append(line)
-    if current is not None:
-        out[current] = "\n".join(buf)
+            heads.append((len(m.group(1)), m.group(2), i))
+
+    out: dict[str, str] = {}
+    for idx, (level, title, start) in enumerate(heads):
+        end = len(lines)
+        for later_level, _, later_start in heads[idx + 1:]:
+            if later_level <= level:
+                end = later_start
+                break
+        out[title] = "\n".join(lines[start + 1:end])
     return out
 
 

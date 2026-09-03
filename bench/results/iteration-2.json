@@ -1,0 +1,783 @@
+{
+  "iteration": 2,
+  "timestamp": "2026-09-03T03:55:56Z",
+  "stages_measured": [
+    "G0"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "G0.1 is FAIL",
+    "G0.3 is FAIL",
+    "G0.4 is FAIL",
+    "G0.5 is FAIL",
+    "G0.6 is FAIL"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G0": "BLOCKED"
+  },
+  "results": [
+    {
+      "gate": "G0.1",
+      "stage": "G0",
+      "title": "Prior-art analyses",
+      "metric": "\u00a73 entries with all 3 questions answered, \u2265400 words of substantive analysis each",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 11.0,
+      "cmp": ">=",
+      "unit": "analyses",
+      "value": 0.0,
+      "status": "FAIL",
+      "note": "0/11 \u00a73 entries fully satisfy the structural contract",
+      "evidence": [
+        "docs/prior-art/jujutsu.md",
+        "docs/prior-art/mercurial-evolve.md",
+        "docs/prior-art/pijul-darcs.md",
+        "docs/prior-art/fossil.md",
+        "docs/prior-art/sapling.md",
+        "docs/prior-art/unison.md",
+        "docs/prior-art/structural-diff-merge.md",
+        "docs/prior-art/cdc-storage.md",
+        "docs/prior-art/modern-git.md",
+        "docs/prior-art/centralized-and-data.md",
+        "docs/prior-art/rust-git-implementations.md"
+      ],
+      "detail": {
+        "required_entries": 11,
+        "min_words": 400,
+        "min_section_words": 80,
+        "min_sources": 3,
+        "total_substantive_words": 0,
+        "entries": [
+          {
+            "slug": "jujutsu",
+            "path": "docs/prior-art/jujutsu.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "mercurial-evolve",
+            "path": "docs/prior-art/mercurial-evolve.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "pijul-darcs",
+            "path": "docs/prior-art/pijul-darcs.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "fossil",
+            "path": "docs/prior-art/fossil.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "sapling",
+            "path": "docs/prior-art/sapling.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "unison",
+            "path": "docs/prior-art/unison.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "structural-diff-merge",
+            "path": "docs/prior-art/structural-diff-merge.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "cdc-storage",
+            "path": "docs/prior-art/cdc-storage.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "modern-git",
+            "path": "docs/prior-art/modern-git.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "centralized-and-data",
+            "path": "docs/prior-art/centralized-and-data.md",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "slug": "rust-git-implementations",
+            "path": "docs/prior-art/rust-git-implementations.md",
+            "problems": [
+              "missing"
+            ]
+          }
+        ]
+      },
+      "duration_s": 0.057
+    },
+    {
+      "gate": "G0.2",
+      "stage": "G0",
+      "title": "Disagreements memo",
+      "metric": "substantive challenges to the spec, each resolved with evidence or accepted-as-bet",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 5.0,
+      "cmp": ">=",
+      "unit": "challenges",
+      "value": 10.0,
+      "status": "PASS",
+      "note": "10 structurally complete challenges of 10 present",
+      "evidence": [
+        "docs/DISAGREEMENTS.md"
+      ],
+      "detail": {
+        "min_words_per_challenge": 120,
+        "total_present": 10,
+        "by_resolution": {
+          "ACCEPTED": 8,
+          "REJECTED": 0,
+          "ACCEPTED-AS-BET": 2
+        },
+        "challenges": [
+          {
+            "n": 1,
+            "title": "G4.3 measures silent mis-merges in the one population where they almost cannot occur",
+            "problems": [],
+            "words": 528,
+            "spec_refs": 19,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 2,
+            "title": "The line-based silent-mis-merge baseline that G4.3 compares against is approximately zero by construction",
+            "problems": [],
+            "words": 484,
+            "spec_refs": 10,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 3,
+            "title": "The seven-noun constraint is violated by the spec's own CLI table",
+            "problems": [],
+            "words": 500,
+            "spec_refs": 17,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 4,
+            "title": "`ltx verify` is undefined on a partial clone, which is the v1 default",
+            "problems": [],
+            "words": 341,
+            "spec_refs": 6,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 5,
+            "title": "Every latency gate assumes the daemon, and no gate measures life without it",
+            "problems": [],
+            "words": 368,
+            "spec_refs": 18,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 6,
+            "title": "\"Audit-grade provenance\" is a stronger claim than the threat model can support",
+            "problems": [],
+            "words": 378,
+            "spec_refs": 5,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 7,
+            "title": "Redaction under sync is a censorship and denial-of-service vector, and no gate tests it adversarially",
+            "problems": [],
+            "words": 493,
+            "spec_refs": 11,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 8,
+            "title": "\"Universal undo\" cannot mean what a user will assume it means for `sync`",
+            "problems": [],
+            "words": 407,
+            "spec_refs": 8,
+            "resolution": "ACCEPTED"
+          },
+          {
+            "n": 9,
+            "title": "G1.9(b)'s 1.5\u00d7 bar against `git gc --aggressive` on source text is the likeliest gate to fail, and CDC is the reason",
+            "problems": [],
+            "words": 425,
+            "spec_refs": 10,
+            "resolution": "ACCEPTED-AS-BET"
+          },
+          {
+            "n": 10,
+            "title": "\u00a70.9's \"independent instances\" are not independent in the way the gate needs",
+            "problems": [],
+            "words": 464,
+            "spec_refs": 11,
+            "resolution": "ACCEPTED-AS-BET"
+          }
+        ]
+      },
+      "duration_s": 0.06
+    },
+    {
+      "gate": "G0.3",
+      "stage": "G0",
+      "title": "Merge-replay corpus + oracle",
+      "metric": "real merge commits mined (\u226520 repos, \u22655 languages) with line-baselines measured and oracle hash-pinned",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 10000.0,
+      "cmp": ">=",
+      "unit": "merge commits",
+      "value": 0.0,
+      "status": "FAIL",
+      "note": "14 repos < 20 required",
+      "evidence": [
+        "corpus/data/merges.jsonl",
+        "corpus/manifests/g0-3-oracle.md",
+        "corpus/data/merge-baselines.json"
+      ],
+      "detail": {
+        "mined_merges": 128544,
+        "repos": 14,
+        "repo_list": [
+          "ansible/ansible",
+          "django/django",
+          "git/git",
+          "hashicorp/terraform",
+          "moby/moby",
+          "netty/netty",
+          "numpy/numpy",
+          "pandas-dev/pandas",
+          "redis/redis",
+          "ruby/ruby",
+          "scipy/scipy",
+          "sveltejs/svelte",
+          "symfony/symfony",
+          "tokio-rs/tokio"
+        ],
+        "languages": [
+          "C",
+          "Go",
+          "Java",
+          "PHP",
+          "Python",
+          "Ruby",
+          "Rust",
+          "TypeScript"
+        ],
+        "oracle_sha256": "61f114e952e298e9b942316d3e9f61dc597633f6611c55f1b3d83b5ba60f637c",
+        "baselines": {
+          "naive_line_mismerge_rate_pct": 0.0,
+          "naive_note": "zero by construction: for a clean auto-merge the recorded tree IS the line-merge result (docs/DISAGREEMENTS.md Challenge 2)",
+          "divergence_baseline_pct": 0.1492,
+          "divergence_baseline_ci95": [
+            0.0976,
+            0.2279
+          ],
+          "divergence_n": 14078,
+          "line_conflict_rate_pct": 5.6605,
+          "line_conflict_rate_ci95": [
+            5.3017,
+            6.042
+          ],
+          "line_conflict_n": 14981
+        },
+        "problems": [
+          "14 repos < 20 required"
+        ]
+      },
+      "duration_s": 0.711
+    },
+    {
+      "gate": "G0.4",
+      "stage": "G0",
+      "title": "Refactoring corpus",
+      "metric": "ground-truthed rename/move instances (\u226510 repos, \u22653 languages)",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 1000.0,
+      "cmp": ">=",
+      "unit": "instances",
+      "value": 0.0,
+      "status": "FAIL",
+      "note": "corpus/data/refactorings.jsonl not built",
+      "evidence": [],
+      "detail": {},
+      "duration_s": 0.056
+    },
+    {
+      "gate": "G0.5",
+      "stage": "G0",
+      "title": "Corpora assembly",
+      "metric": "reference repo satisfies frozen corpus-statistics contract + binary corpus \u22655GB (1=all contracts met)",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 1.0,
+      "cmp": ">=",
+      "unit": "contract",
+      "value": 0.0,
+      "status": "FAIL",
+      "note": "reference repo not built (scripts/corpus/build_reference_repo.py); binary corpus not built (scripts/corpus/simulate_binary_history.py)",
+      "evidence": [
+        "corpus/manifests/g0-5-statistics-contract.md"
+      ],
+      "detail": {
+        "contract_sha256": "c0b56b2223bb048c15b82cb2e8bfe9b59e38b9564a9671ebbd33c1a19015c228",
+        "problems": [
+          "reference repo not built (scripts/corpus/build_reference_repo.py)",
+          "binary corpus not built (scripts/corpus/simulate_binary_history.py)"
+        ]
+      },
+      "duration_s": 0.099
+    },
+    {
+      "gate": "G0.6",
+      "stage": "G0",
+      "title": "Foundational ADRs",
+      "metric": "ADR-1..4 + calibration procedure, each with prototype benchmark or cited literature",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 5.0,
+      "cmp": ">=",
+      "unit": "ADRs",
+      "value": 4.0,
+      "status": "FAIL",
+      "note": "4/5 foundational artifacts complete",
+      "evidence": [
+        "docs/adr/adr-1-merge-model.md",
+        "docs/adr/adr-3-store-backend.md",
+        "docs/adr/adr-4-daemon.md"
+      ],
+      "detail": {
+        "required": 5,
+        "artifacts": [
+          {
+            "adr": "ADR-1",
+            "topic": "merge model",
+            "problems": [],
+            "path": "docs/adr/adr-1-merge-model.md",
+            "words": 970,
+            "benchmark_refs": 0,
+            "sources": 4
+          },
+          {
+            "adr": "ADR-2",
+            "topic": "chunk parameters",
+            "problems": [
+              "missing"
+            ]
+          },
+          {
+            "adr": "ADR-3",
+            "topic": "store backend",
+            "problems": [],
+            "path": "docs/adr/adr-3-store-backend.md",
+            "words": 971,
+            "benchmark_refs": 3,
+            "sources": 2
+          },
+          {
+            "adr": "ADR-4",
+            "topic": "daemon",
+            "problems": [],
+            "path": "docs/adr/adr-4-daemon.md",
+            "words": 957,
+            "benchmark_refs": 3,
+            "sources": 2
+          },
+          {
+            "artifact": "calibration procedure",
+            "problems": []
+          }
+        ]
+      },
+      "duration_s": 0.069
+    },
+    {
+      "gate": "G0.7",
+      "stage": "G0",
+      "title": "Provenance demand probe",
+      "metric": "repos probed with pre-registered go/no-go criteria (criteria file hash-pinned BEFORE probe)",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 3.0,
+      "cmp": ">=",
+      "unit": "repos",
+      "value": 4.0,
+      "status": "PASS",
+      "note": "verdict GO: C1=14.43% (\u22655.0), C2=29.84% (\u226520.0), C3=+14.23pp (\u22653.0)",
+      "evidence": [
+        "corpus/data/g0-7-probe.json",
+        "corpus/preregistration/g0-7-provenance-demand.md"
+      ],
+      "detail": {
+        "prereg_sha256": "19762a1907c5b84afb10a347ef2b28e37dba38d353ea2ace1281d77341289a44",
+        "verdict": "GO",
+        "criteria": {
+          "C1": {
+            "metric": "median % commits attributable to a non-human author",
+            "value": 14.435,
+            "threshold": 5.0,
+            "pass": true
+          },
+          "C2": {
+            "metric": "median % commits carrying any ad-hoc provenance convention",
+            "value": 29.837,
+            "threshold": 20.0,
+            "pass": true
+          },
+          "C3": {
+            "metric": "agent-heavy minus contrast, percentage points",
+            "value": 14.232,
+            "threshold": 3.0,
+            "pass": true
+          }
+        },
+        "agent_heavy": [
+          {
+            "repo": "home-assistant/core",
+            "path": "corpus/data/probe-repos/home-assistant__core.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 429,
+              "s1_agent": 19,
+              "s1_ci": 410,
+              "s2": 4267,
+              "s2_agent": 2507,
+              "s3": 4410,
+              "any": 4505,
+              "agent_route": 2666
+            },
+            "per_trailer": {
+              "Co-Authored-By": 4267,
+              "Signed-off-by": 249,
+              "Reviewed-by": 0,
+              "Generated-by": 0,
+              "Assisted-by": 0,
+              "Change-Id": 0,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 13.33,
+            "pct_any_convention": 22.525,
+            "pct_s1_agent": 0.095,
+            "pct_s1_ci": 2.05,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 17.75,
+              "pct_any_convention": 24.7
+            }
+          },
+          {
+            "repo": "microsoft/vscode",
+            "path": "corpus/data/probe-repos/microsoft__vscode.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 1240,
+              "s1_agent": 739,
+              "s1_ci": 501,
+              "s2": 6145,
+              "s2_agent": 5415,
+              "s3": 6153,
+              "any": 6379,
+              "agent_route": 5837
+            },
+            "per_trailer": {
+              "Co-Authored-By": 6145,
+              "Signed-off-by": 292,
+              "Reviewed-by": 0,
+              "Generated-by": 0,
+              "Assisted-by": 0,
+              "Change-Id": 0,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 29.185,
+            "pct_any_convention": 31.895,
+            "pct_s1_agent": 3.695,
+            "pct_s1_ci": 2.505,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 67.4,
+              "pct_any_convention": 70.95
+            }
+          },
+          {
+            "repo": "nodejs/node",
+            "path": "corpus/data/probe-repos/nodejs__node.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 3095,
+              "s1_agent": 1,
+              "s1_ci": 3094,
+              "s2": 398,
+              "s2_agent": 14,
+              "s3": 19989,
+              "any": 19990,
+              "agent_route": 3108
+            },
+            "per_trailer": {
+              "Co-Authored-By": 398,
+              "Signed-off-by": 2744,
+              "Reviewed-by": 19575,
+              "Generated-by": 0,
+              "Assisted-by": 218,
+              "Change-Id": 2,
+              "PR-URL": 19987,
+              "Reviewed-On": 1
+            },
+            "pct_agent_route": 15.54,
+            "pct_any_convention": 99.95,
+            "pct_s1_agent": 0.005,
+            "pct_s1_ci": 15.47,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 21.2,
+              "pct_any_convention": 100.0
+            }
+          },
+          {
+            "repo": "kubernetes/kubernetes",
+            "path": "corpus/data/probe-repos/kubernetes__kubernetes.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 34,
+              "s1_agent": 12,
+              "s1_ci": 22,
+              "s2": 407,
+              "s2_agent": 6,
+              "s3": 5525,
+              "any": 5556,
+              "agent_route": 40
+            },
+            "per_trailer": {
+              "Co-Authored-By": 407,
+              "Signed-off-by": 4947,
+              "Reviewed-by": 0,
+              "Generated-by": 0,
+              "Assisted-by": 2,
+              "Change-Id": 296,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 0.2,
+            "pct_any_convention": 27.78,
+            "pct_s1_agent": 0.06,
+            "pct_s1_ci": 0.11,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 0.9,
+              "pct_any_convention": 23.45
+            }
+          }
+        ],
+        "contrast": [
+          {
+            "repo": "git/git",
+            "path": "corpus/data/repos/git__git.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 10,
+              "s1_agent": 10,
+              "s1_ci": 0,
+              "s2": 203,
+              "s2_agent": 1,
+              "s3": 19957,
+              "any": 19957,
+              "agent_route": 11
+            },
+            "per_trailer": {
+              "Co-Authored-By": 203,
+              "Signed-off-by": 19957,
+              "Reviewed-by": 879,
+              "Generated-by": 0,
+              "Assisted-by": 73,
+              "Change-Id": 1,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 0.055,
+            "pct_any_convention": 99.785,
+            "pct_s1_agent": 0.05,
+            "pct_s1_ci": 0.0,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 0.55,
+              "pct_any_convention": 99.7
+            }
+          },
+          {
+            "repo": "postgres/postgres",
+            "path": "corpus/data/repos/postgres__postgres.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 0,
+              "s1_agent": 0,
+              "s1_ci": 0,
+              "s2": 380,
+              "s2_agent": 0,
+              "s3": 7317,
+              "any": 7317,
+              "agent_route": 0
+            },
+            "per_trailer": {
+              "Co-Authored-By": 380,
+              "Signed-off-by": 1,
+              "Reviewed-by": 7137,
+              "Generated-by": 0,
+              "Assisted-by": 0,
+              "Change-Id": 0,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 0.0,
+            "pct_any_convention": 36.585,
+            "pct_s1_agent": 0.0,
+            "pct_s1_ci": 0.0,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 0.0,
+              "pct_any_convention": 63.3
+            }
+          },
+          {
+            "repo": "django/django",
+            "path": "corpus/data/repos/django__django.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 1238,
+              "s1_agent": 1232,
+              "s1_ci": 6,
+              "s2": 546,
+              "s2_agent": 4,
+              "s3": 584,
+              "any": 1807,
+              "agent_route": 1242
+            },
+            "per_trailer": {
+              "Co-Authored-By": 546,
+              "Signed-off-by": 38,
+              "Reviewed-by": 0,
+              "Generated-by": 0,
+              "Assisted-by": 0,
+              "Change-Id": 0,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 6.21,
+            "pct_any_convention": 9.035,
+            "pct_s1_agent": 6.16,
+            "pct_s1_ci": 0.03,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 0.5,
+              "pct_any_convention": 11.15
+            }
+          },
+          {
+            "repo": "rails/rails",
+            "path": "corpus/data/repos/rails__rails.git",
+            "counts": {
+              "commits": 20000,
+              "s1": 31,
+              "s1_agent": 26,
+              "s1_ci": 5,
+              "s2": 1188,
+              "s2_agent": 39,
+              "s3": 1215,
+              "any": 1244,
+              "agent_route": 70
+            },
+            "per_trailer": {
+              "Co-Authored-By": 1188,
+              "Signed-off-by": 26,
+              "Reviewed-by": 0,
+              "Generated-by": 0,
+              "Assisted-by": 1,
+              "Change-Id": 0,
+              "PR-URL": 0,
+              "Reviewed-On": 0
+            },
+            "pct_agent_route": 0.35,
+            "pct_any_convention": 6.22,
+            "pct_s1_agent": 0.13,
+            "pct_s1_ci": 0.025,
+            "recent": {
+              "window": 2000,
+              "pct_agent_route": 2.05,
+              "pct_any_convention": 6.9
+            }
+          }
+        ]
+      },
+      "duration_s": 17.947
+    },
+    {
+      "gate": "G0.8",
+      "stage": "G0",
+      "title": "Revised-spec package",
+      "metric": "revised spec + disagreements memo delivered to stakeholder before G1 entry",
+      "type": "SOFT",
+      "class": "S",
+      "perf": false,
+      "timing": false,
+      "target": 1.0,
+      "cmp": ">=",
+      "unit": "package",
+      "value": 1.0,
+      "status": "PASS-PENDING-HUMAN",
+      "note": "package complete and delivered | human kit: STAKEHOLDER/001-disagreements-and-revised-spec.md",
+      "evidence": [
+        "STAKEHOLDER/001-disagreements-and-revised-spec.md",
+        "docs/DISAGREEMENTS.md",
+        "docs/SPEC-REVISED.md"
+      ],
+      "detail": {
+        "problems": [],
+        "artifacts": [
+          "STAKEHOLDER/001-disagreements-and-revised-spec.md",
+          "docs/DISAGREEMENTS.md",
+          "docs/SPEC-REVISED.md"
+        ],
+        "stakeholder_response": []
+      },
+      "duration_s": 0.064
+    }
+  ]
+}

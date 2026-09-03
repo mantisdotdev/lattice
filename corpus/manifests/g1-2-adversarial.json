@@ -1,0 +1,328 @@
+{
+  "note": "Expected SHA-256 per file. G1.2 compares checkout output against these pinned values, not against whatever the filesystem replies.",
+  "files": [
+    {
+      "path": "encoding/invalid-utf8.bin",
+      "bytes": 8,
+      "note": "invalid UTF-8 sequences; stored as bytes, never repaired",
+      "sha256": "b9d2fb44332c1bf7aefd124ccb7604f9aa0fa22831ff0daced132e564c2439bf"
+    },
+    {
+      "path": "encoding/latin1.txt",
+      "bytes": 11,
+      "note": "Latin-1 high bytes",
+      "sha256": "d5ec05b26e1729b17b5521bd01fea0575238015b91aadc383adf62a9b6664f1b"
+    },
+    {
+      "path": "encoding/lone-surrogate.bin",
+      "bytes": 3,
+      "note": "CESU-8 lone surrogate: valid bytes, invalid Unicode",
+      "sha256": "91a681b998555fb475479817b126c94e57e52011fa1842c5d188795a4a05226b"
+    },
+    {
+      "path": "encoding/nul-bytes.bin",
+      "bytes": 17,
+      "note": "embedded NUL -- the usual binary/text sniffing boundary",
+      "sha256": "e37dc25e80dfc339467f96f9da77257ce06d6010d3bfb5dfab9205a1a2a57775"
+    },
+    {
+      "path": "encoding/overlong.bin",
+      "bytes": 2,
+      "note": "overlong UTF-8 encoding of '/' -- a classic path-traversal payload",
+      "sha256": "caf573f0daa6960ecb26f8eddbc4e2059277ad5afc6f72ffd59a0ecead602a22"
+    },
+    {
+      "path": "encoding/utf16be-bom.txt",
+      "bytes": 26,
+      "note": "UTF-16 BE BOM",
+      "sha256": "5bd0dbe17a4272efaa99bc3983243a0db6ece74a2c741a294c107ff383ccf731"
+    },
+    {
+      "path": "encoding/utf16le-bom.txt",
+      "bytes": 26,
+      "note": "UTF-16 LE BOM",
+      "sha256": "9e078da0e54005268280241a280ffcff964fbedd27dee84c777ea4f545d5be4a"
+    },
+    {
+      "path": "encoding/utf8-bom.txt",
+      "bytes": 14,
+      "note": "UTF-8 BOM must be preserved, not stripped",
+      "sha256": "f41e15af906e4a4120093a9eecb491a346d8eb372344c80b5c1f54be522cf9f0"
+    },
+    {
+      "path": "eol/cr-only.txt",
+      "bytes": 25,
+      "note": "bare CR line endings",
+      "sha256": "d9d58f122e2992fb7d802ca073861c1ef3daad43dc9b76be6618a21aa78ffe14"
+    },
+    {
+      "path": "eol/crlf-no-final.txt",
+      "bytes": 4,
+      "note": "CRLF with no final terminator",
+      "sha256": "18745f36a05e29072709042d6062ce54f1b08ff36c27ba80c39f81fb010c8ce2"
+    },
+    {
+      "path": "eol/crlf.txt",
+      "bytes": 20,
+      "note": "CRLF throughout; must survive without translation (byte fidelity)",
+      "sha256": "6612d9c94c2da8d2544e1188348fc7baf717ffff1bacde51929a166404a41ffc"
+    },
+    {
+      "path": "eol/lf.txt",
+      "bytes": 18,
+      "note": "LF baseline",
+      "sha256": "e9024f1a07d29d52ad3aa5e1a18e94db1f3a9fd32b89e39d47c472cd99071e13"
+    },
+    {
+      "path": "eol/mixed.txt",
+      "bytes": 16,
+      "note": "all three in one file -- the case naive EOL normalisation corrupts",
+      "sha256": "861aa3a462a5781147d75777b71338693358705b24992ab545a5596ba494ded7"
+    },
+    {
+      "path": "eol/no-trailing-newline.txt",
+      "bytes": 17,
+      "note": "missing final newline must not be added",
+      "sha256": "fb6a17a09578175d2f04634b6639304ab0efdaf4ff2f94078797653a61a1fd62"
+    },
+    {
+      "path": "names/--looks-like-a-flag.txt",
+      "bytes": 10,
+      "note": "leading dashes: argument-parsing hazard",
+      "sha256": "276d6bba60b7928a82a5617d80006508bc489ddda00a00129d69496ffdd3e9d3"
+    },
+    {
+      "path": "names/.hidden",
+      "bytes": 8,
+      "note": "leading dot",
+      "sha256": "5c9f9cd83cd20bc6b154521d6c687594713c5621fca27706b428aff14f97909d"
+    },
+    {
+      "path": "names/UPPER.txt",
+      "bytes": 6,
+      "note": "case-colliding pair, member 1",
+      "sha256": "e83189db38554920ea572093f9ad32facf682f28ccecdac085c1511735a2b492"
+    },
+    {
+      "path": "names/d00/d01/d02/d03/d04/d05/d06/d07/d08/d09/d10/d11/d12/d13/d14/d15/d16/d17/d18/d19/d20/d21/d22/d23/deep.txt",
+      "bytes": 10,
+      "note": "24 levels deep -- approaches Windows MAX_PATH",
+      "sha256": "b0818c0ec2bd5dc28ca9008f44e4418c4a937f3c7f9e4607995e957a9c9926f4"
+    },
+    {
+      "path": "names/dot.in.the.middle.tar.gz",
+      "bytes": 16,
+      "note": "multiple extensions",
+      "sha256": "d7c5a8a5b6d4e8f982b0f765b69e6fda08c790dcb6565632f9fb6a9c33794f6e"
+    },
+    {
+      "path": "names/emoji-🚀.txt",
+      "bytes": 13,
+      "note": "astral-plane codepoint in a filename (surrogate pairs on Windows)",
+      "sha256": "b691909058473bcd2f64db4c0c00d6e7210e13275e69adf6609258a4f70e5c68"
+    },
+    {
+      "path": "names/é-decomposed.txt",
+      "bytes": 4,
+      "note": "e + U+0301 combining acute (NFD)",
+      "sha256": "4f569f0f807b3a6a93f17dc721c67aa11e1b83fe9161eff2ca44e57655725fd5"
+    },
+    {
+      "path": "names/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt",
+      "bytes": 15,
+      "note": "200-character path component",
+      "sha256": "abfd312677bb87d07c8c223791a489eb6ba52c97b6a1659061f96d7cc62c3f2f"
+    },
+    {
+      "path": "names/percent%20encoded.txt",
+      "bytes": 8,
+      "note": "literal percent-encoding in a real name",
+      "sha256": "bdb529e2b704ffb0987bd7a4aa08212faf219af60205808cd099783fd047c145"
+    },
+    {
+      "path": "names/spaces and 'quotes' and \"double\".txt",
+      "bytes": 8,
+      "note": "spaces and both quote kinds -- shell and pathspec parsers",
+      "sha256": "08ad2bb44fd93ae8f7cc3ee77a481f4d95907ac68d575eef86a26a8a9484f46f"
+    },
+    {
+      "path": "names/trailing.space .txt",
+      "bytes": 15,
+      "note": "trailing space before the extension (Windows strips it)",
+      "sha256": "e3e3784c80358d913628e6a03c4a450ca2c4257cf6500e08a026d4f2fd4d6766"
+    },
+    {
+      "path": "names/upper.txt",
+      "bytes": 6,
+      "note": "case-colliding pair, member 2 -- distinct on Linux, colliding on macOS/Windows (Windows is tier-1)",
+      "sha256": "b908e4daaf9d57fe9cb551a689a35c9a9e0fac85fdf11faaa0a1ba0e5efc06fd"
+    },
+    {
+      "path": "names/é-precomposed.txt",
+      "bytes": 4,
+      "note": "U+00E9 precomposed (NFC) -- same glyph as the NFD file, different bytes; macOS normalises filenames and Linux does not",
+      "sha256": "588de79d090f57370dc6c6369532c2424fa9f7941f742352ddb38cc60b2c852b"
+    },
+    {
+      "path": "names/中文文件.txt",
+      "bytes": 4,
+      "note": "CJK filename",
+      "sha256": "4bd57b9d2dcfa83efc6bb8326daf5e663224b35290bf1ef1c2ee5382570851b1"
+    },
+    {
+      "path": "size/boundary-1023.bin",
+      "bytes": 1023,
+      "note": "1023 bytes -- straddles a chunk-size boundary",
+      "sha256": "fa8a6dc32905e28986782ad406c6854bfa560d9e76add408005907e2399a15e0"
+    },
+    {
+      "path": "size/boundary-1024.bin",
+      "bytes": 1024,
+      "note": "1024 bytes -- straddles a chunk-size boundary",
+      "sha256": "e75809e0d15667ce44e6aa5c64689a4917b245eb0920094ff0b017dc0612a17a"
+    },
+    {
+      "path": "size/boundary-1025.bin",
+      "bytes": 1025,
+      "note": "1025 bytes -- straddles a chunk-size boundary",
+      "sha256": "955ba0e96d4f97cd523eebc57af8662dc3590c5e3f31b40ee949290aef0451ab"
+    },
+    {
+      "path": "size/boundary-2047.bin",
+      "bytes": 2047,
+      "note": "2047 bytes -- straddles a chunk-size boundary",
+      "sha256": "752b1981531a137b1105c2078561189a343d0a22c16e01107f705cafa8ce6eb7"
+    },
+    {
+      "path": "size/boundary-2048.bin",
+      "bytes": 2048,
+      "note": "2048 bytes -- straddles a chunk-size boundary",
+      "sha256": "9c9b3365a5704fb1bbd5dbac227ecc2e878dedce86338eca2ec1278e21ac1a9e"
+    },
+    {
+      "path": "size/boundary-2049.bin",
+      "bytes": 2049,
+      "note": "2049 bytes -- straddles a chunk-size boundary",
+      "sha256": "b6092f4b8c3649de2da7202fe2012e2a0c61233eacdbb4eab66e617a651b6475"
+    },
+    {
+      "path": "size/boundary-65535.bin",
+      "bytes": 65535,
+      "note": "65535 bytes -- straddles a chunk-size boundary",
+      "sha256": "1acaf51d16a9c1a2b05a091386f193dad790603c7803b5e55dd4681a5bb9dfd2"
+    },
+    {
+      "path": "size/boundary-65536.bin",
+      "bytes": 65536,
+      "note": "65536 bytes -- straddles a chunk-size boundary",
+      "sha256": "77007cd74a06dc54e5114d01a41d2721679d5668a0c20022fe102c87ad4d65b8"
+    },
+    {
+      "path": "size/boundary-65537.bin",
+      "bytes": 65537,
+      "note": "65537 bytes -- straddles a chunk-size boundary",
+      "sha256": "a3253bfa7d790dc6f5d41b75421bcc2c606e8043f9fad4331e8aae0a6c504cfa"
+    },
+    {
+      "path": "size/boundary-8191.bin",
+      "bytes": 8191,
+      "note": "8191 bytes -- straddles a chunk-size boundary",
+      "sha256": "4a2aa6c5045281e4a21ec0a1dddc459aad87886838b13809ea19d49a803be1b1"
+    },
+    {
+      "path": "size/boundary-8192.bin",
+      "bytes": 8192,
+      "note": "8192 bytes -- straddles a chunk-size boundary",
+      "sha256": "2ef1444bc950050c92f373cd2f5442022af98aa900aefd82c749cff93d4c0037"
+    },
+    {
+      "path": "size/boundary-8193.bin",
+      "bytes": 8193,
+      "note": "8193 bytes -- straddles a chunk-size boundary",
+      "sha256": "e8a22d873929700dd2f170a1d6fbef3a7f773eb9f20305f6729e5a8f319554a2"
+    },
+    {
+      "path": "size/empty.txt",
+      "bytes": 0,
+      "note": "0-byte file",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "size/exactly-4096.bin",
+      "bytes": 4096,
+      "note": "exactly one page",
+      "sha256": "c8f5d0341d54d951a71b136e6e2afcb14d11ed8489a7ae126a8fee0df6ecf193"
+    },
+    {
+      "path": "size/exactly-8192.bin",
+      "bytes": 8192,
+      "note": "exactly two pages",
+      "sha256": "dc404a613fedaeb54034514bc6505f56b933caa5250299ba7d094377a51caa46"
+    },
+    {
+      "path": "size/huge-1gb.bin",
+      "bytes": 1100000000,
+      "sha256": "9e276255480215ecdbe46f35d5e056a7936c142d493a9452829ea037a540123a",
+      "note": "the >=1 GB file G1.2 names explicitly; exercises chunk trees"
+    },
+    {
+      "path": "size/one-byte.txt",
+      "bytes": 1,
+      "note": "1 byte",
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    },
+    {
+      "path": "size/random-1mib.bin",
+      "bytes": 1048576,
+      "note": "1 MiB incompressible-ish, deterministic",
+      "sha256": "f5600770a8695a85fc7bb6d18a40a5b80a2b8a39c86f346a1b58f8ccc1e8fde6"
+    },
+    {
+      "path": "size/zeros-1mib.bin",
+      "bytes": 1048576,
+      "note": "1 MiB of zeros -- pathological for delta and dedup accounting",
+      "sha256": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58"
+    },
+    {
+      "path": "special/executable.sh",
+      "bytes": 17,
+      "mode": "0755",
+      "note": "executable bit must round-trip",
+      "sha256": "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"
+    }
+  ],
+  "special_entries": [
+    {
+      "path": "special/dangling-symlink",
+      "kind": "symlink",
+      "target": "/nonexistent/dangling",
+      "note": "dangling symlink must round-trip as a symlink, not an error"
+    },
+    {
+      "path": "special/empty-dir",
+      "kind": "directory",
+      "note": "empty directory -- git cannot represent this, so the lossy-edge ledger (G3.4) must record it explicitly"
+    },
+    {
+      "path": "special/loop-a",
+      "kind": "symlink",
+      "target": "loop-b",
+      "note": "symlink cycle: traversal must terminate"
+    },
+    {
+      "path": "special/loop-b",
+      "kind": "symlink",
+      "target": "loop-a",
+      "note": "symlink cycle, other half"
+    },
+    {
+      "path": "special/relative-symlink",
+      "kind": "symlink",
+      "target": "../size/one-byte.txt",
+      "note": "relative symlink; target must not be followed on save"
+    }
+  ],
+  "total_files": 48,
+  "total_bytes": 1102340192,
+  "skipped_mandated_cases": []
+}

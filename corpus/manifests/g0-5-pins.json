@@ -1,0 +1,38 @@
+{
+  "built_at": "2026-09-03T04:13:24Z",
+  "composite_commit": "6fdbb7bc224e69d418a9f3e66faefd792e695a6e",
+  "composite_tree": "fe04f89b32c4d997deb86e8f394f83c8b04e755a",
+  "history_depth": 349778,
+  "bases": {
+    "nodejs/node": {
+      "role": "source",
+      "prefix": "src-node",
+      "head": "6e7818e4f6d2d0429a2ebd441868af19bf7333d2",
+      "commits": 107789
+    },
+    "symfony/symfony": {
+      "role": "source",
+      "prefix": "src-symfony",
+      "head": "7ab6d431f762c21bbd3f841ed6aa5b709d872c66",
+      "commits": 83279
+    },
+    "golang/go": {
+      "role": "source",
+      "prefix": "src-go",
+      "head": "ebe55c0c38935b39778c38ec8edb1b03c4e96058",
+      "commits": 72067
+    },
+    "opencv/opencv_extra": {
+      "role": "binary",
+      "prefix": "bin-media",
+      "head": "9c5eefa1ef66cbeecc9a3d38e1c5308c22ebe830",
+      "commits": 2141
+    },
+    "git/git": {
+      "role": "history",
+      "prefix": "deep-history",
+      "head": "3cb9185f65410273787f74333cc027d2ea5daada",
+      "commits": 85525
+    }
+  }
+}

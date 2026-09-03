@@ -293,7 +293,15 @@ def apply_freeze_and_waivers(result: Result, freeze: dict,
 
 
 def validate_waiver(gate: Gate, waiver: dict, measured: float | None) -> list[str]:
-    """§0.5 legitimacy checks that can be made mechanically."""
+    """§0.5 legitimacy checks that can be made mechanically.
+
+    Includes the anti-stall rule from docs/DISAGREEMENTS.md Challenge 14: §0.5's
+    improvement formula is max(0, ...) < 2%, which a REGRESSING gate satisfies —
+    a negative improvement clamps to 0, and 0 < 2%. So a gate moving steadily
+    away from its target qualified for a waiver on the same footing as one that
+    had genuinely converged. Regression and convergence must not be scored
+    identically at the moment the protocol decides whether to stop trying.
+    """
     problems: list[str] = []
     if gate.type == "HARD":
         problems.append("HARD gates can never be waived (§0.5)")
@@ -306,9 +314,46 @@ def validate_waiver(gate: Gate, waiver: dict, measured: float | None) -> list[st
     if len(strategies) < 3:
         problems.append(f"only {len(strategies)} strategies, ≥3 materially distinct required")
     for s in strategies:
-        if not s.get("pre_registered_iteration"):
+        # `is None`, not falsiness: iteration 0 is a legitimate value and
+        # `not 0` would reject a correctly pre-registered strategy.
+        if s.get("pre_registered_iteration") is None:
             problems.append(
                 f"strategy '{s.get('name','?')}' was not pre-registered in a DIAGNOSE step")
+    # Anti-stall: a regressing gate has not plateaued, it has broken.
+    v_prev = waiver.get("value_3_iterations_ago")
+    if v_prev is None:
+        problems.append("missing 'value_3_iterations_ago' — the §0.5 improvement "
+                        "formula cannot be checked without it")
+    elif measured is not None:
+        prev_gap = abs(v_prev - gate.target)
+        cur_gap = abs(measured - gate.target)
+        if cur_gap > prev_gap * 1.02:      # 2% tolerance for measurement noise
+            problems.append(
+                f"gate is REGRESSING: gap to target grew from {prev_gap:g} to "
+                f"{cur_gap:g}. A regressing gate has not plateaued (Challenge 14)")
+
+    # Each targeted iteration must have changed something, and the commit it
+    # names must EXIST. Accepting any truthy string let five fabricated hashes
+    # satisfy the anti-stall rule, which defeats the point of requiring them.
+    for i, it in enumerate(waiver.get("iteration_log", [])):
+        sha = it.get("commit")
+        if not sha:
+            problems.append(
+                f"targeted iteration {i + 1} links no commit — re-measuring an "
+                f"unchanged system is not a remediation iteration")
+            continue
+        proc = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
+                               f"{sha}^{{commit}}"], capture_output=True)
+        if proc.returncode != 0:
+            problems.append(
+                f"targeted iteration {i + 1} names commit {str(sha)[:12]}, which "
+                f"does not resolve in this repository")
+    if waiver.get("iterations", 0) >= 5 and \
+            len(waiver.get("iteration_log", [])) < waiver.get("iterations", 0):
+        problems.append(
+            f"claims {waiver.get('iterations')} targeted iterations but logs "
+            f"{len(waiver.get('iteration_log', []))}")
+
     if gate.perf and measured is not None and gate.target:
         ratio = (measured / gate.target) if gate.lower_is_better else (gate.target / measured)
         if ratio > MAX_WAIVER_RATIO_VS_TARGET:
@@ -388,7 +433,23 @@ def stage_state(results: list[Result], stage: str) -> str:
 
 
 def delivery_state(results: list[Result]) -> tuple[str, list[str]]:
-    """§0.6. Only two endings."""
+    """§0.6. Only two endings.
+
+    Computed over the ENTIRE registry, not just the gates measured in this run.
+    Measuring one stage and reporting CHAMPION would be exactly the false claim
+    this runner exists to prevent: a gate that was not measured has not passed,
+    and §0.6 requires "every gate in every stage" for CHAMPION.
+    """
+    measured = {r.gate.gid for r in results}
+    unmeasured = [g for gid, g in load_gates().items() if gid not in measured]
+    if unmeasured:
+        by_stage: dict[str, int] = {}
+        for g in unmeasured:
+            by_stage[g.stage] = by_stage.get(g.stage, 0) + 1
+        return "NOT DELIVERABLE", [
+            f"{n} gate(s) in {stage} were not measured in this run"
+            for stage, n in sorted(by_stage.items())]
+
     reasons = []
     hard = [r for r in results if r.gate.type == "HARD"]
     soft = [r for r in results if r.gate.type == "SOFT"]
