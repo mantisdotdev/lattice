@@ -132,6 +132,11 @@ pub struct OpLog {
     db: Database,
     group: Mutex<GroupState>,
     ready: Condvar,
+    /// Test-only fault hook: when set, `commit_batch` fails without touching
+    /// the database, so the poison-on-failure path can be exercised
+    /// deterministically without a real disk failure.
+    #[cfg(test)]
+    fail_commits: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -160,6 +165,16 @@ struct GroupState {
     /// Id of the highest-numbered assigned entry, for chaining `prev`. Same
     /// reasoning: the chain must be continuous across the flush window.
     last_id: Option<String>,
+    /// Set once a batch commit has FAILED. redb's commit is all-or-nothing, so
+    /// a failure means none of that batch is durable — yet its sequence numbers
+    /// are already spent and other threads may be waiting on them. Dropping the
+    /// entries would either livelock a waiter (durability can never reach a seq
+    /// whose entry is gone) or, once a later commit advanced past it, tell that
+    /// waiter its entry is durable when it is not, breaking the Merkle chain.
+    /// So a failed commit poisons the log instead: this and every in-flight and
+    /// future append fails honestly, and the process should exit. On restart
+    /// the log reopens from durable state with a continuous chain.
+    poisoned: Option<String>,
 }
 
 impl OpLog {
@@ -198,6 +213,8 @@ impl OpLog {
                 ..Default::default()
             }),
             ready: Condvar::new(),
+            #[cfg(test)]
+            fail_commits: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -249,6 +266,11 @@ impl OpLog {
     pub fn append(&self, operation: Operation) -> Result<Entry> {
         let entry = {
             let mut state = self.group.lock().unwrap();
+            if let Some(msg) = &state.poisoned {
+                return Err(Error::Corrupt(format!(
+                    "operation log is unwritable after a failed commit: {msg}"
+                )));
+            }
             // Sequence and predecessor come from the in-memory counters, never
             // from durable state -- see GroupState::next_seq for why.
             state.next_seq += 1;
@@ -279,6 +301,11 @@ impl OpLog {
     fn flush_through(&self, seq: u64) -> Result<()> {
         let mut state = self.group.lock().unwrap();
         loop {
+            if let Some(msg) = &state.poisoned {
+                return Err(Error::Corrupt(format!(
+                    "operation log is unwritable after a failed commit: {msg}"
+                )));
+            }
             if state.durable_through >= seq {
                 return Ok(());
             }
@@ -305,9 +332,17 @@ impl OpLog {
             let batch: Vec<Entry> = std::mem::take(&mut state.pending);
             drop(state);
 
+            // If commit_batch unwinds, this guard re-locks and clears
+            // `flushing` (poisoning the log) so no thread waits forever on a
+            // flush that panicked mid-way.
+            let mut fg = FlushGuard {
+                log: self,
+                armed: true,
+            };
             let result = self.commit_batch(&batch);
 
             state = self.group.lock().unwrap();
+            fg.armed = false;
             state.flushing = false;
             match result {
                 Ok(highest) => {
@@ -315,13 +350,15 @@ impl OpLog {
                     self.ready.notify_all();
                 }
                 Err(e) => {
-                    // The batch did not land. The entries are NOT restaged:
-                    // their sequence numbers are already spent, and reusing
-                    // them against a partially committed transaction is the
-                    // very overwrite this design exists to prevent. The failure
-                    // propagates and the caller's operation is reported as not
-                    // performed, which is the honest outcome -- the gap in
-                    // sequence numbers is visible to `verify_chain`.
+                    // The batch did not land, and redb's commit is
+                    // all-or-nothing, so NONE of it is durable. The entries are
+                    // NOT restaged and NOT dropped-and-forgotten: instead the
+                    // log is poisoned (see GroupState::poisoned). Every waiter,
+                    // on wake, sees the poison and fails; so does every future
+                    // append. That is the only outcome that neither livelocks a
+                    // waiter nor reports a lost entry as durable.
+                    state.poisoned = Some(e.to_string());
+                    state.pending.clear();
                     self.ready.notify_all();
                     return Err(e);
                 }
@@ -332,6 +369,10 @@ impl OpLog {
     fn commit_batch(&self, batch: &[Entry]) -> Result<u64> {
         if batch.is_empty() {
             return Ok(0);
+        }
+        #[cfg(test)]
+        if self.fail_commits.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Io(std::io::Error::other("injected commit failure")));
         }
         let tx = self.db.begin_write()?;
         {
@@ -352,14 +393,20 @@ impl OpLog {
     /// edited historical entry changes its own id, which no longer matches the
     /// `prev` its successor recorded.
     pub fn verify_chain(&self) -> Result<Option<String>> {
+        // A tampered entry may carry a `prev` or `id` shorter than 12 bytes.
+        // This function exists to REPORT such tampering, so it must never panic
+        // slicing the very field it is inspecting.
+        fn short(s: &str) -> &str {
+            &s[..s.len().min(12)]
+        }
         let mut expected_prev = "0".repeat(64);
         for entry in self.entries()? {
             if entry.prev != expected_prev {
                 return Ok(Some(format!(
                     "operation {} links to {} but its predecessor hashes to {}",
                     entry.seq,
-                    &entry.prev[..12],
-                    &expected_prev[..12]
+                    short(&entry.prev),
+                    short(&expected_prev)
                 )));
             }
             let recomputed =
@@ -369,8 +416,8 @@ impl OpLog {
                     "operation {} has been altered: its content hashes to {} \
                      but it records {}",
                     entry.seq,
-                    &recomputed[..12],
-                    &entry.id[..12]
+                    short(&recomputed),
+                    short(&entry.id)
                 )));
             }
             expected_prev = entry.id;
@@ -395,19 +442,41 @@ impl OpLog {
     }
 }
 
-// A store handle is safe to share: redb serialises its own writers, and the
-// group state is behind a mutex.
-unsafe impl Sync for OpLog {}
-unsafe impl Send for OpLog {}
+/// Restores the `flushing` flag if the committing thread unwinds.
+///
+/// On the normal path `armed` is cleared once the lock is reacquired. If
+/// `commit_batch` panics, this drops with `armed` still set, re-locks, clears
+/// `flushing`, and poisons the log — so a panicked flush cannot leave every
+/// other thread waiting on a flush that will never complete.
+struct FlushGuard<'a> {
+    log: &'a OpLog,
+    armed: bool,
+}
+
+impl Drop for FlushGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.log.group.lock().unwrap_or_else(|e| e.into_inner());
+        state.flushing = false;
+        if state.poisoned.is_none() {
+            state.poisoned = Some("a commit unwound mid-flush".to_string());
+        }
+        self.log.ready.notify_all();
+    }
+}
+
+// OpLog is Send + Sync by auto-derivation: redb's Database is Send + Sync, and
+// the group state is behind a Mutex. No `unsafe impl` is needed, and one would
+// only serve to silence the compiler if a non-thread-safe field were added
+// later — exactly the check worth keeping.
 
 impl std::fmt::Debug for OpLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpLog").finish_non_exhaustive()
     }
 }
-
-#[allow(dead_code)]
-fn unused(_: Error) {}
 
 #[cfg(test)]
 mod tests {
@@ -525,6 +594,68 @@ mod tests {
         assert!(
             log.verify_chain().unwrap().is_none(),
             "chain must survive concurrency"
+        );
+    }
+
+    #[test]
+    fn a_failed_commit_poisons_the_log_rather_than_losing_or_faking_entries() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oplog.redb");
+        let log = OpLog::open(&path).unwrap();
+        log.append(Operation::Init).unwrap();
+
+        log.fail_commits.store(true, Ordering::SeqCst);
+        // The append whose commit fails must report failure, not success.
+        assert!(
+            log.append(Operation::Thin { collected: 1 }).is_err(),
+            "a failed commit must not report the entry as durable"
+        );
+        // The log is now poisoned: a further append fails rather than
+        // silently corrupting the chain.
+        assert!(
+            log.append(Operation::Thin { collected: 2 }).is_err(),
+            "a poisoned log must refuse further appends"
+        );
+        drop(log);
+
+        // On reopen from durable state the chain is intact and gap-free — only
+        // the Init that actually committed survives.
+        let log = OpLog::open(&path).unwrap();
+        assert!(log.verify_chain().unwrap().is_none(), "chain must stay intact");
+        assert_eq!(log.len().unwrap(), 1, "only the durable Init survived");
+    }
+
+    #[test]
+    fn verify_chain_reports_a_short_tampered_field_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oplog.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+        }
+        // Tamper entry 1's `prev` down to two characters — shorter than the 12
+        // bytes the report used to slice unconditionally.
+        let db = Database::create(&path).unwrap();
+        {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(ENTRIES).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut e: Entry = serde_json::from_slice(&raw).unwrap();
+                e.prev = "ab".into();
+                let bytes = serde_json::to_vec(&e).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        drop(db);
+
+        let log = OpLog::open(&path).unwrap();
+        let broken = log.verify_chain().unwrap();
+        assert!(
+            broken.is_some(),
+            "a tampered entry must be reported, not panicked on"
         );
     }
 
