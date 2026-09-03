@@ -1,55 +1,55 @@
 {
   "G0.1": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "analyses",
     "value": 11.0,
     "waived": false
   },
   "G0.2": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "challenges",
     "value": 16.0,
     "waived": false
   },
   "G0.3": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "merge commits",
     "value": 284316.0,
     "waived": false
   },
   "G0.4": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "instances",
     "value": 214463.0,
     "waived": false
   },
   "G0.5": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "contract",
     "value": 1.0,
     "waived": false
   },
   "G0.6": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "ADRs",
     "value": 5.0,
     "waived": false
   },
   "G0.7": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS",
     "unit": "repos",
     "value": 4.0,
     "waived": false
   },
   "G0.8": {
-    "recorded_at": "2026-09-03T06:15:59Z",
+    "recorded_at": "2026-09-03T11:36:12Z",
     "status": "PASS-PENDING-HUMAN",
     "unit": "package",
     "value": 1.0,
