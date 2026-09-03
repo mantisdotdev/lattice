@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ltx-core", "crates/ltx", "crates/ltx-daemon"]
+members = ["crates/ltx-core", "crates/ltx", "crates/ltx-daemon", "crates/undo-property"]
 
 [workspace.package]
 version = "0.1.0"
