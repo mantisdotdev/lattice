@@ -89,35 +89,32 @@ impl Error {
     /// The way back to safety. Never empty — G2.4 fails an error without one,
     /// and a user facing a dead end is the thing §4.3 exists to prevent.
     pub fn recovery(&self) -> &'static str {
+        // Every command named here MUST exist in the shipped CLI — a user who
+        // follows the advice must not hit "unrecognized subcommand". The test
+        // `recovery_actions_name_only_implemented_commands` enforces that, so
+        // adopt/sync/undo cannot be advertised before they are built.
         match self {
-            Error::NotARepository(_) => {
-                "run `ltx init` here to start a repository, or `ltx adopt` to attach \
-                 to an existing Git clone"
-            }
+            Error::NotARepository(_) => "run `ltx init` here to start a repository",
             Error::NotFound(_) => {
                 "run `ltx log` to see what exists, or `ltx log --forensic` to include \
                  everything the active lens hides"
             }
             Error::Corrupt(_) => {
-                "run `ltx verify --complete` for the full report; the affected content \
-                 can be refetched with `ltx sync` if a peer still holds it"
+                "run `ltx verify --complete` for the full report of what is damaged"
             }
             Error::Invalid(_) => {
-                "run `ltx undo` to return to the previous state; nothing has been \
-                 committed"
+                "run `ltx status` to see the current state, then reissue the command \
+                 with a valid argument"
             }
             Error::Io(_) => {
                 "check permissions and free space on the repository directory, then \
                  retry; run `ltx verify` to confirm nothing was lost, since no \
                  checkpoint is written until the operation completes"
             }
-            Error::Database(_) => {
-                "run `ltx verify` to check the repository, then `ltx undo` to step \
-                 back to the last good state"
-            }
+            Error::Database(_) => "run `ltx verify` to check the repository for damage",
             Error::Serde(_) => {
-                "this is a bug in Lattice; `ltx verify` will confirm the repository \
-                 itself is intact"
+                "run `ltx verify` to check whether the repository is intact; if it \
+                 reports no damage, this is a bug in Lattice"
             }
         }
     }
@@ -168,6 +165,37 @@ mod tests {
                 "{e:?} recovery names no command to run: {}",
                 e.recovery()
             );
+        }
+    }
+
+    #[test]
+    fn recovery_actions_name_only_implemented_commands() {
+        // A user who runs the suggested command must not hit "unrecognized
+        // subcommand". This keeps the advice tracking the actual CLI surface,
+        // so adopt/sync/undo cannot be advertised before they are built.
+        const IMPLEMENTED: &[&str] = &["init", "save", "status", "log", "verify", "checkout"];
+        let cases: Vec<Error> = vec![
+            Error::NotARepository(PathBuf::from("/tmp")),
+            Error::NotFound("x".into()),
+            Error::Corrupt("x".into()),
+            Error::Invalid("x".into()),
+            Error::Io(std::io::Error::other("x")),
+            Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
+        ];
+        for e in cases {
+            let text = e.recovery();
+            let mut rest = text;
+            while let Some(pos) = rest.find("ltx ") {
+                rest = &rest[pos + 4..];
+                let word: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                assert!(
+                    IMPLEMENTED.contains(&word.as_str()),
+                    "{e:?} recovery names unimplemented command `ltx {word}`: {text}"
+                );
+            }
         }
     }
 }
