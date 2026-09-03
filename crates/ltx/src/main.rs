@@ -54,7 +54,10 @@ enum Command {
     Status,
     /// Show history.
     Log {
-        /// Show every operation, including what the active lens hides.
+        /// Show every operation, including anything a lens would hide. Until
+        /// lenses exist there is nothing hidden, so this is the full history —
+        /// the forensic view is simply already complete. Consumed by the G1.1
+        /// and G1.3 harnesses.
         #[arg(long)]
         forensic: bool,
         /// Most recent N entries.
@@ -148,7 +151,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         "oplog_seq": cp.oplog_seq,
                     })
                 },
-                || format!("saved {} — {}", &cp.id[..12], cp.message),
+                || format!("saved {} — {}", ltx_core::short_id(&cp.id), cp.message),
             );
             Ok(EXIT_OK)
         }
@@ -165,7 +168,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         s.root,
                         s.checkpoints,
                         s.operations,
-                        &h[..12],
+                        ltx_core::short_id(h),
                         m
                     ),
                     _ => format!("{} — nothing saved yet", s.root),
@@ -199,7 +202,7 @@ fn run(cli: &Cli) -> Result<u8> {
                             "{:>5}  {:<8} {}\n",
                             e.seq,
                             e.operation.name(),
-                            &e.id[..12]
+                            ltx_core::short_id(&e.id)
                         ));
                     }
                     out.trim_end().to_string()

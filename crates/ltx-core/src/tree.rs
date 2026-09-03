@@ -86,10 +86,16 @@ impl Serialize for Tree {
 
 impl<'de> Deserialize<'de> for Tree {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error as _;
         let rows = Vec::<TreeEntry>::deserialize(de)?;
         let mut entries = BTreeMap::new();
         for row in rows {
-            entries.insert(row.name, row.node);
+            // A duplicate name in a stored tree would silently replace the
+            // earlier node in the map, dropping checkpointed data on checkout.
+            // A tree that names one entry twice is corrupt, not merely unusual.
+            if entries.insert(row.name, row.node).is_some() {
+                return Err(D::Error::custom("tree has a duplicate entry name"));
+            }
         }
         Ok(Tree { entries })
     }
@@ -107,6 +113,16 @@ impl Tree {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        // Bound the decoded size: a corrupt or hostile tree blob must not drive
+        // unbounded allocation ("nothing from outside is unbounded"). A real
+        // directory tree is far smaller than this cap.
+        const MAX_TREE_BYTES: usize = 256 * 1024 * 1024;
+        if bytes.len() > MAX_TREE_BYTES {
+            return Err(crate::error::Error::Corrupt(format!(
+                "tree blob is {} bytes, over the {MAX_TREE_BYTES}-byte cap",
+                bytes.len()
+            )));
+        }
         Ok(serde_json::from_slice(bytes)?)
     }
 
@@ -183,6 +199,27 @@ mod tests {
         t.entries
             .insert(nfd.clone(), Node::Directory { tree: "b".into() });
         assert_eq!(t.len(), 2, "NFC and NFD names must remain distinct");
+    }
+
+    #[test]
+    fn a_duplicate_entry_name_is_rejected_as_corrupt() {
+        // Hand-built wire form with the same name twice — the in-memory
+        // BTreeMap cannot hold a duplicate, but a corrupt stored tree can.
+        let rows = vec![
+            TreeEntry {
+                name: b"dup".to_vec(),
+                node: Node::Directory { tree: "a".into() },
+            },
+            TreeEntry {
+                name: b"dup".to_vec(),
+                node: Node::Directory { tree: "b".into() },
+            },
+        ];
+        let bytes = serde_json::to_vec(&rows).unwrap();
+        assert!(
+            Tree::from_bytes(&bytes).is_err(),
+            "a duplicate entry name must be rejected, not silently collapsed"
+        );
     }
 
     #[test]

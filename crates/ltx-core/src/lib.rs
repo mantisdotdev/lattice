@@ -25,6 +25,21 @@ pub use repo::{Checkpoint, Repo, Status, VerifyReport};
 pub use store::Store;
 pub use tree::{Node, Tree};
 
+/// A short, display-only prefix of an id, truncated on a UTF-8 char boundary.
+///
+/// Ids the engine mints are 64-hex and always sliceable at 12, but the same
+/// slicing runs over `prev`/`id`/`checkpoint`/`tree` strings deserialised from
+/// a possibly-tampered op-log or tree, where byte 12 can fall inside a
+/// multibyte codepoint. A raw `&s[..12]` panics there — in the very code paths
+/// meant to REPORT the tampering — so every such truncation goes through here.
+pub fn short_id(s: &str) -> &str {
+    let mut end = s.len().min(12);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// The seven user-facing nouns (§4.2), as a machine-readable list.
 ///
 /// G2.5 requires the concept model to ship as a schema the contract docs

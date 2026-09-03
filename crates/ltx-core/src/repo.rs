@@ -481,11 +481,21 @@ impl Repo {
             match node {
                 Node::Directory { tree } => {
                     fs::create_dir_all(&path)?;
+                    // The directory itself is an entry checkout created, so it
+                    // counts — otherwise the reported total understates a
+                    // checkpoint that contains directories.
+                    report.entries_written += 1;
                     self.restore_tree(tree, &path, report)?;
                 }
                 Node::Symlink { target } => {
-                    if fs::symlink_metadata(&path).is_ok() {
-                        fs::remove_file(&path).ok();
+                    // Replace anything already at this path. A real removal
+                    // failure (a directory in the way, a permission error) is
+                    // propagated, not swallowed; only a benign "already gone"
+                    // is tolerated.
+                    if let Err(e) = fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            return Err(e.into());
+                        }
                     }
                     let Some(target_os) = platform::os_string_from_bytes(target) else {
                         report.collisions.push(Collision {
@@ -587,7 +597,7 @@ impl Repo {
                 report.structure_verified = false;
                 report
                     .errors
-                    .push(format!("checkpoint {}: {e}", &cp.id[..12.min(cp.id.len())]));
+                    .push(format!("checkpoint {}: {e}", crate::short_id(&cp.id)));
             }
         }
 
@@ -598,10 +608,12 @@ impl Repo {
         for entry in self.oplog.entries()? {
             if let Operation::Save { checkpoint, .. } = &entry.operation {
                 if !known.contains(checkpoint.as_str()) {
+                    // A missing checkpoint blob is a hole in the history spine.
+                    report.structure_verified = false;
                     report.errors.push(format!(
                         "operation {} saved checkpoint {} but its record is not present",
                         entry.seq,
-                        &checkpoint[..12.min(checkpoint.len())]
+                        crate::short_id(checkpoint)
                     ));
                 }
             }
@@ -622,13 +634,14 @@ impl Repo {
         };
         let Some(bytes) = self.store.read(id)? else {
             // A missing TREE is a hole in the history structure itself, not
-            // merely absent file content. It is recorded as an error so verify
-            // cannot report a clean, fully-verified repository when it never
-            // read the spine — the exact false-clean the review found.
+            // merely absent file content. It is recorded as an error, and the
+            // structure is marked not-verified, so verify cannot report a
+            // clean, fully-verified repository when it never read the spine.
+            report.structure_verified = false;
             report.chunks_absent += 1;
             report.errors.push(format!(
                 "tree {} is not present locally",
-                &tree_id[..12.min(tree_id.len())]
+                crate::short_id(tree_id)
             ));
             return Ok(());
         };

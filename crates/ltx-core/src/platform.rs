@@ -70,11 +70,19 @@ pub fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
 
 /// Does this platform lose information when applying `mode`?
 ///
-/// Used to populate the checkout report, so a Windows user is told the
-/// executable bit did not survive rather than discovering it when a script
-/// fails to run.
+/// Used to populate the checkout report, so a Windows user is told which
+/// permission bits did not survive rather than discovering it when a script
+/// fails to run or a private file is group-readable. On Windows only the
+/// read-only bit is representable, so any mode that is not exactly the value
+/// `set_file_mode` would produce there — 0o644 for writable, 0o444 for
+/// read-only — loses information (the executable bit, or group/other
+/// distinctions like 0o640).
 pub fn mode_is_lossy_here(mode: u32) -> bool {
-    cfg!(not(unix)) && (mode & 0o111) != 0
+    if cfg!(unix) {
+        return false;
+    }
+    let perms = mode & 0o777;
+    perms != 0o644 && perms != 0o444
 }
 
 /// Create a symbolic link.

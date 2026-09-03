@@ -95,10 +95,7 @@ impl Error {
         // adopt/sync/undo cannot be advertised before they are built.
         match self {
             Error::NotARepository(_) => "run `ltx init` here to start a repository",
-            Error::NotFound(_) => {
-                "run `ltx log` to see what exists, or `ltx log --forensic` to include \
-                 everything the active lens hides"
-            }
+            Error::NotFound(_) => "run `ltx log` to see what has been saved so far",
             Error::Corrupt(_) => {
                 "run `ltx verify --complete` for the full report of what is damaged"
             }

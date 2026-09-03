@@ -132,11 +132,6 @@ pub struct OpLog {
     db: Database,
     group: Mutex<GroupState>,
     ready: Condvar,
-    /// Test-only fault hook: when set, `commit_batch` fails without touching
-    /// the database, so the poison-on-failure path can be exercised
-    /// deterministically without a real disk failure.
-    #[cfg(test)]
-    fail_commits: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -179,7 +174,13 @@ struct GroupState {
 
 impl OpLog {
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let db = Database::create(path)?;
+        Self::from_database(Database::create(path)?)
+    }
+
+    /// Build an OpLog over an already-created redb Database, recovering the
+    /// group-commit counters from durable state. Shared by `open` and, in
+    /// tests, by a constructor over a fault-injecting backend.
+    fn from_database(db: Database) -> Result<Self> {
         {
             let tx = db.begin_write()?;
             tx.open_table(ENTRIES)?;
@@ -213,8 +214,6 @@ impl OpLog {
                 ..Default::default()
             }),
             ready: Condvar::new(),
-            #[cfg(test)]
-            fail_commits: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -370,10 +369,6 @@ impl OpLog {
         if batch.is_empty() {
             return Ok(0);
         }
-        #[cfg(test)]
-        if self.fail_commits.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(Error::Io(std::io::Error::other("injected commit failure")));
-        }
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(ENTRIES)?;
@@ -487,12 +482,53 @@ impl std::fmt::Debug for OpLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     fn log() -> (tempfile::TempDir, OpLog) {
         let dir = tempfile::tempdir().unwrap();
         let log = OpLog::open(&dir.path().join("oplog.redb")).unwrap();
         (dir, log)
+    }
+
+    /// A redb backend that injects a sync failure on demand, so the
+    /// poison-on-commit-failure path can be exercised through the REAL commit
+    /// (redb's write barrier fails) rather than a hook in production code.
+    #[derive(Debug)]
+    struct FailingBackend {
+        inner: redb::backends::InMemoryBackend,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl redb::StorageBackend for FailingBackend {
+        fn len(&self) -> std::result::Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, len: usize) -> std::result::Result<Vec<u8>, std::io::Error> {
+            self.inner.read(offset, len)
+        }
+        fn set_len(&self, len: u64) -> std::result::Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self, eventual: bool) -> std::result::Result<(), std::io::Error> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected sync failure"));
+            }
+            self.inner.sync_data(eventual)
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), std::io::Error> {
+            self.inner.write(offset, data)
+        }
+    }
+
+    fn failing_log() -> (OpLog, Arc<AtomicBool>) {
+        let fail = Arc::new(AtomicBool::new(false));
+        let backend = FailingBackend {
+            inner: redb::backends::InMemoryBackend::new(),
+            fail: fail.clone(),
+        };
+        let db = Database::builder().create_with_backend(backend).unwrap();
+        (OpLog::from_database(db).unwrap(), fail)
     }
 
     #[test]
@@ -605,13 +641,10 @@ mod tests {
 
     #[test]
     fn a_failed_commit_poisons_the_log_rather_than_losing_or_faking_entries() {
-        use std::sync::atomic::Ordering;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("oplog.redb");
-        let log = OpLog::open(&path).unwrap();
+        let (log, fail) = failing_log();
         log.append(Operation::Init).unwrap();
 
-        log.fail_commits.store(true, Ordering::SeqCst);
+        fail.store(true, Ordering::SeqCst);
         // The append whose commit fails must report failure, not success.
         assert!(
             log.append(Operation::Thin { collected: 1 }).is_err(),
@@ -620,21 +653,19 @@ mod tests {
         // Clear the fault. A log that merely dropped-and-forgot the failed
         // batch would now accept an append; a POISONED log stays unwritable.
         // This is what distinguishes the fix from the old behaviour.
-        log.fail_commits.store(false, Ordering::SeqCst);
+        fail.store(false, Ordering::SeqCst);
         assert!(
             log.append(Operation::Thin { collected: 2 }).is_err(),
             "a poisoned log must refuse further appends even after the fault clears"
         );
-        drop(log);
 
-        // On reopen from durable state the chain is intact and gap-free — only
-        // the Init that actually committed survives.
-        let log = OpLog::open(&path).unwrap();
+        // The durable state is intact and gap-free: only the Init that actually
+        // committed survives, and the chain still verifies.
+        assert_eq!(log.len().unwrap(), 1, "only the durable Init survived");
         assert!(
             log.verify_chain().unwrap().is_none(),
             "chain must stay intact"
         );
-        assert_eq!(log.len().unwrap(), 1, "only the durable Init survived");
     }
 
     #[test]
