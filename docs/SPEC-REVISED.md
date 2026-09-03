@@ -179,6 +179,11 @@ strictly stronger than the 0.1% absolute beside it, and unsatisfiable.*
 **REVISED.** `corpus/manifests/g0-3-oracle.md` (hash-pinned) defines three
 reported baselines:
 
+*Harness output for every figure below:* `corpus/data/merge-baselines.json`,
+produced by `scripts/corpus/replay_merges.py` under the oracle pinned at
+`corpus/manifests/g0-3-oracle.sha256`. Reproduce with `python3
+harness/g0/g0_3_merge_corpus.py`.
+
 1. **Naive** — mis-merges among clean-and-matching cases. **Measured: 0.00%**,
    zero by construction, reported with that reasoning attached so the number is
    never mistaken for evidence that line merge is safe.
@@ -205,8 +210,11 @@ merge has almost nothing to do. Meanwhile the dangerous population — conflicts
 structural merge confidently auto-resolves, which G4.4 rewards Lattice for
 growing — is excluded by the same clause.*
 
-**REVISED.** G4.3 is measured twice; both are reported and both must be
-satisfied:
+**REVISED.** G4.3 is measured twice. **G4.3-a is the pass criterion; G4.3-b is
+reporting-only until the stakeholder sets a threshold.** An earlier draft of this
+section said "both must be satisfied" while giving G4.3-b no numeric target,
+which left a required metric with no pass condition — a contradiction, caught in
+review and corrected here rather than left for G6.4 to find.
 
 - **G4.3-a** — exactly as originally specified. Unchanged, so the brief's
   criterion is honoured verbatim.
@@ -215,8 +223,11 @@ satisfied:
   to the human result under the same normalization. Reported beside G4.4's rate
   in every scorecard.
 
-G4.3-b carries **no numeric target**, because inventing one would substitute our
-judgment for the stakeholder's. **Open question referred to the stakeholder**
+G4.3-b carries **no numeric target**, and is therefore **recorded in the gate
+registry as reporting-only**: it is measured and printed in every scorecard, and
+it cannot fail the delivery, because a metric with no threshold cannot be failed
+against one. Inventing a threshold would substitute our judgment for the
+stakeholder's on the project's central safety property. **Open question referred to the stakeholder**
 (`STAKEHOLDER/001`): G4.3-b should probably become the primary safety gate with
 G4.3-a retained as a regression check. Until that is decided, G4.4's mandated
 resolution-vs-mis-merge curve carries the judgment.

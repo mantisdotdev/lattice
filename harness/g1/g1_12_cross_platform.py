@@ -101,9 +101,14 @@ def main() -> int:
     if skipped:
         notes.append(f"job succeeded without building on: {', '.join(skipped)} "
                      f"(a self-skipped job is not a platform pass)")
-    if run.get("headSha") != head:
+    stale = run.get("headSha") != head
+    if stale:
+        # Stale evidence must change the VALUE, not just annotate it. A note
+        # alone left `value: 3` on a run from an older commit, which the runner
+        # would have compared against the >= 3 target and passed.
         notes.append(f"measured run is at {str(run.get('headSha'))[:12]}, "
-                     f"HEAD is {head[:12]} — result may be stale")
+                     f"HEAD is {head[:12]} — stale, so no platform is credited")
+        green = 0
 
     print(json.dumps({
         "gate": "G1.12",

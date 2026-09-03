@@ -70,8 +70,12 @@ def collect_entries(root: Path) -> dict[bytes, dict]:
     out: dict[bytes, dict] = {}
     rootb = os.fsencode(root)
     for dirpath, dirnames, filenames in os.walk(rootb):
-        if b"/.lattice" in dirpath or dirpath.endswith(b"/.lattice"):
-            dirnames[:] = []
+        # Prune BEFORE recording. An earlier version pruned on the next
+        # iteration, by which time `.lattice` had already been recorded as a
+        # directory entry of the root -- producing a permanent false mismatch
+        # ("present in source, absent after checkout") on every single run.
+        dirnames[:] = [d for d in dirnames if d != b".lattice"]
+        if b".lattice" in Path(os.fsdecode(dirpath)).parts:
             continue
         for name in filenames + dirnames:
             full = os.path.join(dirpath, name)
@@ -102,6 +106,37 @@ def main() -> int:
     expected = {f["path"]: f for f in manifest["files"]}
     expected_special = {s["path"]: s for s in manifest["special_entries"]}
 
+    # G1.2 names its mandated cases explicitly. Deriving the expectation set
+    # from the manifest alone let a corpus builder omit one -- the >=1 GB file,
+    # via --skip-huge -- and still produce a manifest that looked complete, so
+    # the gate would report 0 mismatches while never measuring a mandated case.
+    # The mandate lives here, in the harness, where the corpus cannot edit it.
+    mandated = {
+        "crlf": "eol/crlf.txt",
+        "bom": "encoding/utf8-bom.txt",
+        "invalid utf-8": "encoding/invalid-utf8.bin",
+        "0-byte": "size/empty.txt",
+        ">=1 GB file": "size/huge-1gb.bin",
+    }
+    absent = {name: path for name, path in mandated.items() if path not in expected}
+    declared_skips = manifest.get("skipped_mandated_cases", [])
+    if absent:
+        print(json.dumps({
+            "gate": "G1.2", "value": len(absent), "unit": "mismatches",
+            "note": "corpus omits mandated cases named by G1.2: "
+                    + ", ".join(f"{n} ({p})" for n, p in absent.items())
+                    + (f" | builder declared skips: {declared_skips}"
+                       if declared_skips else ""),
+            "detail": {"missing_mandated_cases": absent,
+                       "declared_skips": declared_skips}}))
+        return 0
+    if not any(s["kind"] == "symlink" for s in expected_special.values()):
+        print(json.dumps({
+            "gate": "G1.2", "value": 1, "unit": "mismatches",
+            "note": "corpus contains no symlink entries; G1.2 names symlinks "
+                    "explicitly, so symlink round-trip would go unmeasured"}))
+        return 0
+
     work = Path(tempfile.mkdtemp(prefix="g1-2-"))
     mismatches: list[dict] = []
     checked = 0
@@ -111,7 +146,14 @@ def main() -> int:
 
         r = ltx("init", cwd=source)
         if r.returncode != 0:
-            return not_implemented(f"ltx init failed: {r.stderr[:200]}")
+            # A built binary that cannot initialise is a failure, not an absent
+            # subject. Reporting not-implemented here would map to N/A-yet and
+            # the gate would never evaluate its value.
+            print(json.dumps({
+                "gate": "G1.2", "value": len(expected) + len(expected_special),
+                "unit": "mismatches",
+                "note": f"ltx init failed: {r.stderr[:200]}"}))
+            return 0
         r = ltx("save", "adversarial corpus", cwd=source)
         if r.returncode != 0:
             print(json.dumps({
@@ -148,10 +190,14 @@ def main() -> int:
                     "expected_bytes": info["bytes"],
                     "actual_bytes": path.stat().st_size})
             if "mode" in info:
-                actual_mode = oct(path.stat().st_mode & 0o777)
-                if actual_mode != info["mode"]:
+                # Normalise both sides: oct() yields '0o755', the manifest
+                # records '0755'. Comparing them raw made this branch fire on
+                # every correct round-trip, so the gate could never reach 0.
+                actual_mode = f"{path.stat().st_mode & 0o777:04o}"
+                if actual_mode != f"{int(str(info['mode']), 8):04o}":
                     mismatches.append({"path": rel, "why": "mode differs",
-                                       "expected": info["mode"], "actual": actual_mode})
+                                       "expected": f"{int(str(info['mode']), 8):04o}",
+                                       "actual": actual_mode})
 
         # 2. Symlinks must round-trip as symlinks, targets intact, without being
         #    followed. Empty directories must survive.

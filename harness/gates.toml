@@ -634,3 +634,19 @@ unit="completion"
 type="HARD"
 klass="A"
 harness=["python3","harness/g6/g6_review.py","G6.5"]
+
+# --------------------------------------------------------------------------
+# ADDED under docs/DISAGREEMENTS.md Challenge 16. The brief flags grammar
+# licences in §8 as a parenthetical with no gate behind it; every other
+# project-level obligation has a gate. A licence violation found after launch
+# can require removing a language or a backend from a shipped product.
+[G1-13]
+stage="G1"
+title="Licence compatibility"
+metric="dependencies (including tree-sitter grammars) whose licence is outside the Apache-2.0-compatible allowlist"
+target=0
+cmp="=="
+unit="violations"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_13_licences.py"]

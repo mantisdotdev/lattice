@@ -32,6 +32,21 @@ REPO = Path(__file__).resolve().parents[2]
 REPOS = REPO / "corpus" / "data" / "repos"
 DEST = REPO / "corpus" / "data" / "reference-repo"
 PINS = REPO / "corpus" / "manifests" / "g0-5-pins.json"
+EXPECTED_PINS: dict[str, str] = {}
+
+# Expected base commits. Populated from corpus/manifests/g0-5-pins.json on the
+# first build and enforced on every later one, so a --force rebuild after the
+# clones move cannot silently produce a different corpus under the same manifest.
+def _load_expected_pins() -> dict[str, str]:
+    if not PINS.exists():
+        return {}
+    try:
+        doc = json.loads(PINS.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return {slug: v.get("head") for slug, v in doc.get("bases", {}).items()
+            if v.get("head")}
+
 
 # Per the amended statistics contract.
 BASES = [
@@ -54,7 +69,13 @@ def git(*args, cwd=None, timeout=7200, check=False):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--repin", action="store_true",
+                    help="accept current clone HEADs as the new pins (records "
+                         "a deliberate re-pin rather than a silent drift)")
     args = ap.parse_args()
+
+    global EXPECTED_PINS
+    EXPECTED_PINS = {} if args.repin else _load_expected_pins()
 
     if DEST.exists():
         if not args.force:
@@ -74,7 +95,17 @@ def main() -> int:
             print(f"SKIP {slug}: not cloned", file=sys.stderr)
             continue
         head = git("-C", str(src), "rev-parse", "HEAD").stdout.strip()
-        commits = int(git("-C", str(src), "rev-list", "--count", "--all").stdout.strip() or 0)
+        # Count only what the fetch below actually imports (branch heads), not
+        # every ref in the source clone. Counting --all inflated the manifest:
+        # base counts summed to 350,801 while the composite reached 349,778.
+        commits = int(git("-C", str(src), "rev-list", "--count",
+                          "--branches").stdout.strip() or 0)
+        expected = EXPECTED_PINS.get(slug)
+        if expected and expected != head:
+            print(f"  PIN MISMATCH for {slug}: expected {expected[:12]}, "
+                  f"clone HEAD is {head[:12]} — refusing to build a different "
+                  f"corpus under the same manifest", file=sys.stderr)
+            return 1
         print(f"fetching {slug} ({role}) head={head[:12]} commits={commits:,} …",
               file=sys.stderr, flush=True)
         t0 = time.time()

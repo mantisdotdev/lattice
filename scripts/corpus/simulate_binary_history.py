@@ -69,6 +69,10 @@ def harvest(roots: list[Path], budget: int, rng: random.Random) -> list[Path]:
                 continue
             found.append(p)
             total += size
+    # Sort before shuffling. rglob order is filesystem-dependent, so shuffling
+    # an unsorted list made the same SEED produce different corpora on different
+    # machines -- which defeats the point of seeding it at all.
+    found.sort()
     rng.shuffle(found)
     return found
 
@@ -163,8 +167,14 @@ def main() -> int:
             files += 1
             if written >= args.target_bytes:
                 break
-        records.append({"seed": str(src.relative_to(REPO)) if str(src).startswith(str(REPO))
-                        else src.name, "bytes": len(data), "chain": chain})
+        records.append({
+            "seed": str(src.relative_to(REPO)) if str(src).startswith(str(REPO))
+                    else src.name,
+            "bytes": len(data),
+            # Digest every selected seed so the corpus is verifiable, not merely
+            # re-runnable: a changed seed file is detectable after the fact.
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "chain": chain})
 
     manifest = {
         "seed": SEED,
@@ -176,7 +186,7 @@ def main() -> int:
         "total_files": files,
         "total_bytes_with_history": written,
         "mutation_kinds": kind_counts,
-        "seeds": records[:200],
+        "seeds": records,
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({k: v for k, v in manifest.items() if k != "seeds"}, indent=2))

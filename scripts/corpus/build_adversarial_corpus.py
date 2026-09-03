@@ -147,7 +147,14 @@ def build_special(r: list, special: list) -> None:
             special.append({"path": f"special/{name}", "kind": "symlink",
                             "target": target, "note": note})
         except OSError as exc:
+            # Recorded, not swallowed. Silently dropping the entry produced a
+            # manifest that looked complete while G1.2 stopped testing symlink
+            # round-trip entirely -- the realistic trigger being Windows without
+            # developer mode, and Windows is tier-1.
             print(f"symlink {name} unavailable: {exc}", file=sys.stderr)
+            special.append({"path": f"special/{name}", "kind": "symlink",
+                            "target": target, "note": note,
+                            "creation_failed": str(exc)})
 
     payload = b"#!/bin/sh\nexit 0\n"
     exec_path = OUT / "special" / "executable.sh"
@@ -201,7 +208,12 @@ def main() -> int:
     build_sizes(records)
     build_names(records)
     build_special(records, special)
-    if not args.skip_huge:
+    skipped_mandated: list[str] = []
+    if args.skip_huge:
+        # Declared in the manifest so a consumer can reject an incomplete
+        # corpus instead of trusting a manifest that appears whole.
+        skipped_mandated.append("size/huge-1gb.bin")
+    else:
         build_huge(records, args.huge_file_bytes)
 
     manifest = {
@@ -211,6 +223,7 @@ def main() -> int:
         "special_entries": sorted(special, key=lambda x: x["path"]),
         "total_files": len(records),
         "total_bytes": sum(x["bytes"] for x in records),
+        "skipped_mandated_cases": skipped_mandated,
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({"files": len(records), "special_entries": len(special),

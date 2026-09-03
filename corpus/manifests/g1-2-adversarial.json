@@ -260,6 +260,12 @@
       "sha256": "dc404a613fedaeb54034514bc6505f56b933caa5250299ba7d094377a51caa46"
     },
     {
+      "path": "size/huge-1gb.bin",
+      "bytes": 1100000000,
+      "sha256": "9e276255480215ecdbe46f35d5e056a7936c142d493a9452829ea037a540123a",
+      "note": "the >=1 GB file G1.2 names explicitly; exercises chunk trees"
+    },
+    {
       "path": "size/one-byte.txt",
       "bytes": 1,
       "note": "1 byte",
@@ -316,6 +322,7 @@
       "note": "relative symlink; target must not be followed on save"
     }
   ],
-  "total_files": 47,
-  "total_bytes": 2340192
+  "total_files": 48,
+  "total_bytes": 1102340192,
+  "skipped_mandated_cases": []
 }

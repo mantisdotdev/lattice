@@ -71,10 +71,14 @@ until re-measured, so a late edit cannot silently preserve a PASS.
 ## Where the scorecard of record is produced
 
 CI measures only the gates whose inputs are committed to the repository. The
-corpus-dependent gates read corpora measured in gigabytes — 284,316 mined merge
-commits, a ~100k-file composite reference repository, a ≥5 GiB binary corpus —
-which are built by committed scripts from hash-pinned public sources rather than
-committed themselves. Running those gates in a clean CI checkout would report a
+corpus-dependent gates read corpora measured in gigabytes — a mined merge corpus,
+a composite reference repository, and a large-binary corpus — which are built by
+committed scripts from hash-pinned public sources rather than committed
+themselves. Their measured sizes are not restated here: every figure lives in the
+scorecard row of the gate that measured it, and in the harness output that row
+cites (`corpus/data/merge-baselines.json`, `corpus/manifests/g0-5-pins.json`,
+`corpus/manifests/g0-5-binary-corpus.json`). Restating a number in prose is how
+prose and measurement drift apart. Running those gates in a clean CI checkout would report a
 FAIL meaning "the corpus is not in this checkout," which is not what a FAIL is
 supposed to mean.
 

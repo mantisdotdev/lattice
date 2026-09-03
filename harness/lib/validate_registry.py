@@ -11,7 +11,15 @@ import gauntlet as G
 # spec, or the waiver cap in §0.5 is being computed over the wrong set.
 SPEC_PERF_GATES = {"G1.5", "G1.6", "G1.7", "G1.8", "G1.9", "G4.6", "G5.4", "G5.8"}
 SPEC_TIMING_GATES = {"G1.5", "G1.6", "G1.7", "G4.6", "G5.4"}
-SPEC_STAGE_COUNTS = {"G0": 8, "G1": 12, "G2": 8, "G3": 6, "G4": 7, "G5": 8, "G6": 5}
+# G1 carries 13 rather than the brief's 12: G1.13 (licence compatibility) is an
+# ADDITION under docs/DISAGREEMENTS.md Challenge 16, not a re-scope. §0.4 forbids
+# re-scoping downward; it does not forbid adding a gate.
+SPEC_STAGE_COUNTS = {"G0": 8, "G1": 13, "G2": 8, "G3": 6, "G4": 7, "G5": 8, "G6": 5}
+ADDED_GATES = {"G1.13"}
+# Challenge 11: the spec-compliance auditor may not be converted to [S] under
+# §0.9's conversion clause, because it is the gate that would catch an improper
+# conversion. Enforced here so the escape hatch cannot be widened silently.
+NON_CONVERTIBLE = {"G6.4"}
 VALID_CMP = {">=", "<=", ">", "<", "=="}
 VALID_TYPE = {"HARD", "SOFT"}
 VALID_KLASS = {"A", "S", "A+S"}
@@ -37,6 +45,16 @@ def main() -> int:
                             f"does not exist (§0.1)")
         if gate.timing and not gate.perf:
             problems.append(f"{gid}: marked timing but not perf")
+
+    for gid in NON_CONVERTIBLE:
+        gate = gates.get(gid)
+        if gate is None:
+            problems.append(f"{gid} missing from the registry")
+        elif gate.klass != "A":
+            problems.append(
+                f"{gid} is class [{gate.klass}] but is non-convertible: it is the "
+                f"gate that would catch an improper §0.9 conversion, so it may "
+                f"never itself be converted to [S] (Challenge 11)")
 
     perf = {gid for gid, g in gates.items() if g.perf}
     if perf != SPEC_PERF_GATES:

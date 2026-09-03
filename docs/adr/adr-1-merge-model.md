@@ -101,6 +101,14 @@ not uniform, and the spread is large enough to drive §5.2's language selection:
 | Rust | 1,041 | 3.94% |
 | Ruby | 961 | 3.54% |
 | Python | 4,088 | 2.69% |
+| *Binary* (opencv/opencv_extra) | 671 | 3.43% |
+
+The last row is not a programming language: `opencv/opencv_extra` is the
+binary-heavy media corpus, labelled `Binary` in the manifest. It is listed so the
+counts reconcile — the nine language rows sum to 15,322 and the corpus replayed
+15,993, the difference being exactly these 671. The semantic layer will never
+parse this material, so it is excluded from launch-language reasoning but not
+from the totals.
 
 Structural merge can only help where line merge conflicts, so its value is
 concentrated in Java, TypeScript, PHP and JavaScript — and is nearly irrelevant
@@ -113,7 +121,17 @@ and this is the data.
 
 ## Evidence
 
-**Measured, this repository.** `corpus/data/merge-baselines.json` — 284,316
+**Measured, this repository.** Harness output:
+`corpus/data/merge-baselines.json` (raw), produced by
+`scripts/corpus/replay_merges.py`; gate result in `bench/results/` for the
+iteration in which G0.3 was measured. Reproduce with:
+
+```bash
+python3 scripts/corpus/mine_merges.py && python3 scripts/corpus/replay_merges.py
+python3 harness/g0/g0_3_merge_corpus.py
+```
+
+`corpus/data/merge-baselines.json` — 284,316
 two-parent merges mined from 24 repositories across 10 languages; 15,993 replayed
 under the frozen oracle (`corpus/manifests/g0-3-oracle.md`, sha256
 `61f114e9…`), seed 20260903:

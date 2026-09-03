@@ -14,6 +14,7 @@ import collections
 import hashlib
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -26,23 +27,27 @@ REFREPO = REPO / "corpus" / "data" / "reference-repo"
 PINS = REPO / "corpus" / "manifests" / "g0-5-pins.json"
 BINMAN = REPO / "corpus" / "manifests" / "g0-5-binary-corpus.json"
 
-# The contract, transcribed. Changing a bound here without changing the
-# contract document is caught by the hash pin above.
-BOUNDS = {
-    "file_count": (90_000, 130_000),
-    "total_working_bytes": (1.5 * 2**30, None),
-    "history_bytes": (2.0 * 2**30, None),
-    "history_depth": (20_000, None),
-    "binary_fraction": (0.05, 0.35),
-    "p50_file_bytes": (512, 8192),
-    "p90_file_bytes": (8192, None),
-    "p99_file_bytes": (262_144, None),
-    "max_file_bytes": (33_554_432, None),
-    "directory_count": (6_000, None),
-    "max_directory_fanout": (500, None),
-    "mean_directory_fanout": (3.0, 40.0),
-    "max_path_depth": (8, None),
-    "distinct_extensions": (30, None),
+# Bounds are PARSED from the pinned contract document at run time (see
+# parse_bounds); this dict is only the expected key set and unit interpretation.
+# An earlier version transcribed the numbers here and claimed the hash pin
+# protected them. It did not: the pin compares the document's SHA-256 and never
+# reads this file, so a weakened bound here passed silently while the gate still
+# reported 1. Found by review; the fix is to stop transcribing.
+EXPECTED_KEYS = {
+    "file_count",
+    "total_working_bytes",
+    "history_bytes",
+    "history_depth",
+    "binary_fraction",
+    "p50_file_bytes",
+    "p90_file_bytes",
+    "p99_file_bytes",
+    "max_file_bytes",
+    "directory_count",
+    "max_directory_fanout",
+    "mean_directory_fanout",
+    "max_path_depth",
+    "distinct_extensions",
 }
 BINARY_BOUNDS = {
     "seed_bytes": (500 * 2**20, None),
@@ -50,6 +55,57 @@ BINARY_BOUNDS = {
     "versions_per_seed": (8, None),
     "mutation_kinds_used": (4, None),
 }
+
+
+SIZE_SUFFIX = {"gib": 2 ** 30, "mib": 2 ** 20, "kib": 2 ** 10, "g": 2 ** 30,
+               "m": 2 ** 20, "k": 2 ** 10}
+
+
+def _num(token: str) -> float | None:
+    """Parse a contract bound token.
+
+    Handles the forms the contract actually uses: `90,000`, `1.5 GiB`, `0.05`,
+    `262,144`, `20,000 commits`, `40.0`. A trailing unit word (commits, files,
+    entries) is ignored; a size suffix is applied as a multiplier.
+    """
+    token = token.strip().replace("`", "").replace(",", "")
+    m = re.match(r"^\s*([0-9]*\.?[0-9]+)\s*([A-Za-z]*)", token)
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = m.group(2).lower()
+    return value * SIZE_SUFFIX.get(unit, 1)
+
+
+def parse_bounds(text: str) -> dict[str, tuple[float | None, float | None]]:
+    """Derive the bounds from the pinned contract document itself.
+
+    The contract is the authority. Parsing it means a weakened bound cannot be
+    smuggled into the harness without changing the document, which moves the
+    hash pin, which fails the gate.
+    """
+    out: dict[str, tuple[float | None, float | None]] = {}
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        key = cells[0].strip().strip("`")
+        if key not in EXPECTED_KEYS:
+            continue
+        bound = cells[1].strip()
+        lo = hi = None
+        m = re.match(r"^≥\s*(.+?)\s+and\s+≤\s*(.+)$", bound)
+        if m:
+            lo, hi = _num(m.group(1)), _num(m.group(2))
+        elif bound.startswith("≥"):
+            lo = _num(bound[1:])
+        elif bound.startswith("≤"):
+            hi = _num(bound[1:])
+        if lo is not None or hi is not None:
+            out[key] = (lo, hi)
+    return out
 
 
 def dir_bytes(p: Path) -> int:
@@ -69,6 +125,7 @@ def measure_reference() -> dict | None:
     sizes, dirs, exts, depths = [], collections.Counter(), collections.Counter(), []
     binary = 0
     files = 0
+    unreadable: list[str] = []
     for root, dirnames, filenames in os.walk(REFREPO):
         if ".git" in root.split(os.sep):
             continue
@@ -91,7 +148,11 @@ def measure_reference() -> dict | None:
                     if b"\x00" in fh.read(8000):
                         binary += 1
             except OSError:
-                pass
+                # An unreadable file is NOT "not binary". Counting it in `files`
+                # while omitting it from `binary` lowers binary_fraction and can
+                # bring a non-conforming corpus under the 0.35 ceiling, so the
+                # gate must fail rather than absorb it.
+                unreadable.append(os.path.relpath(path, REFREPO))
     if not sizes:
         return None
     sizes.sort()
@@ -116,6 +177,7 @@ def measure_reference() -> dict | None:
         "mean_directory_fanout": statistics.mean(dirs.values()) if dirs else 0.0,
         "max_path_depth": max(depths) if depths else 0,
         "distinct_extensions": len(exts),
+        "unreadable_files": unreadable,
     }
 
 
@@ -144,13 +206,31 @@ def main() -> int:
             problems.append("CONTRACT HASH MISMATCH — the contract changed after freezing")
         detail["contract_sha256"] = actual
 
+    bounds: dict = {}
+    if CONTRACT.exists():
+        bounds = parse_bounds(CONTRACT.read_text())
+        missing_bounds = sorted(EXPECTED_KEYS - set(bounds))
+        if missing_bounds:
+            problems.append(
+                "contract does not define bounds for: " + ", ".join(missing_bounds)
+                + " — the harness refuses to substitute its own")
+        detail["bounds_parsed_from_contract"] = {
+            k: list(v) for k, v in sorted(bounds.items())}
+
     ref = measure_reference()
     if ref is None:
         problems.append("reference repo not built "
                         "(scripts/corpus/build_reference_repo.py)")
+    elif not bounds:
+        problems.append("no bounds could be parsed from the pinned contract")
     else:
         detail["reference_repo"] = ref
-        problems += [f"reference repo {p}" for p in check(ref, BOUNDS)]
+        problems += [f"reference repo {p}" for p in check(ref, bounds)]
+        if ref.get("unreadable_files"):
+            problems.append(
+                f"{len(ref['unreadable_files'])} files could not be read while "
+                f"classifying binary content; binary_fraction is therefore "
+                f"unmeasured for them")
         if PINS.exists():
             detail["base_pins"] = json.loads(PINS.read_text()).get("bases", {})
             if len(detail["base_pins"]) < 3:
