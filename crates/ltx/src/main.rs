@@ -80,6 +80,8 @@ enum Command {
         #[arg(long)]
         into: PathBuf,
     },
+    /// Reverse the most recent operation.
+    Undo,
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
     Internals(Internals),
@@ -89,6 +91,8 @@ enum Command {
 enum Internals {
     /// The machine-readable command surface, for tooling and conformance tests.
     CommandSurface,
+    /// The raw append-only operation log (the audit record).
+    Oplog,
     /// Chunk store statistics.
     Store,
 }
@@ -179,19 +183,22 @@ fn run(cli: &Cli) -> Result<u8> {
 
         Command::Log { forensic, limit } => {
             let repo = Repo::discover(&cwd)?;
+            // History is the checkpoint graph reachable from the current head,
+            // which undo moves — so this view is invariant under undo-all
+            // (ADR-15). The raw op-log is not history; it lives at
+            // `ltx internals oplog`. The text rendering still lists operations.
+            let checkpoints = repo.reachable_checkpoints()?;
             let mut entries = repo.log()?;
             entries.reverse();
             if let Some(n) = limit {
                 entries.truncate(*n);
             }
-            let checkpoints = repo.checkpoints()?;
             emit(
                 cli,
                 || {
                     serde_json::json!({
                         "ok": true,
                         "forensic": forensic,
-                        "operations": entries,
                         "checkpoints": checkpoints,
                     })
                 },
@@ -283,17 +290,50 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Undo => {
+            let mut repo = Repo::discover(&cwd)?;
+            let outcome = repo.undo()?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true,
+                        // G1.3 reads this exact key to know when to stop.
+                        "nothing_to_undo": outcome.nothing_to_undo,
+                        "undone_checkpoint": outcome.undone_checkpoint,
+                        "now_at": outcome.now_at,
+                        "undo_seq": outcome.undo_seq,
+                        // Challenge 8 / §4.3: undo names any remote residue it
+                        // could not reverse. Empty for a purely local undo.
+                        "remote_effects_not_undone": outcome.remote_effects_not_undone,
+                    })
+                },
+                || match (&outcome.undone_checkpoint, &outcome.now_at) {
+                    (Some(undone), Some(now)) => format!(
+                        "undid {}; now at {}",
+                        ltx_core::short_id(undone),
+                        ltx_core::short_id(now)
+                    ),
+                    _ => "nothing to undo".to_string(),
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Internals(Internals::CommandSurface) => {
             // G1.3's coverage contract requires the state-changing surface to
             // be DISCOVERABLE rather than hand-listed in the harness, so the
-            // product publishes it.
+            // product publishes it. `init` is state_changing:false — it
+            // establishes the container, not undoable user-visible state, and
+            // sits below the undo floor (ADR-15).
             let surface = serde_json::json!({
                 "ok": true,
                 "version": 1,
                 "concepts": ltx_core::CONCEPTS,
                 "commands": [
-                    { "name": "init", "state_changing": true, "undoable": true, "sample_args": [] },
+                    { "name": "init", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "save", "state_changing": true, "undoable": true, "sample_args": ["probe"] },
+                    { "name": "undo", "state_changing": true, "undoable": true, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "verify", "state_changing": false, "undoable": false, "sample_args": [] },
@@ -301,6 +341,31 @@ fn run(cli: &Cli) -> Result<u8> {
                 ],
             });
             println!("{}", serde_json::to_string(&surface)?);
+            Ok(EXIT_OK)
+        }
+
+        Command::Internals(Internals::Oplog) => {
+            // The raw append-only audit record. Not history (that is `log`); it
+            // grows on every operation, including undo, so it is out of the
+            // equality domain G1.3 compares.
+            let repo = Repo::discover(&cwd)?;
+            let entries = repo.log()?;
+            emit(
+                cli,
+                || serde_json::json!({ "ok": true, "operations": entries }),
+                || {
+                    let mut out = String::new();
+                    for e in &entries {
+                        out.push_str(&format!(
+                            "{:>5}  {:<8} {}\n",
+                            e.seq,
+                            e.operation.name(),
+                            ltx_core::short_id(&e.id)
+                        ));
+                    }
+                    out.trim_end().to_string()
+                },
+            );
             Ok(EXIT_OK)
         }
 

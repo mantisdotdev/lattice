@@ -80,11 +80,16 @@ impl Operation {
     /// Challenge 12: §4.3 promises every state-changing command is undoable,
     /// but undoing a redaction would resurrect the secret it destroyed and
     /// falsify a GDPR erasure claim, and thinned data is simply gone. The
-    /// honest scope is local causal undo with these two named exclusions, and
-    /// naming them here means G1.3 can assert that each REFUSES undo rather
-    /// than silently doing nothing.
+    /// honest scope is local causal undo with those two named exclusions among
+    /// the state-changing commands, so G1.3 can assert each REFUSES undo rather
+    /// than silently doing nothing. `Init` is separate: it establishes the
+    /// repository container below the undo floor (ADR-15), is not a
+    /// state-changing command for undo purposes, and is not undoable.
     pub fn is_undoable(&self) -> bool {
-        !matches!(self, Operation::Redact { .. } | Operation::Thin { .. })
+        !matches!(
+            self,
+            Operation::Init | Operation::Redact { .. } | Operation::Thin { .. }
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -602,6 +607,10 @@ mod tests {
         assert!(
             Operation::Undo { undone_seq: 1 }.is_undoable(),
             "undo of undo is redo, and must remain available"
+        );
+        assert!(
+            !Operation::Init.is_undoable(),
+            "init is the undo floor and is not undoable"
         );
     }
 

@@ -21,7 +21,7 @@ pub mod tree;
 pub use chunk::{Chunk, ChunkId};
 pub use error::{Category, Concept, Error, Result};
 pub use oplog::{Entry, OpLog, Operation};
-pub use repo::{Checkpoint, Repo, Status, VerifyReport};
+pub use repo::{Checkpoint, Repo, Status, UndoOutcome, VerifyReport};
 pub use store::Store;
 pub use tree::{Node, Tree};
 
