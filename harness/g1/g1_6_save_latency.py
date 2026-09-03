@@ -108,6 +108,14 @@ def main() -> int:
 
             t = L.time_command(["save", "scaling probe"], cwd=sub, runs=25,
                                warmup=3, before=before_sub)
+            if t.failures or len(t.samples_ms) < 25:
+                return L.emit({
+                    "gate": GATE, "value": 1e9, "unit": "ms",
+                    "note": f"scaling point {frac} produced {len(t.samples_ms)}/25 "
+                            f"usable samples ({t.failures} failures), so the "
+                            f"cost-vs-size correlation cannot be computed",
+                    "detail": {"scaling_curve": scaling,
+                               "stderr": t.stderr_sample}})
             scaling.append({"fraction_of_repo": frac,
                             "files": int(len(paths) * frac),
                             "p95_ms": round(t.p95, 3)})

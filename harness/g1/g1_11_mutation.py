@@ -60,7 +60,9 @@ def main() -> int:
     proc = subprocess.run(args, cwd=REPO, capture_output=True, text=True,
                           errors="replace", timeout=86400, check=False)
 
-    if proc.returncode not in (0, 1, 2, 3):
+    # cargo-mutants: 0 all caught, 2 missed mutants, 3 timeouts, 4 unviable --
+    # those are RESULTS. 1 is "some other error" and must not be read as a score.
+    if proc.returncode not in (0, 2, 3, 4):
         # cargo-mutants uses 1/2/3 to signal surviving/timeout/unviable mutants,
         # which are results rather than errors. Anything else is a tool failure
         # and must not be read as a score.
@@ -124,14 +126,13 @@ def main() -> int:
     total = killed + missed
     if total == 0:
         # Zero viable mutants means the run measured nothing -- usually a bad
-        # --file pattern. Reporting 0.0% would look like a catastrophic score
-        # when the truth is that no mutation was attempted.
-        return L.emit({
-            "gate": GATE, "value": 0.0, "unit": "percent",
-            "note": f"cargo-mutants produced no viable mutants for "
-                    f"{', '.join(SCOPED_MODULES)}; the file patterns matched "
-                    f"nothing, so nothing was measured",
-            "detail": {"file_patterns": files, "outcomes": len(outcomes)}})
+        # --file pattern. Emitting 0.0% would be a numeric RESULT for a run that
+        # produced none, and the runner would score it against the 80% target as
+        # though the store had been mutated and survived.
+        return L.not_implemented(
+            GATE, f"cargo-mutants produced no viable mutants for "
+                  f"{', '.join(SCOPED_MODULES)}: the file patterns "
+                  f"{files} matched nothing, so nothing was measured")
     rate = 100.0 * killed / total
     return L.emit({
         "gate": GATE, "value": round(rate, 2), "unit": "percent",

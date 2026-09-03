@@ -30,7 +30,9 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-OP_WRITE, OP_PWRITE, OP_FSYNC, OP_FDATASYNC, OP_RENAME, OP_FTRUNCATE, OP_UNLINK = range(1, 8)
+(OP_WRITE, OP_PWRITE, OP_FSYNC, OP_FDATASYNC, OP_RENAME, OP_FTRUNCATE,
+ OP_UNLINK, OP_DIRSYNC) = range(1, 9)
+SYNC_OPS = (OP_FSYNC, OP_FDATASYNC, OP_DIRSYNC)
 SECTOR = 512
 
 # Map a path inside the store to the critical section it belongs to, so
@@ -121,10 +123,16 @@ def main() -> int:
     last_dir_sync: dict[str, int] = {}
     for r in prefix:
         if r.op in (OP_FSYNC, OP_FDATASYNC):
-            last_sync[r.path] = r.seq
+            # A FILE sync. It makes that file's data durable and nothing else.
+            # An earlier version also credited the parent directory here, which
+            # is wrong in the engine's favour: fsync on a file does not make a
+            # rename or unlink in its directory durable, so the replayer would
+            # refuse to drop metadata the engine never actually committed.
+            last_sync[r.path] = max(last_sync.get(r.path, -1), r.seq)
+        elif r.op == OP_DIRSYNC:
+            # A DIRECTORY sync, recorded distinctly by the shim. This is what
+            # makes rename/create/unlink metadata durable.
             last_dir_sync[r.path] = max(last_dir_sync.get(r.path, -1), r.seq)
-            parent = str(Path(r.path).parent)
-            last_dir_sync[parent] = max(last_dir_sync.get(parent, -1), r.seq)
 
     def barrier_for(rec: Record) -> int:
         if rec.op in (OP_RENAME, OP_UNLINK):
@@ -133,7 +141,7 @@ def main() -> int:
 
     durable, volatile = [], []
     for r in prefix:
-        if r.op in (OP_FSYNC, OP_FDATASYNC):
+        if r.op in SYNC_OPS:
             continue
         (durable if r.seq < barrier_for(r) else volatile).append(r)
 

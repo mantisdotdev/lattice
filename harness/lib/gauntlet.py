@@ -121,8 +121,12 @@ class Gate:
                 text = path.read_text(errors="replace")
             except OSError:
                 continue
-            for module in re.findall(r"^\s*import\s+(\w+)", text, re.M):
-                cand = lib / f"{module}.py"
+            # `import X`, `import X as Y`, and `from X import ...` -- the
+            # first form alone missed every from-import, so a harness could be
+            # rewritten through a module it pulled in that way without the
+            # freeze noticing.
+            for module in re.findall(r"^\s*(?:import|from)\s+([\w.]+)", text, re.M):
+                cand = lib / (module.replace(".", "/") + ".py")
                 if cand.exists():
                     pending.append(cand)
             for ref in re.findall(r"harness/lib/[\w./-]+", text):
@@ -130,8 +134,13 @@ class Gate:
                 if cand.exists() and cand.is_file():
                     pending.append(cand)
                 elif cand.is_dir():
-                    pending.extend(c for c in cand.iterdir() if c.is_file()
-                                   and c.suffix in (".py", ".c", ".h"))
+                    # Include build inputs too: the compiled shim is what
+                    # actually runs, so its source and Makefile are part of
+                    # what determines the measurement.
+                    pending.extend(
+                        c for c in cand.iterdir() if c.is_file()
+                        and (c.suffix in (".py", ".c", ".h")
+                             or c.name in ("Makefile", "makefile")))
         return sorted(seen)
 
     @property

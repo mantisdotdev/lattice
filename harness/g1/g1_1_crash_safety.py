@@ -125,6 +125,33 @@ def verify(repo: Path) -> tuple[bool, str]:
         json.dumps(doc.get("errors", []))[:300]
 
 
+def calibrate(repo: Path, argv: list[str], shim: Path, work: Path,
+              trial: int) -> int | None:
+    """Total journal bytes this operation emits when it runs to completion.
+
+    Measured on a throwaway copy so the real trial starts from the same state,
+    and cached per operation so 2,000 trials do not pay for 2,000 calibrations.
+    """
+    key = " ".join(argv)
+    if key in _CALIBRATION:
+        return _CALIBRATION[key]
+    probe = work / f"cal-{trial}"
+    shutil.rmtree(probe, ignore_errors=True)
+    shutil.copytree(repo, probe, symlinks=True)
+    journal = work / f"cal-journal-{trial}.bin"
+    env = dict(os.environ, IOFAULT_JOURNAL=str(journal), IOFAULT_ROOT=str(probe),
+               DYLD_INSERT_LIBRARIES=str(shim), LD_PRELOAD=str(shim))
+    L.run(argv, cwd=probe, env=env)
+    total = journal.stat().st_size if journal.exists() else 0
+    shutil.rmtree(probe, ignore_errors=True)
+    journal.unlink(missing_ok=True)
+    _CALIBRATION[key] = total
+    return total
+
+
+_CALIBRATION: dict[str, int] = {}
+
+
 def sigkill_trial(work: Path, rng: random.Random, trial: int,
                   shim: Path) -> dict:
     """Kill `ltx` at a seeded point in its I/O SEQUENCE, then verify.
@@ -164,14 +191,25 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int,
     journal = work / f"sk-journal-{trial}.bin"
     env = dict(os.environ, IOFAULT_JOURNAL=str(journal), IOFAULT_ROOT=str(repo),
                DYLD_INSERT_LIBRARIES=str(shim), LD_PRELOAD=str(shim))
-    # Seeded fraction of the operation's I/O to let through before killing.
-    target_fraction = rng.uniform(0.05, 0.95)
+
+    # An ABSOLUTE seeded byte target, derived from a calibration run of this
+    # operation. The previous attempt compared `written` against a fraction of
+    # `observed_peak`, which is itself set to `written` immediately above --
+    # so the test reduced to `written >= fraction * written` and fired the
+    # instant 4096 bytes appeared, identically for every seed. The seed had no
+    # effect at all.
+    total = calibrate(repo, argv, shim, work, trial)
+    if total is None or total < 512:
+        return {"trial": trial, "ok": True, "injected": False,
+                "why": "operation produced too little I/O to place a milestone"}
+    target_bytes = int(rng.uniform(0.05, 0.95) * total)
 
     proc = subprocess.Popen([str(L.LTX), *argv], cwd=repo, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     injected = False
+    reached = False
     deadline = time.monotonic() + 120
-    observed_peak = 0
+    written = 0
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             break
@@ -179,12 +217,8 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int,
             written = journal.stat().st_size
         except OSError:
             written = 0
-        observed_peak = max(observed_peak, written)
-        # Kill once the operation has emitted its seeded share of I/O. The
-        # threshold adapts to the operation because it is expressed relative to
-        # what THIS operation has produced so far plus a floor, rather than an
-        # absolute byte count that would suit only one command.
-        if written > 0 and written >= target_fraction * max(observed_peak, 4096):
+        if written >= target_bytes:
+            reached = True
             proc.send_signal(signal.SIGKILL)
             injected = True
             break
@@ -192,10 +226,13 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int,
     if proc.poll() is None:
         proc.send_signal(signal.SIGKILL)
         injected = True
-    # A process that had already exited received no signal. Counting that as an
-    # injection inflates the trial count with runs that tested nothing, so it is
-    # recorded as not-injected and excluded from the mandated total.
     proc.wait(timeout=60)
+    if not reached:
+        # The run never reached its milestone, so the kill landed somewhere
+        # unseeded. Not a valid injection; the caller retries.
+        return {"trial": trial, "ok": True, "injected": False,
+                "why": f"milestone {target_bytes}B not reached (got {written}B)"}
+    observed_peak = written
 
     ok, why = verify(repo)
     after = durable_checkpoints(repo)
@@ -205,7 +242,8 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int,
             "why": why if not ok else (f"{len(lost)} checkpoints lost" if lost else ""),
             "checkpoints_lost": len(lost),
             "io_bytes_at_kill": observed_peak,
-            "target_fraction": round(target_fraction, 4)}
+            "target_bytes": target_bytes,
+            "calibrated_total_bytes": total}
 
 
 def powerloss_trial(work: Path, rng: random.Random, trial: int,
@@ -259,7 +297,14 @@ def powerloss_trial(work: Path, rng: random.Random, trial: int,
     (repo / f"edit-{trial}.bin").write_bytes(
         seeded_bytes(rng, rng.randrange(1024, 1 << 20)))
     argv = rng.choice(OPERATION_POOL)
-    L.run(argv, cwd=repo, env=env)
+    op = L.run(argv, cwd=repo, env=env)
+    if op.returncode != 0:
+        # An operation that failed may have produced no relevant I/O, so replay
+        # would restore the pristine baseline and the trial would "survive" a
+        # crash that never happened.
+        return {"trial": trial, "ok": False, "operation": argv[0],
+                "why": f"operation failed under shim ({op.returncode}): "
+                       f"{op.stderr[:160]}"}
 
     # Undo the operation completely, then let the replayer rebuild whatever
     # partial state a crash would have left.

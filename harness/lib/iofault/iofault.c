@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/param.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -63,6 +64,7 @@
 #define OP_RENAME 5
 #define OP_FTRUNCATE 6
 #define OP_UNLINK 7
+#define OP_DIRSYNC 8
 
 static int journal_fd = -1;
 static char root[PATH_MAX];
@@ -223,9 +225,19 @@ int IOFAULT_NAME(fsync)(int fd) {
   /* Only a SUCCESSFUL fsync is a durability barrier. Journalling a failed one
    * would mark preceding writes durable that never reached the platter, so the
    * replayer would refuse to drop them and the engine would be credited for a
-   * guarantee it did not get. */
-  if (rc == 0 && fd_path(fd, path, sizeof(path)))
-    journal(OP_FSYNC, path, 0, NULL, 0);
+   * guarantee it did not get.
+   *
+   * File and directory syncs are recorded as DIFFERENT operations, because they
+   * confer different guarantees: fsync on a file makes that file's data
+   * durable, while only fsync on the containing DIRECTORY makes a rename,
+   * create or unlink durable. Conflating them lets the replayer treat a plain
+   * file sync as metadata durability, crediting the engine for a barrier it
+   * never issued. */
+  if (rc == 0 && fd_path(fd, path, sizeof(path))) {
+    struct stat st;
+    int is_dir = (fstat(fd, &st) == 0) && S_ISDIR(st.st_mode);
+    journal(is_dir ? OP_DIRSYNC : OP_FSYNC, path, 0, NULL, 0);
+  }
   return rc;
 }
 

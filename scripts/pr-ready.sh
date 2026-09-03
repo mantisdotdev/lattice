@@ -41,6 +41,15 @@ checks=$(gh pr checks "$PR" --repo "$REPO" --json name,state,bucket 2>/dev/null)
 echo "$checks" | jq -e 'type == "array"' >/dev/null 2>&1 \
   || undetermined "unparseable CI check output"
 
+# Enumerate the buckets we understand and REJECT anything else. Selecting only
+# known-bad values silently excluded an unrecognised or missing bucket from both
+# counters, so a check in an unknown state read as passing.
+unknown=$(echo "$checks" | jq -r '
+  [.[] | select((.bucket // "missing") as $b
+                | ["pass","fail","pending","skipping","cancel"] | index($b) | not)]
+  | length') || undetermined "cannot evaluate CI buckets"
+[ "$unknown" -eq 0 ] || undetermined "$unknown CI check(s) report an unrecognised bucket"
+
 bad=$(echo "$checks" | jq -r '[.[] | select(.bucket=="fail" or .bucket=="cancel")] | length') \
   || undetermined "cannot evaluate CI buckets"
 waiting=$(echo "$checks" | jq -r '[.[] | select(.bucket=="pending")] | length') \
@@ -93,9 +102,15 @@ for _ in $(seq 1 20); do
   open_findings=$((open_findings + n))
 
   has_next=$(echo "$page" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
-  [ "$has_next" = "true" ] || break
+  [ "$has_next" = "true" ] || { has_next="false"; break; }
   cursor=$(echo "$page" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
 done
+# Exhausting the page budget with more pages outstanding means findings were
+# never looked at. Silently exiting the loop would report zero from a partial
+# count -- the same class of error as truncating at first:100.
+[ "${has_next:-false}" != "true" ] \
+  || undetermined "more than 2,000 review threads; pagination budget exhausted "\
+                  "before all findings were counted"
 
 [ "$open_findings" -eq 0 ] || fail "$open_findings unresolved CodeRabbit finding(s)"
 
