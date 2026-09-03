@@ -43,3 +43,55 @@ unscaled at or above the §0.3 hardware class.
 
 ## Iteration log
 
+## Protocol note — G0 harness sequencing, recorded rather than glossed
+
+§0.3's harness-first rule requires that a stage's harnesses be "designed,
+implemented, and **frozen before** implementation work on that stage begins."
+For Stage G0 the record is as follows, stated precisely because the alternative
+is to let a reader assume a stricter discipline than was actually applied:
+
+- **G0.2, G0.5, G0.6, G0.8** — harness written and committed before the
+  deliverable it measures existed. Fully compliant.
+- **G0.7** — the pre-registration was hash-pinned before the probe harness was
+  written, and the harness refuses a verdict if the pin moves. This is stronger
+  than the rule requires.
+- **G0.1** — the harness was written while the research it measures was already
+  running in background instances. The harness author had no access to the
+  analyses' content when writing the structural checks, so the anti-gaming intent
+  is satisfied, but the literal ordering is not. Recorded as a deviation.
+- **G0.3, G0.4** — corpus mining scripts and their harnesses were written
+  together, before any baseline was measured. The G0.3 oracle was hash-pinned
+  before replay ran.
+
+From Stage G1 onward the ordering is strict: harnesses are frozen and their
+hashes recorded in `harness/FREEZE.json` before any product code is written. The
+freeze mechanism reverts any gate whose harness file changes to `FAIL(stale)`
+until re-measured, so a late edit cannot silently preserve a PASS.
+
+## Where the scorecard of record is produced
+
+CI measures only the gates whose inputs are committed to the repository. The
+corpus-dependent gates read corpora measured in gigabytes — 284,316 mined merge
+commits, a ~100k-file composite reference repository, a ≥5 GiB binary corpus —
+which are built by committed scripts from hash-pinned public sources rather than
+committed themselves. Running those gates in a clean CI checkout would report a
+FAIL meaning "the corpus is not in this checkout," which is not what a FAIL is
+supposed to mean.
+
+The scorecard of record is therefore produced on the reference environment
+recorded in [`bench/ENVIRONMENT.md`](bench/ENVIRONMENT.md), where the corpora
+exist. CI's role is to prove the harnesses still run, that the registry is valid,
+that no product code can detect harness execution, and that every scorecard in
+this file re-renders byte-identically from committed harness output.
+
+Rebuild the corpora yourself:
+
+```bash
+./scripts/clone-corpus.sh                        # pinned public bases
+python3 scripts/corpus/mine_merges.py            # G0.3 corpus
+python3 scripts/corpus/replay_merges.py          # G0.3 baselines
+python3 scripts/corpus/mine_refactorings.py      # G0.4 corpus
+python3 scripts/corpus/build_reference_repo.py   # G0.5 reference repo
+python3 scripts/corpus/simulate_binary_history.py --force  # G0.5 binary corpus
+```
+

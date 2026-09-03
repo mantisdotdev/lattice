@@ -35,8 +35,9 @@ PINS = REPO / "corpus" / "manifests" / "g0-5-pins.json"
 
 # Per the amended statistics contract.
 BASES = [
-    ("microsoft/TypeScript", "source", "src-typescript"),
+    ("nodejs/node", "source", "src-node"),
     ("symfony/symfony", "source", "src-symfony"),
+    ("golang/go", "source", "src-go"),
     ("opencv/opencv_extra", "binary", "bin-media"),
     ("git/git", "history", "deep-history"),
 ]

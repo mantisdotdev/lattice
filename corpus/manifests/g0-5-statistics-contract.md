@@ -27,12 +27,13 @@ hash-pinned snapshots of three public repositories, one per required character.
 Pins are recorded in `corpus/manifests/g0-5-pins.json` at build time (commit SHA
 per base) and asserted on every rebuild.
 
-| Role | Repository | Tip files | Commits | Why |
-|---|---|---:|---:|---|
-| source-heavy | `microsoft/TypeScript` | 65,988 | 42,055 | very large real source tree; deep nesting |
-| source-heavy (2) | `symfony/symfony` | 15,008 | 83,279 | second source character: PHP monorepo component layout |
-| binary-heavy | `opencv/opencv_extra` | 12,894 | 2,141 | real test media — images and video, genuinely incompressible |
-| deep-history | `git/git` | 4,850 | 85,525 | the deepest freely available history of a real codebase |
+| Role | Repository | Tip files | p90 size | Commits | Why |
+|---|---|---:|---:|---:|---|
+| source-heavy | `nodejs/node` | 51,567 | 21,023 | 107,789 | large real source tree with a realistic size distribution |
+| source-heavy (2) | `symfony/symfony` | 15,008 | 11,732 | 83,279 | PHP monorepo component layout |
+| source-heavy (3) | `golang/go` | 15,888 | 14,572 | 72,067 | language implementation; Go |
+| binary-heavy | `opencv/opencv_extra` | 12,894 | 49,501 | 2,141 | real test media — images and video, genuinely incompressible |
+| deep-history | `git/git` | 4,850 | 18,137 | 85,525 | the deepest freely available history of a real codebase |
 
 ### AMENDMENT 1 — four bases, not three
 
@@ -55,6 +56,39 @@ strictly larger and more varied than the one originally named.
 
 The superseded pin was `a3109bd2b4db370c…`; the current pin is recorded in
 `corpus/manifests/g0-5-statistics-contract.sha256`.
+
+### AMENDMENT 2 — base selection corrected; no bound changed
+
+The composite built under Amendment 1 hit 11 of the 14 bounds and missed three:
+`total_working_bytes` (1.052 GiB < 1.5 GiB), `p90_file_bytes` (6,146 < 8,192)
+and `p99_file_bytes` (187 KiB < 256 KiB).
+
+Diagnosis, measured per base: `microsoft/TypeScript` contributed **65,988 files
+— 67% of the corpus — at p50 674 B and p90 3,849 B**, because the bulk of its
+tree is tiny compiler test fixtures. It dominated the distribution and pulled
+every size percentile down. Every other base was comfortably above the bounds
+(symfony p90 11,732; git p90 18,137; opencv_extra p90 49,501).
+
+So the bounds were right and the base was wrong. TypeScript is replaced by
+`nodejs/node` (51,567 files, p90 21,023) plus `golang/go` (15,888 files, p90
+14,572), chosen by measuring candidate distributions with `git ls-tree -r -l`
+before rebuilding rather than by rebuilding and hoping. The resulting composite
+was computed in advance and satisfies **every** bound:
+
+| Property | Measured | Bound |
+|---|---:|---|
+| `file_count` | 100,206 | 90,000–130,000 |
+| `total_working_bytes` | 1.573 GiB | ≥ 1.5 GiB |
+| `p50_file_bytes` | 1,338 | 512–8,192 |
+| `p90_file_bytes` | 18,737 | ≥ 8,192 |
+| `p99_file_bytes` | 299,718 | ≥ 262,144 |
+| `max_file_bytes` | 34.6 MiB | ≥ 32 MiB |
+
+**No bound moved.** Under §0.3's classification this amendment is **stricter**:
+the corpus is larger in bytes and has a heavier size tail than the one it
+replaces. Recording it matters because the tempting alternative — lowering
+`p90_file_bytes` to 6,000 so the corpus I had already built would pass — is
+exactly the failure mode a frozen contract exists to prevent.
 
 ## The contract
 

@@ -1,0 +1,32 @@
+{
+  "built_at": "2026-09-03T04:02:47Z",
+  "composite_commit": "b975aae586e0e49885014fffa4fe9b6fbf445c3b",
+  "composite_tree": "3805638b543ccd9e2bf3448048c776be1ffa88d1",
+  "history_depth": 212980,
+  "bases": {
+    "microsoft/TypeScript": {
+      "role": "source",
+      "prefix": "src-typescript",
+      "head": "cf7b9361a33fa0c8e1afa3cf45fde29c9ab23ec0",
+      "commits": 42055
+    },
+    "symfony/symfony": {
+      "role": "source",
+      "prefix": "src-symfony",
+      "head": "7ab6d431f762c21bbd3f841ed6aa5b709d872c66",
+      "commits": 83279
+    },
+    "opencv/opencv_extra": {
+      "role": "binary",
+      "prefix": "bin-media",
+      "head": "9c5eefa1ef66cbeecc9a3d38e1c5308c22ebe830",
+      "commits": 2141
+    },
+    "git/git": {
+      "role": "history",
+      "prefix": "deep-history",
+      "head": "3cb9185f65410273787f74333cc027d2ea5daada",
+      "commits": 85525
+    }
+  }
+}

@@ -1,1 +1,23 @@
-{}
+{
+  "G0.2": {
+    "recorded_at": "2026-09-03T03:55:56Z",
+    "status": "PASS",
+    "unit": "challenges",
+    "value": 10.0,
+    "waived": false
+  },
+  "G0.7": {
+    "recorded_at": "2026-09-03T03:55:56Z",
+    "status": "PASS",
+    "unit": "repos",
+    "value": 4.0,
+    "waived": false
+  },
+  "G0.8": {
+    "recorded_at": "2026-09-03T03:55:56Z",
+    "status": "PASS-PENDING-HUMAN",
+    "unit": "package",
+    "value": 1.0,
+    "waived": false
+  }
+}
