@@ -36,15 +36,49 @@ CRLF = CR + LF
 NUL = b"\x00"
 
 
-def write(rel: str, data: bytes, records: list, note: str) -> None:
+def write(rel: str, data: bytes, records: list, note: str,
+          folded: list | None = None) -> None:
+    """Write one case and record what the FILESYSTEM actually holds.
+
+    An earlier version recorded `sha256(data)` -- the digest of what it intended
+    to write -- without reading back. On a case-insensitive filesystem the
+    corpus therefore claimed two files where one existed: writing
+    `names/upper.txt` silently replaced `names/UPPER.txt`, and the manifest
+    pinned a digest for a file that no longer existed. G1.2 then reported a
+    mismatch that was the corpus lying, not the engine losing data.
+
+    So: detect the fold, record it, and pin only what is really there.
+    """
     path = OUT / rel
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Did some earlier entry already occupy this name under different bytes?
+    pre_existing = path.exists()
+    prior = path.read_bytes() if pre_existing else None
+
     path.write_bytes(data)
+    actual = path.read_bytes()
+
+    if pre_existing and prior != data:
+        # The filesystem folded two distinct names together. Whichever record
+        # named the earlier bytes is now wrong, so it is removed and the fold
+        # is declared.
+        stale = [r for r in records if r["sha256"] == hashlib.sha256(prior).hexdigest()]
+        for r in stale:
+            records.remove(r)
+        if folded is not None:
+            folded.append({
+                "requested": rel,
+                "occupied_by": [r["path"] for r in stale] or ["an earlier entry"],
+                "reason": "this filesystem does not distinguish these names "
+                          "(case folding or Unicode normalisation)",
+            })
+
     records.append({
         "path": rel,
-        "bytes": len(data),
+        "bytes": len(actual),
         "note": note,
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "sha256": hashlib.sha256(actual).hexdigest(),
     })
 
 
@@ -100,16 +134,16 @@ def build_sizes(r: list) -> None:
           "1 MiB incompressible-ish, deterministic")
 
 
-def build_names(r: list) -> None:
-    write("names/UPPER.txt", b"upper\n", r, "case-colliding pair, member 1")
+def build_names(r: list, folded: list) -> None:
+    write("names/UPPER.txt", b"upper\n", r, "case-colliding pair, member 1", folded)
     write("names/upper.txt", b"lower\n", r,
           "case-colliding pair, member 2 -- distinct on Linux, colliding on "
-          "macOS/Windows (Windows is tier-1)")
+          "macOS/Windows (Windows is tier-1)", folded)
     write("names/é-decomposed.txt", b"NFD\n", r,
           "e + U+0301 combining acute (NFD)")
     write("names/é-precomposed.txt", b"NFC\n", r,
           "U+00E9 precomposed (NFC) -- same glyph as the NFD file, different "
-          "bytes; macOS normalises filenames and Linux does not")
+          "bytes; macOS normalises filenames and Linux does not", folded)
     write("names/中文文件.txt", "CJK\n".encode(), r, "CJK filename")
     write("names/emoji-\U0001f680.txt", b"astral plane\n", r,
           "astral-plane codepoint in a filename (surrogate pairs on Windows)")
@@ -203,10 +237,11 @@ def main() -> int:
 
     records: list = []
     special: list = []
+    folded: list = []
     build_line_endings(records)
     build_encodings(records)
     build_sizes(records)
-    build_names(records)
+    build_names(records, folded)
     build_special(records, special)
     skipped_mandated: list[str] = []
     if args.skip_huge:
@@ -224,6 +259,13 @@ def main() -> int:
         "total_files": len(records),
         "total_bytes": sum(x["bytes"] for x in records),
         "skipped_mandated_cases": skipped_mandated,
+        # Names this filesystem could not hold as distinct files. NOT a defect
+        # in the corpus and NOT one in the engine: a platform fact. G1.2 treats
+        # each as a COVERAGE gap -- the case exists in the corpus definition and
+        # was not exercised here -- so a clean run on macOS cannot be mistaken
+        # for having tested case collisions.
+        "folded_names": folded,
+        "filesystem_case_sensitive": not folded,
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({"files": len(records), "special_entries": len(special),

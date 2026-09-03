@@ -130,6 +130,12 @@ def main() -> int:
             "detail": {"missing_mandated_cases": absent,
                        "declared_skips": declared_skips}}))
         return 0
+    # A mandated case the FILESYSTEM could not create is not a mismatch and not
+    # a pass -- it is an un-exercised requirement. §6: "A 0-failure run that
+    # misses coverage is a FAIL." See docs/adr/adr-14-g1-2-case-folding-coverage.md.
+    folded = manifest.get("folded_names", [])
+    case_sensitive = manifest.get("filesystem_case_sensitive", True)
+
     if not any(s["kind"] == "symlink" for s in expected_special.values()):
         print(json.dumps({
             "gate": "G1.2", "value": 1, "unit": "mismatches",
@@ -231,6 +237,19 @@ def main() -> int:
                                "why": "appeared after checkout, absent in source"})
         checked += len(src_entries)
 
+        # A mandated case the FILESYSTEM could not create is neither a mismatch
+        # nor a pass -- it is an un-exercised requirement. §6: "A 0-failure run
+        # that misses coverage is a FAIL."
+        # See docs/adr/adr-14-g1-2-case-folding-coverage.md.
+        coverage_problems = []
+        if folded:
+            coverage_problems.append(
+                "this filesystem folded "
+                + "; ".join(f"{f['requested']} onto {', '.join(f['occupied_by'])}"
+                            for f in folded)
+                + " -- G1.2's case-collision requirement was NOT exercised here; "
+                  "run on a case-sensitive filesystem for full coverage")
+
         print(json.dumps({
             "gate": "G1.2",
             "value": len(mismatches),
@@ -238,7 +257,13 @@ def main() -> int:
             "note": (f"0 mismatches over {checked} checked entries"
                      if not mismatches else
                      f"{len(mismatches)} mismatches over {checked} checked entries"),
+            "coverage": {
+                "ok": not coverage_problems,
+                "note": "; ".join(coverage_problems),
+            },
             "detail": {
+                "filesystem_case_sensitive": case_sensitive,
+                "folded_names": folded,
                 "checked_entries": checked,
                 "pinned_files": len(expected),
                 "special_entries": len(expected_special),
