@@ -248,15 +248,26 @@ impl Pack {
                 index_path.display()
             )));
         }
-        let entries = u64::from_le_bytes(index[8..16].try_into().unwrap()) as usize;
-        let expected = 16 + entries * INDEX_ENTRY_BYTES;
-        if index.len() < expected {
-            return Err(Error::Corrupt(format!(
-                "{} declares {entries} entries but holds {} bytes",
-                index_path.display(),
-                index.len()
-            )));
-        }
+        let declared = u64::from_le_bytes(index[8..16].try_into().unwrap());
+        // A valid index is EXACTLY 16 + entries*48 bytes. A declared count that
+        // overflows that arithmetic, or that does not match the actual length,
+        // is corruption or a crash truncation — never a valid index. Checked
+        // arithmetic and an exact-length test so a garbage count reports Corrupt
+        // rather than wrapping (in release builds) into an in-bounds value that
+        // then indexes out of bounds and panics during a lookup.
+        let expected = (declared as usize)
+            .checked_mul(INDEX_ENTRY_BYTES)
+            .and_then(|n| n.checked_add(16));
+        let entries = match expected {
+            Some(expected) if index.len() == expected => declared as usize,
+            _ => {
+                return Err(Error::Corrupt(format!(
+                    "{} declares {declared} entries but holds {} bytes",
+                    index_path.display(),
+                    index.len()
+                )));
+            }
+        };
 
         let mut file = File::open(&pack_path)?;
         let size = file.metadata()?.len();
@@ -269,18 +280,51 @@ impl Pack {
         file.seek(SeekFrom::End(-16))?;
         let mut tail = [0u8; 16];
         file.read_exact(&mut tail)?;
-        let count = u64::from_le_bytes(tail[0..8].try_into().unwrap()) as usize;
+        let count = u64::from_le_bytes(tail[0..8].try_into().unwrap());
         let table_offset = u64::from_le_bytes(tail[8..16].try_into().unwrap());
+
+        // The segment table is `count` 12-byte entries at table_offset, ahead
+        // of the 16-byte tail. Validate that footprint against the real file
+        // size BEFORE trusting `count` to size an allocation or drive a loop —
+        // a corrupt tail must report Corrupt, not allocate gigabytes or panic.
+        let table_end = (count)
+            .checked_mul(12)
+            .and_then(|b| b.checked_add(table_offset))
+            .and_then(|e| e.checked_add(16));
+        match table_end {
+            Some(end) if table_offset <= size && end <= size => {}
+            _ => {
+                return Err(Error::Corrupt(format!(
+                    "{} has an invalid segment table ({count} entries at offset \
+                     {table_offset}, file is {size} bytes)",
+                    pack_path.display()
+                )));
+            }
+        }
+        let count = count as usize;
 
         let mut segments = Vec::with_capacity(count);
         file.seek(SeekFrom::Start(table_offset))?;
         for _ in 0..count {
             let mut e = [0u8; 12];
             file.read_exact(&mut e)?;
-            segments.push((
-                u64::from_le_bytes(e[0..8].try_into().unwrap()),
-                u32::from_le_bytes(e[8..12].try_into().unwrap()),
-            ));
+            let seg_off = u64::from_le_bytes(e[0..8].try_into().unwrap());
+            let seg_len = u32::from_le_bytes(e[8..12].try_into().unwrap());
+            // Each segment occupies [seg_off, seg_off + 4 + seg_len). Validate
+            // it lies within the file so Pack::read can allocate and seek from
+            // these values without a stat and without risking an OOM.
+            let within = seg_off
+                .checked_add(4)
+                .and_then(|o| o.checked_add(u64::from(seg_len)))
+                .map(|end| end <= size)
+                .unwrap_or(false);
+            if !within {
+                return Err(Error::Corrupt(format!(
+                    "{} has a segment that runs past end of file",
+                    pack_path.display()
+                )));
+            }
+            segments.push((seg_off, seg_len));
         }
 
         Ok(Pack {
@@ -414,7 +458,18 @@ impl Store {
         ids.sort_unstable();
         let mut packs = Vec::with_capacity(ids.len());
         for id in ids {
-            packs.push((id, Pack::open(dir, id)?));
+            match Pack::open(dir, id) {
+                Ok(pack) => packs.push((id, pack)),
+                // An index that will not parse is the residue of a crash during
+                // its creation: the pack+index+dir-sync sequence is the atomic
+                // unit, and an unparseable index means that unit never
+                // completed. Treat it like a missing index and skip the pack,
+                // rather than letting one torn file make the whole repository
+                // unopenable. Bit-rot on a previously-good index is a different
+                // failure that `verify` surfaces; `open` must stay available.
+                Err(Error::Corrupt(_)) => continue,
+                Err(e) => return Err(e),
+            }
         }
         Ok(Store {
             dir: dir.to_path_buf(),
@@ -429,13 +484,22 @@ impl Store {
     pub fn read(&self, id: ChunkId) -> Result<Option<Vec<u8>>> {
         // Newest pack first: a chunk written recently is the one most likely
         // to be read next, and duplicates across packs are byte-identical by
-        // construction so either answer is correct.
+        // construction so either answer is correct. A corrupt copy in one pack
+        // must NOT abort the read while an intact duplicate survives in an
+        // older one, so a pack-level error is remembered and the search
+        // continues; the error surfaces only if no pack yields an intact copy.
+        let mut last_err: Option<Error> = None;
         for (_, pack) in self.packs.iter().rev() {
-            if let Some(bytes) = pack.read(id)? {
-                return Ok(Some(bytes));
+            match pack.read(id) {
+                Ok(Some(bytes)) => return Ok(Some(bytes)),
+                Ok(None) => {}
+                Err(e) => last_err = Some(e),
             }
         }
-        Ok(None)
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(None),
+        }
     }
 
     pub fn contains(&self, id: ChunkId) -> bool {
@@ -557,6 +621,98 @@ mod tests {
             "an unindexed pack must not be loaded"
         );
         assert_eq!(recovered.read(ChunkId::of(&bytes)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_truncated_index_is_treated_as_crash_residue_not_a_brick() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let bytes = payload(9, 4096);
+        let id = ChunkId::of(&bytes);
+        let mut w = PackWriter::new();
+        w.add(id, &bytes);
+        store.write_pack(w).unwrap();
+
+        // A torn index prefix — the residue of a crash mid-index-write.
+        let idx = dir.path().join("000000000000.idx");
+        let raw = fs::read(&idx).unwrap();
+        fs::write(&idx, &raw[..12]).unwrap();
+
+        // The store still opens; the torn pack is skipped, not bricked.
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.pack_count(), 0);
+        assert_eq!(store.read(id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_garbage_index_count_reports_corrupt_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let bytes = payload(3, 4096);
+        let mut w = PackWriter::new();
+        w.add(ChunkId::of(&bytes), &bytes);
+        store.write_pack(w).unwrap();
+
+        // A count that would overflow entries*48 must not wrap and then panic.
+        let idx = dir.path().join("000000000000.idx");
+        let mut raw = fs::read(&idx).unwrap();
+        raw[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        fs::write(&idx, &raw).unwrap();
+
+        assert!(Pack::open(dir.path(), 0).is_err());
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.pack_count(), 0);
+    }
+
+    #[test]
+    fn a_corrupt_pack_tail_reports_corrupt_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let bytes = payload(7, 9000);
+        let mut w = PackWriter::new();
+        w.add(ChunkId::of(&bytes), &bytes);
+        store.write_pack(w).unwrap();
+
+        // An absurd segment count in the tail must be rejected, not allocated.
+        let pack = dir.path().join("000000000000.pack");
+        let mut raw = fs::read(&pack).unwrap();
+        let n = raw.len();
+        raw[n - 16..n - 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        fs::write(&pack, &raw).unwrap();
+
+        assert!(Pack::open(dir.path(), 0).is_err());
+        // Store still opens (the pack is skipped as residue).
+        let _ = Store::open(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn read_falls_back_to_an_intact_duplicate_in_an_older_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let bytes = payload(11, 9000);
+        let id = ChunkId::of(&bytes);
+
+        // The same chunk in two packs — duplicates are byte-identical.
+        let mut w0 = PackWriter::new();
+        w0.add(id, &bytes);
+        store.write_pack(w0).unwrap();
+        let mut w1 = PackWriter::new();
+        w1.add(id, &bytes);
+        store.write_pack(w1).unwrap();
+
+        // Corrupt the NEWER pack's payload; the older intact copy must recover.
+        let newer = dir.path().join("000000000001.pack");
+        let mut raw = fs::read(&newer).unwrap();
+        let mid = raw.len() / 2;
+        raw[mid] ^= 0xFF;
+        fs::write(&newer, &raw).unwrap();
+
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.read(id).unwrap().as_deref(),
+            Some(&bytes[..]),
+            "a corrupt newest copy must not hide an intact older one"
+        );
     }
 
     #[test]
