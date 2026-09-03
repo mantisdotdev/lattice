@@ -399,14 +399,24 @@ impl Repo {
         // Refuse a destination that is itself a symlink: create_dir_all and
         // every write beneath it would resolve through the link and land
         // outside the directory the caller named (CWE-59). A real directory,
-        // or a not-yet-existing path, is fine.
-        if let Ok(meta) = fs::symlink_metadata(dest) {
-            if meta.file_type().is_symlink() {
+        // or a not-yet-existing path, is fine. A metadata error other than
+        // "absent" (a permission or I/O failure) is propagated, not treated as
+        // an absent destination. Ancestors of `dest` are NOT checked: `dest` is
+        // a path the user chose (`--into`), and its ancestors resolve as their
+        // own filesystem dictates — on macOS `/tmp` itself is a symlink — so
+        // rejecting symlinked ancestors would break ordinary checkout. The
+        // traversal protections guard the checkpoint-controlled paths written
+        // BENEATH `dest`, not the user's choice of `dest`.
+        match fs::symlink_metadata(dest) {
+            Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(Error::Invalid(format!(
                     "{} is a symlink; choose a real directory to check out into",
                     dest.display()
                 )));
             }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
         fs::create_dir_all(dest)?;
         let mut report = CheckoutReport {
