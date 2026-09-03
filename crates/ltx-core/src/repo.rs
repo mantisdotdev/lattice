@@ -191,6 +191,11 @@ impl Repo {
         // there is nothing to fill in afterward.
         let checkpoint_bytes = serde_json::to_vec(&checkpoint)?;
         packer.add(ChunkId::of(&checkpoint_bytes), &checkpoint_bytes);
+        // Write only content the store does not already hold. Unchanged files
+        // and unchanged subtrees are already durable in earlier packs; a save
+        // that re-stored them would re-persist the whole working tree on every
+        // one-byte edit.
+        packer.retain_unknown(&self.store);
         self.store.write_pack(packer)?;
 
         let entry = self.oplog.append(Operation::Save {
@@ -1043,6 +1048,38 @@ mod tests {
         assert_ne!(
             a.tree, b.tree,
             "changed content must change the tree address"
+        );
+    }
+
+    #[test]
+    fn a_small_edit_stores_only_the_changed_content() {
+        let (dir, mut repo) = repo();
+        for i in 0..5u32 {
+            let content: Vec<u8> = (0..200_000u32)
+                .map(|n| (n.wrapping_mul(2_654_435_761).wrapping_add(i)) as u8)
+                .collect();
+            fs::write(dir.path().join(format!("f{i}.bin")), &content).unwrap();
+        }
+        repo.save("one").unwrap();
+        let after_first = repo.store().chunk_count();
+
+        // Flip one byte in one file.
+        let path = dir.path().join("f0.bin");
+        let mut content = fs::read(&path).unwrap();
+        content[100_000] ^= 0xFF;
+        fs::write(&path, &content).unwrap();
+        repo.save("two").unwrap();
+        let added = repo.store().chunk_count() - after_first;
+
+        // The second save must add only the changed file's affected chunks plus
+        // the new tree and checkpoint blobs — not another copy of everything.
+        // Without dedup the second save re-stores the whole tree, adding
+        // roughly `after_first` again. With it, only the changed file's
+        // affected chunks plus the new tree and checkpoint blobs are added.
+        assert!(
+            added < after_first / 2,
+            "a one-byte edit added {added} chunks on top of {after_first}; \
+             cross-pack dedup is not working"
         );
     }
 

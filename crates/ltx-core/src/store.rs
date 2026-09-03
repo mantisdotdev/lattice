@@ -93,6 +93,19 @@ impl PackWriter {
         self.pending.is_empty()
     }
 
+    /// Drop chunks the store already holds durably.
+    ///
+    /// Cross-pack deduplication: content is addressed by hash, so a chunk that
+    /// already lives in an older pack need not be written again — the tree that
+    /// references it still resolves through `Store::read`. Without this, every
+    /// save re-stored the entire working tree and a one-byte edit re-persisted
+    /// every unchanged file, which is exactly what G1.8 and G1.9 forbid.
+    pub fn retain_unknown(&mut self, store: &Store) {
+        self.pending.retain(|(id, _)| !store.contains(*id));
+        self.seen = self.pending.iter().map(|(id, _)| (*id, ())).collect();
+        self.bytes = self.pending.iter().map(|(_, p)| p.len()).sum();
+    }
+
     pub fn chunk_count(&self) -> usize {
         self.pending.len()
     }
