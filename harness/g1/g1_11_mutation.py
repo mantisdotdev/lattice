@@ -55,6 +55,15 @@ def main() -> int:
     proc = subprocess.run(args, cwd=REPO, capture_output=True, text=True,
                           errors="replace", timeout=86400)
 
+    if proc.returncode not in (0, 1, 2, 3):
+        # cargo-mutants uses 1/2/3 to signal surviving/timeout/unviable mutants,
+        # which are results rather than errors. Anything else is a tool failure
+        # and must not be read as a score.
+        return L.emit({
+            "gate": GATE, "value": 0.0, "unit": "percent",
+            "note": f"cargo-mutants failed (exit {proc.returncode}): "
+                    f"{proc.stderr.strip()[:200]}"})
+
     summary = OUTPUT.parent / "mutants.out" / "outcomes.json"
     if not summary.exists():
         return L.emit({
@@ -73,11 +82,28 @@ def main() -> int:
                 equivalents.add(entry["mutant"])
                 reasons[entry["mutant"]] = entry["reason"]
 
+    def mutant_identity(o: dict) -> str:
+        """A stable, COMPLETE identity for one mutant.
+
+        An earlier version keyed on `json.dumps(scenario)[:200]` -- a truncated
+        dump. Two different mutants sharing a 200-character prefix would collide,
+        so a single adjudication entry could silently excuse many surviving
+        mutants and inflate the kill rate.
+        """
+        m = o.get("scenario", {}).get("Mutant", {})
+        return "|".join([
+            str(m.get("package", "")),
+            str(m.get("file", "")),
+            str(m.get("function", {}).get("function_name", "")),
+            str(m.get("span", {}).get("start", {}).get("line", "")),
+            str(m.get("span", {}).get("start", {}).get("column", "")),
+            str(m.get("replacement", "")),
+        ])
+
     killed = missed = unviable = 0
     unadjudicated: list[str] = []
     for o in outcomes:
-        name = o.get("scenario", {}).get("Mutant", {}).get("function", {}).get("function_name", "")
-        summary_line = json.dumps(o.get("scenario", {}))[:200]
+        summary_line = mutant_identity(o)
         status = o.get("summary", "")
         if status == "CaughtMutant":
             killed += 1

@@ -39,16 +39,23 @@ def main() -> int:
             if L.run(["start", line], cwd=repo).returncode != 0:
                 return L.not_implemented(GATE, f"ltx start {line} failed")
 
-        # Alternate targets so every switch is a real context change rather
-        # than a no-op that returns immediately.
-        targets = ["probe-a", "probe-b"]
-        state = {"i": 0}
+        # Every timed `switch probe-a` must follow a switch AWAY from it, or
+        # only the first invocation does any work and the rest time a no-op.
+        # The earlier version defined this callback and never passed it.
+        setup_failures = {"n": 0}
 
         def switch_before(_):
-            state["i"] += 1
+            if L.run(["switch", "probe-b"], cwd=repo).returncode != 0:
+                setup_failures["n"] += 1
 
-        switch = L.measure_both(
-            ["switch", targets[0]], cwd=repo, runs=L.MIN_WARM_RUNS)
+        switch = L.measure_both(["switch", "probe-a"], cwd=repo,
+                                runs=L.MIN_WARM_RUNS, before=switch_before)
+        if setup_failures["n"]:
+            return L.emit({
+                "gate": GATE, "value": 1e9, "unit": "ratio",
+                "note": f"{setup_failures['n']} setup switches failed, so the "
+                        f"timed switches did not all change context",
+                "detail": {"switch": switch}})
         log = L.measure_both(
             ["log", "--limit", "50"], cwd=repo, runs=L.MIN_WARM_RUNS)
 

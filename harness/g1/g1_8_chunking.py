@@ -132,34 +132,53 @@ def percentile(values: list[int], p: float) -> float:
     return ordered[max(0, min(len(ordered) - 1, int(len(ordered) * p + 0.5) - 1))]
 
 
+class EngineFailure(Exception):
+    """The engine exists but could not complete the measurement."""
+
+
 def measure_engine(rng: random.Random) -> dict | None:
-    """When the engine exists, measure what the STORE actually persists."""
+    """When the engine exists, measure what the STORE actually persists.
+
+    Returns None only when the engine is ABSENT. A built engine that fails
+    raises, because reporting a failing subject as not-implemented would render
+    it N/A-yet -- indistinguishable from never having been built.
+    """
     if not L.LTX.exists():
         return None
     work = Path(tempfile.mkdtemp(prefix="g1-8-engine-"))
     try:
         repo = work / "repo"
         repo.mkdir()
-        if L.run(["init"], cwd=repo).returncode != 0:
-            return None
+        init = L.run(["init"], cwd=repo)
+        if init.returncode != 0:
+            raise EngineFailure(f"ltx init failed: {init.stderr[:200]}")
         results: dict[str, list[int]] = {}
         for kind, _ in FILE_TYPES:
             data = make_file(kind, FILE_BYTES, random.Random(SEED))
             target = repo / f"{kind}.bin"
             target.write_bytes(data)
-            if L.run(["save", "baseline"], cwd=repo).returncode != 0:
-                return None
+            base = L.run(["save", "baseline"], cwd=repo)
+            if base.returncode != 0:
+                raise EngineFailure(f"baseline save failed: {base.stderr[:200]}")
             before = store_bytes(repo)
             samples = []
             for _ in range(TRIALS_PER_TYPE):
                 offset = rng.randrange(len(data))
-                buf = bytearray(target.read_bytes())
+                # Restore the ORIGINAL bytes each trial. Reading the file back
+                # and flipping again accumulated edits, so trial n measured a
+                # file with n flipped bytes -- not the single-byte edit the gate
+                # specifies, and drifting further from it every iteration.
+                buf = bytearray(data)
                 buf[offset] ^= 0xFF
                 target.write_bytes(bytes(buf))
-                if L.run(["save", "one-byte edit"], cwd=repo).returncode != 0:
-                    return None
+                save = L.run(["save", "one-byte edit"], cwd=repo)
+                if save.returncode != 0:
+                    raise EngineFailure(f"save failed: {save.stderr[:200]}")
                 after = store_bytes(repo)
-                samples.append(max(0, after - before))
+                # No max(0, ...) clamp: a shrinking store is a real event
+                # (compaction, GC) and clamping it to 0 silently lowered the
+                # measured p95. A negative delta is reported as itself.
+                samples.append(after - before)
                 before = after
             results[kind] = samples
         return results
@@ -186,7 +205,13 @@ def main() -> int:
             "note": f"kernel did not measure pinned file type(s): "
                     f"{', '.join(missing)}"})
 
-    engine = measure_engine(random.Random(SEED))
+    try:
+        engine = measure_engine(random.Random(SEED))
+    except EngineFailure as exc:
+        return L.emit({
+            "gate": GATE, "value": 1e12, "unit": "bytes",
+            "note": f"engine is built but failed during measurement: {exc}",
+            "detail": {"engine_error": str(exc)}})
 
     if engine is None:
         # The gate measures what the STORE persists. The design measurement is

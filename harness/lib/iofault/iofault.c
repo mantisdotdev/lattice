@@ -25,6 +25,7 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdatomic.h>
@@ -69,8 +70,9 @@ static size_t root_len = 0;
 static atomic_ullong seq = 0;
 static int initialised = 0;
 
-static void init_once(void) {
-  if (initialised) return;
+static pthread_once_t init_control = PTHREAD_ONCE_INIT;
+
+static void init_impl(void) {
   initialised = 1;
   const char *j = getenv("IOFAULT_JOURNAL");
   const char *r = getenv("IOFAULT_ROOT");
@@ -84,6 +86,10 @@ static void init_once(void) {
   root_len = strlen(root);
   journal_fd = open(j, O_WRONLY | O_CREAT | O_APPEND, 0600);
 }
+
+/* pthread_once: two threads entering concurrently could both pass a plain
+ * `if (initialised)` check and open the journal twice, interleaving records. */
+static void init_once(void) { pthread_once(&init_control, init_impl); }
 
 /* Resolve an fd to a path. Only fds under IOFAULT_ROOT are journalled. */
 static int fd_path(int fd, char *out, size_t cap) {
@@ -183,7 +189,12 @@ int IOFAULT_NAME(fsync)(int fd) {
 #endif
   int rc = real(fd);
   char path[PATH_MAX];
-  if (fd_path(fd, path, sizeof(path))) journal(OP_FSYNC, path, 0, NULL, 0);
+  /* Only a SUCCESSFUL fsync is a durability barrier. Journalling a failed one
+   * would mark preceding writes durable that never reached the platter, so the
+   * replayer would refuse to drop them and the engine would be credited for a
+   * guarantee it did not get. */
+  if (rc == 0 && fd_path(fd, path, sizeof(path)))
+    journal(OP_FSYNC, path, 0, NULL, 0);
   return rc;
 }
 

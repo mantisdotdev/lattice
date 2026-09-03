@@ -72,8 +72,12 @@ def main() -> int:
     outstanding = []
     if ARTIFACTS.exists():
         for artifact in sorted(ARTIFACTS.rglob("*")):
-            if artifact.is_file() and artifact.name not in triaged:
-                outstanding.append(str(artifact.relative_to(REPO)))
+            rel = str(artifact.relative_to(REPO))
+            # Match on the repo-relative path. libFuzzer names crash files by
+            # input hash under a per-target directory, so one basename entry
+            # could excuse a same-named crash in a DIFFERENT target.
+            if artifact.is_file() and rel not in triaged:
+                outstanding.append(rel)
 
     short = {t: round(runs.get(t, {}).get("cpu_hours", 0.0), 2)
              for t in targets

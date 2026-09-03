@@ -1,107 +1,166 @@
 {
   "G0.1": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {
+      "harness/lib/mdcheck.py": "e30b8e93d8f126198ac55a09344f733f9843057cdbfce02c951652ff6cc985a0"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_1_prior_art.py",
     "sha256": "69ba07b7ca1a3f5c1805063418f5096f29149ba801441513121e5e374d1b6a88"
   },
   "G0.2": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {
+      "harness/lib/mdcheck.py": "e30b8e93d8f126198ac55a09344f733f9843057cdbfce02c951652ff6cc985a0"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_2_disagreements.py",
     "sha256": "eed8d5fedb6c2e27cf2b0b41832869a798c4020d2a5341b283efdc8eb3b1fe9f"
   },
   "G0.3": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_3_merge_corpus.py",
     "sha256": "8efa0e71ded06254c49df2e1427126cabb95b27f8d5a9ee8733fd7c994c5ac44"
   },
   "G0.4": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_4_refactor_corpus.py",
     "sha256": "42ccd6385b0e1a9cad20476bf5c8ed26f215820f93338edb0497f0e0dab15af6"
   },
   "G0.5": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_5_corpora.py",
     "sha256": "a556cc7b7f5ab2924a2600f06b241b9c1f975ade487e6b2ae33be98fc68ae8f8"
   },
   "G0.6": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {
+      "harness/lib/calibrate.py": "d6dbb6b67811b8102929493ecdc80ae8d50f98d70bf7d8aec39c06d6798d4689",
+      "harness/lib/mdcheck.py": "e30b8e93d8f126198ac55a09344f733f9843057cdbfce02c951652ff6cc985a0"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_6_adrs.py",
     "sha256": "04ef545d55f35705575884efb29439252883da4e0b00795fefe0174fd027670d"
   },
   "G0.7": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_7_demand_probe.py",
     "sha256": "de448b9159fb3548433a65f43107e7ccb08e1492b7364442882ebee116b46620"
   },
   "G0.8": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "dependencies": {
+      "harness/lib/mdcheck.py": "e30b8e93d8f126198ac55a09344f733f9843057cdbfce02c951652ff6cc985a0"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g0/g0_8_spec_package.py",
     "sha256": "25b00a42ebf34155ea7d917e4acda6d6099609a22f3dd21e1db0b7f0c1132abf"
   },
   "G1.1": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/iofault/iofault.c": "dadf967ab377202df2f0caa7487950a301ab3e973fda46c84663d6f223b97aae",
+      "harness/lib/iofault/replay.py": "965143e06deab40d54805348a3f22026a35f8c1b4ab27e0dc39ba925c01b13a8",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_1_crash_safety.py",
-    "sha256": "aa8de34997feb2017be361c46370ed4d02c410b6b546a3f133fee20aa20e0c21"
+    "sha256": "82be717637296680befb04cdffc4fd76bfc971a936dc0bbd3cad264e10723e25"
   },
   "G1.10": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_10_fuzzing.py",
-    "sha256": "598dd3b9e36398b7f2e5145b6d91b8290d766023595c2026ff84c60f8bbf8ac3"
+    "sha256": "10a561a638c7badf49168f16c07d48f9766e6ca0bd1bf49a6530b509e706ccfe"
   },
   "G1.11": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_11_mutation.py",
-    "sha256": "0cfb29ce16558b376cbcb9d991b720690b1b0e445660221a0c4eff86b78aa247"
+    "sha256": "abcf9e2a7cc103e325234b6d68a7d19840987cf74ea3c31334b00544fea45599"
   },
   "G1.12": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_12_cross_platform.py",
     "sha256": "48e5347e142d033abcbbcc2a37198d886c644f6bb7dce22e7ac382db2c2056e3"
   },
   "G1.13": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_13_licences.py",
     "sha256": "10b58d572da3a8e9e16c91a7d14df61a53419ca106f8895d4fe2c051bf9982af"
   },
   "G1.2": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_2_byte_fidelity.py",
     "sha256": "ddc946bc20d8382fd852d5fb0344518f5c415b9a78c0594bb95971d37ca56d90"
   },
   "G1.3": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {},
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_3_universal_undo.py",
     "sha256": "8638b30297218eecf858d8fa6c286d66aabea65e3801f2c878999530b9547fdb"
   },
   "G1.4": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_4_concurrency.py",
-    "sha256": "0ac827abc60ee8b02a081c4243aff9946ef91b18a5b3b6a5ff3b7b3cc42a7d6d"
+    "sha256": "f88e1e67658425fc58b1049f35c6b2b8f541e1d8dc929d488c6f327bfb89f8fd"
   },
   "G1.5": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_5_status_latency.py",
     "sha256": "a45ca7bc4bcc95b408be748ee3ba8387aed741a68e28453d5fc3aab8b08ac471"
   },
   "G1.6": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_6_save_latency.py",
-    "sha256": "07480b0f779c3855c6c3e1cea966c723901c0196ff59151bfb50b3c764415f01"
+    "sha256": "70642d29725c9d72ecc5022399a334371d15113445984f0de459f39dacbf21a4"
   },
   "G1.7": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_7_switch_log_latency.py",
-    "sha256": "7f9b95f29e5741834c61babf5880f67218fc8da8a9f1b183ea72dab42c12f295"
+    "sha256": "2fa283ff1004d9d8f2da2215e5b5e22a47a701c62b2283ce788e4e68bd3b14b9"
   },
   "G1.8": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_8_chunking.py",
-    "sha256": "b2cb0c2ce481d9585ef2be0d5d2da1fb6d881b67b214f46dd1a0e4b879a512ad"
+    "sha256": "001ce78d353e4751b5f5875cb6ffc1e3c5d7e6f59d8277a16b963e335a830582"
   },
   "G1.9": {
-    "frozen_at": "2026-09-03T07:37:08Z",
+    "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
+      "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
+    },
+    "frozen_at": "2026-09-03T07:57:30Z",
     "harness": "harness/g1/g1_9_storage_honesty.py",
-    "sha256": "c25e2706be957dc00214d355c20300cc87b1fced22bb143156b204342f5c0bbc"
+    "sha256": "894f719cba1857851ca5c46f81c24cddf39266a8b5f6783850fce0ae4b5e3102"
   }
 }

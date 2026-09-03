@@ -90,8 +90,16 @@ def main() -> int:
                            and ".git" not in p.parts)
             for victim in paths[int(len(paths) * frac):]:
                 victim.unlink(missing_ok=True)
-            if L.run(["adopt"], cwd=sub).returncode != 0:
-                continue
+            adopted = L.run(["adopt"], cwd=sub)
+            if adopted.returncode != 0:
+                # Silently dropping the point let every scaling setup fail and
+                # still yield r=0.0, i.e. "no size correlation" from no data.
+                return L.emit({
+                    "gate": GATE, "value": 1e9, "unit": "ms",
+                    "note": f"scaling point {frac} could not be adopted, so the "
+                            f"cost-vs-size check cannot run: "
+                            f"{adopted.stderr[:160]}",
+                    "detail": {"scaling_curve": scaling}})
             c = {"i": 0}
 
             def before_sub(_):
@@ -105,8 +113,15 @@ def main() -> int:
                             "p95_ms": round(t.p95, 3)})
             shutil.rmtree(sub, ignore_errors=True)
 
+        if len(scaling) < len(SCALE_FRACTIONS):
+            return L.emit({
+                "gate": GATE, "value": 1e9, "unit": "ms",
+                "note": f"only {len(scaling)} of {len(SCALE_FRACTIONS)} scaling "
+                        f"points measured; an incomplete curve is not evidence "
+                        f"of no size correlation",
+                "detail": {"scaling_curve": scaling}})
         r = pearson([s["fraction_of_repo"] for s in scaling],
-                    [s["p95_ms"] for s in scaling]) if len(scaling) >= 2 else 0.0
+                    [s["p95_ms"] for s in scaling])
         cost_tracks_size = r > MAX_SIZE_CORRELATION
 
         detail = {**both, "scaling_curve": scaling,

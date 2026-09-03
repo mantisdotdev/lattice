@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -95,6 +96,43 @@ class Gate:
             if token.endswith(".py") or token.endswith(".sh"):
                 return REPO / token
         return REPO / self.harness[-1]
+
+    @property
+    def dependency_closure(self) -> list[Path]:
+        """Every file whose contents can change what this harness measures.
+
+        Freezing only the entry script left a hole: G1.1 also executes
+        harness/lib/ltxrun.py, harness/lib/iofault/replay.py and the compiled
+        C shim, any of which could be rewritten without the gate ever going
+        FAIL(stale). A freeze that covers one file of four is not a freeze.
+
+        Closure = the entry script, plus every harness/lib module it imports
+        (transitively), plus any harness/lib/** file it names as a string.
+        """
+        seen: set[Path] = set()
+        pending = [self.harness_path]
+        lib = REPO / "harness" / "lib"
+        while pending:
+            path = pending.pop()
+            if path in seen or not path.exists() or not path.is_file():
+                continue
+            seen.add(path)
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            for module in re.findall(r"^\s*import\s+(\w+)", text, re.M):
+                cand = lib / f"{module}.py"
+                if cand.exists():
+                    pending.append(cand)
+            for ref in re.findall(r"harness/lib/[\w./-]+", text):
+                cand = REPO / ref
+                if cand.exists() and cand.is_file():
+                    pending.append(cand)
+                elif cand.is_dir():
+                    pending.extend(c for c in cand.iterdir() if c.is_file()
+                                   and c.suffix in (".py", ".c", ".h"))
+        return sorted(seen)
 
     @property
     def needs_human(self) -> bool:
@@ -169,7 +207,7 @@ def load_waivers() -> dict[str, dict]:
 
 
 def freeze_status(gate: Gate, freeze: dict) -> str | None:
-    """Return None if the harness matches its freeze record, else a reason."""
+    """Return None if the harness and everything it executes match the freeze."""
     record = freeze.get(gate.gid)
     if record is None:
         return None  # not yet frozen; freezing happens at stage entry
@@ -179,6 +217,23 @@ def freeze_status(gate: Gate, freeze: dict) -> str | None:
     actual = _sha256_file(path)
     if actual != record["sha256"]:
         return f"harness changed since freeze ({record['sha256'][:12]} -> {actual[:12]})"
+
+    # The dependency closure is frozen too, or a harness could be rewritten
+    # through a library it imports without ever going stale.
+    frozen_deps = record.get("dependencies", {})
+    # The entry script is hashed separately above and is excluded from the
+    # dependency map when freezing, so exclude it here too -- otherwise it
+    # reads as an "added" dependency on every single check.
+    current = {str(p.relative_to(REPO)): _sha256_file(p)
+               for p in gate.dependency_closure if p != path}
+    for rel, sha in frozen_deps.items():
+        if rel not in current:
+            return f"frozen dependency {rel} is no longer reachable"
+        if current[rel] != sha:
+            return f"dependency {rel} changed since freeze"
+    added = sorted(set(current) - set(frozen_deps))
+    if added:
+        return f"harness gained unfrozen dependencies: {', '.join(added[:3])}"
     return None
 
 

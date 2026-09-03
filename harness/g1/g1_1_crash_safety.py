@@ -91,6 +91,16 @@ def shim_path() -> Path | None:
     return None
 
 
+def seeded_bytes(rng: random.Random, n: int) -> bytes:
+    """Trial content from the SEEDED generator.
+
+    os.urandom() bypassed `rng` entirely, so the emitted SEED could not
+    reproduce a trial's inputs -- and a crash harness that cannot reproduce its
+    own failures is not much use when one fires.
+    """
+    return rng.randbytes(n)
+
+
 def durable_checkpoints(repo: Path) -> list[dict]:
     """Checkpoints the engine reports as durable, with their content digests."""
     proc = L.run(["log", "--forensic", "--json"], cwd=repo)
@@ -123,36 +133,61 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int) -> dict:
     if L.run(["init"], cwd=repo).returncode != 0:
         return {"trial": trial, "ok": False, "why": "init failed"}
 
-    (repo / "seed.txt").write_bytes(os.urandom(4096))
-    L.run(["save", "seed"], cwd=repo)
+    (repo / "seed.txt").write_bytes(seeded_bytes(rng, 4096))
+    save = L.run(["save", "seed"], cwd=repo)
+    if save.returncode != 0:
+        return {"trial": trial, "ok": False, "injected": False,
+                "why": f"baseline save failed: {save.stderr[:160]}"}
     before = durable_checkpoints(repo)
+    if not before:
+        return {"trial": trial, "ok": False, "injected": False,
+                "why": "no baseline checkpoints readable; loss assertion "
+                       "would be vacuous"}
 
-    (repo / f"edit-{trial}.bin").write_bytes(os.urandom(rng.randrange(1024, 1 << 20)))
+    (repo / f"edit-{trial}.bin").write_bytes(
+        seeded_bytes(rng, rng.randrange(1024, 1 << 20)))
     argv = rng.choice(OPERATION_POOL)
     proc = subprocess.Popen([str(L.LTX), *argv], cwd=repo,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # Kill at a uniformly random point inside a window that spans a typical
-    # operation, so the crash lands at many different code positions.
     time.sleep(rng.uniform(0.001, 0.250))
-    if proc.poll() is None:
+    # A process that already exited received no signal. Counting that as an
+    # injection inflates the trial count with runs that tested nothing, so it
+    # is recorded as not-injected and excluded from the mandated total.
+    injected = proc.poll() is None
+    if injected:
         proc.send_signal(signal.SIGKILL)
     proc.wait(timeout=60)
 
     ok, why = verify(repo)
     after = durable_checkpoints(repo)
     lost = [c for c in before if c not in after]
-    return {"trial": trial, "operation": argv[0], "ok": ok and not lost,
+    return {"trial": trial, "operation": argv[0], "injected": injected,
+            "ok": ok and not lost,
             "why": why if not ok else (f"{len(lost)} checkpoints lost" if lost else ""),
             "checkpoints_lost": len(lost)}
 
 
 def powerloss_trial(work: Path, rng: random.Random, trial: int,
                     shim: Path) -> dict:
-    """Record the I/O journal, replay a mutilated prefix, then verify."""
+    """Record the I/O journal, then rebuild a genuine post-crash state.
+
+    The ordering matters and an earlier version got it wrong: it ran the
+    operation to COMPLETION and then replayed selected records on top. That is
+    not a crash -- it is a consistent post-operation store with some writes
+    re-applied, which the engine would obviously survive. The trial measured
+    nothing.
+
+    Correct sequence: snapshot the store BEFORE the operation, run the
+    operation under the recording shim, RESTORE the snapshot (undoing the
+    operation entirely), then replay the mutilated journal onto that restored
+    state. What results is a store that saw part of an operation and then lost
+    power, which is the thing the gate is about.
+    """
     repo = work / f"pl-{trial}"
     shutil.rmtree(repo, ignore_errors=True)
     repo.mkdir(parents=True)
     journal = work / f"journal-{trial}.bin"
+    snapshot = work / f"snap-{trial}"
 
     env = {
         "DYLD_INSERT_LIBRARIES": str(shim),
@@ -162,13 +197,33 @@ def powerloss_trial(work: Path, rng: random.Random, trial: int,
     }
     if L.run(["init"], cwd=repo, env=env).returncode != 0:
         return {"trial": trial, "ok": False, "why": "init failed under shim"}
-    (repo / "seed.txt").write_bytes(os.urandom(4096))
-    L.run(["save", "seed"], cwd=repo, env=env)
-    before = durable_checkpoints(repo)
+    (repo / "seed.txt").write_bytes(seeded_bytes(rng, 4096))
+    save = L.run(["save", "seed"], cwd=repo, env=env)
+    if save.returncode != 0:
+        return {"trial": trial, "ok": False,
+                "why": f"baseline save failed: {save.stderr[:160]}"}
 
-    (repo / f"edit-{trial}.bin").write_bytes(os.urandom(rng.randrange(1024, 1 << 20)))
+    before = durable_checkpoints(repo)
+    if not before:
+        # Without baseline evidence the "no checkpoints lost" assertion is
+        # vacuous -- an empty before-set can never show a loss.
+        return {"trial": trial, "ok": False,
+                "why": "no baseline checkpoints readable; loss assertion "
+                       "would be vacuous"}
+
+    # Snapshot the pre-operation store so the operation can be undone.
+    shutil.rmtree(snapshot, ignore_errors=True)
+    shutil.copytree(repo / ".lattice", snapshot, symlinks=True)
+
+    (repo / f"edit-{trial}.bin").write_bytes(
+        seeded_bytes(rng, rng.randrange(1024, 1 << 20)))
     argv = rng.choice(OPERATION_POOL)
     L.run(argv, cwd=repo, env=env)
+
+    # Undo the operation completely, then let the replayer rebuild whatever
+    # partial state a crash would have left.
+    shutil.rmtree(repo / ".lattice", ignore_errors=True)
+    shutil.copytree(snapshot, repo / ".lattice", symlinks=True)
 
     replay = subprocess.run(
         [sys.executable, str(REPO / "harness" / "lib" / "iofault" / "replay.py"),
@@ -208,7 +263,15 @@ def main() -> int:
     rng = random.Random(SEED)
     work = Path(tempfile.mkdtemp(prefix="g1-1-"))
     try:
-        sk = [sigkill_trial(work, rng, i) for i in range(SIGKILL_TRIALS)]
+        # Over-run: attempts where the process had already exited delivered no
+        # signal, so keep going until the mandated number of REAL injections is
+        # reached (bounded, so a pathologically fast engine cannot loop forever).
+        sk = []
+        attempts = 0
+        while (sum(1 for r in sk if r.get("injected")) < SIGKILL_TRIALS
+               and attempts < SIGKILL_TRIALS * 3):
+            sk.append(sigkill_trial(work, rng, attempts))
+            attempts += 1
         pl = [powerloss_trial(work, rng, i, shim) for i in range(POWERLOSS_TRIALS)]
 
         failures = [r for r in sk + pl if not r["ok"]]
@@ -219,16 +282,19 @@ def main() -> int:
                     hits[s] += 1
         uncovered = [s for s, n in hits.items() if n < MIN_HITS_PER_SECTION]
 
+        injected_sk = [r for r in sk if r.get("injected")]
         coverage_ok = (not uncovered
-                       and len(sk) >= SIGKILL_TRIALS
+                       and len(injected_sk) >= SIGKILL_TRIALS
                        and len(pl) >= POWERLOSS_TRIALS)
         coverage_note = ""
         if uncovered:
             coverage_note = ("fault injector never hit critical section(s): "
                              + ", ".join(uncovered))
-        elif len(sk) < SIGKILL_TRIALS or len(pl) < POWERLOSS_TRIALS:
-            coverage_note = (f"{len(sk)}/{SIGKILL_TRIALS} SIGKILL and "
-                             f"{len(pl)}/{POWERLOSS_TRIALS} power-loss trials")
+        elif len(injected_sk) < SIGKILL_TRIALS or len(pl) < POWERLOSS_TRIALS:
+            coverage_note = (
+                f"{len(injected_sk)}/{SIGKILL_TRIALS} trials actually delivered a "
+                f"SIGKILL ({len(sk) - len(injected_sk)} processes had already "
+                f"exited) and {len(pl)}/{POWERLOSS_TRIALS} power-loss trials")
 
         return L.emit({
             "gate": GATE,
@@ -239,7 +305,8 @@ def main() -> int:
             "coverage": {"ok": coverage_ok, "note": coverage_note},
             "detail": {
                 "seed": SEED,
-                "sigkill_trials": len(sk),
+                "sigkill_trials_attempted": len(sk),
+                "sigkill_trials_injected": len(injected_sk),
                 "powerloss_trials": len(pl),
                 "critical_section_hits": hits,
                 "checkpoints_lost_total": sum(r.get("checkpoints_lost", 0)

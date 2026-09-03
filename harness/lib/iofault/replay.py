@@ -109,19 +109,33 @@ def main() -> int:
     cut = rng.randrange(1, len(records) + 1)
     prefix = records[:cut]
 
-    # 2. Which writes were made durable? A write is durable once a sync on the
-    #    same path follows it. Everything after the last sync for that path is
-    #    still in volatile cache and is fair game.
+    # 2. Which records were made durable? POSIX has TWO barriers and both must
+    #    be modelled:
+    #      - fsync on a FILE makes that file's data durable
+    #      - fsync on its containing DIRECTORY is what makes a rename, create or
+    #        unlink durable
+    #    Keying only on the file path treated every rename as permanently
+    #    volatile, which is stricter than reality and would have failed an
+    #    engine that followed the rules correctly.
     last_sync: dict[str, int] = {}
+    last_dir_sync: dict[str, int] = {}
     for r in prefix:
         if r.op in (OP_FSYNC, OP_FDATASYNC):
             last_sync[r.path] = r.seq
+            last_dir_sync[r.path] = max(last_dir_sync.get(r.path, -1), r.seq)
+            parent = str(Path(r.path).parent)
+            last_dir_sync[parent] = max(last_dir_sync.get(parent, -1), r.seq)
+
+    def barrier_for(rec: Record) -> int:
+        if rec.op in (OP_RENAME, OP_UNLINK):
+            return last_dir_sync.get(str(Path(rec.path).parent), -1)
+        return last_sync.get(rec.path, -1)
 
     durable, volatile = [], []
     for r in prefix:
         if r.op in (OP_FSYNC, OP_FDATASYNC):
             continue
-        (durable if r.seq < last_sync.get(r.path, -1) else volatile).append(r)
+        (durable if r.seq < barrier_for(r) else volatile).append(r)
 
     # 3. Mutilate only the volatile tail.
     surviving = list(volatile)
@@ -156,40 +170,57 @@ def main() -> int:
     # the symlinked form (/var/...). Comparing them unresolved applied nothing
     # while reporting a perfectly plausible crash.
     root = Path(args.root).resolve()
-    applied = 0
+    applied = skipped = 0
+    errors: list[str] = []
     sections: set[str] = set()
     for r in sorted(durable, key=lambda x: x.seq) + surviving:
         target = Path(r.path)
         if not str(target).startswith(str(root)):
             continue
 
-        sec = section_for(r.path)
-        if sec:
-            sections.add(sec)
+        landed = False
         try:
             if r.op in (OP_WRITE, OP_PWRITE):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with open(target, "r+b" if target.exists() else "wb") as fh:
                     fh.seek(r.offset)
                     fh.write(r.payload)
-                applied += 1
+                landed = True
             elif r.op == OP_FTRUNCATE:
                 if target.exists():
                     os.truncate(target, r.length)
-                    applied += 1
+                    landed = True
             elif r.op == OP_UNLINK:
                 target.unlink(missing_ok=True)
-                applied += 1
+                landed = True
             elif r.op == OP_RENAME:
                 src = Path(r.payload.decode("utf-8", "replace"))
                 if src.exists():
                     target.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(src, target)
-                    applied += 1
-        except OSError:
-            # A failed replay step IS a plausible crash outcome; the point of
-            # the exercise is that the engine survives whatever state results.
-            pass
+                    landed = True
+        except FileNotFoundError:
+            # A missing parent is itself a plausible crash outcome: the
+            # directory entry was volatile and did not survive.
+            skipped += 1
+            continue
+        except OSError as exc:
+            # Anything else means the REPLAYER failed, not the engine.
+            # Swallowing it produced a "successful" replay that had applied
+            # nothing, which G1.1 would have scored as a clean survival trial.
+            errors.append(f"{r.path}: {exc}")
+            continue
+
+        if landed:
+            applied += 1
+            # Coverage is credited only for records that ACTUALLY landed;
+            # crediting before the attempt let a replay that applied nothing
+            # still report full critical-section coverage.
+            sec = section_for(r.path)
+            if sec:
+                sections.add(sec)
+        else:
+            skipped += 1
 
     print(json.dumps({
         "journal_records": len(records),
@@ -200,9 +231,14 @@ def main() -> int:
         "reordered": bool(args.reorder and len(volatile) > 1),
         "torn": torn,
         "applied": applied,
+        "skipped": skipped,
+        "errors": errors[:20],
         "sections_hit": sorted(sections),
     }))
-    return 0
+    # Fail closed. An unexpected replay error means the crash state was never
+    # built, and a trial scored against a state that does not exist is worse
+    # than no trial at all.
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

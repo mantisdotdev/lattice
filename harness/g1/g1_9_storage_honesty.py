@@ -53,13 +53,22 @@ def tool_version(binary: str, *args: str) -> str | None:
 
 
 def dir_bytes(path: Path) -> int:
+    """Total size, refusing to under-report.
+
+    An earlier version skipped any file it could not stat. The same function
+    sizes both the baselines and the .lattice store, so a skipped file
+    undercounts whichever side hit the error -- and undercounting OUR store is
+    exactly the direction that makes the gate pass wrongly.
+    """
     total = 0
     for root, _, files in os.walk(path):
         for f in files:
+            full = os.path.join(root, f)
             try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
+                total += os.path.getsize(full)
+            except OSError as exc:
+                raise L.NotBuilt(f"cannot size {full}: {exc}; refusing to "
+                                 f"report a partial store size")
     return total
 
 
@@ -89,8 +98,17 @@ def git_gc_baseline(work: Path) -> tuple[int, str]:
                        capture_output=True, text=True, timeout=14400)
     if r.returncode != 0:
         raise L.NotBuilt(f"git clone failed: {r.stderr.strip()[:200]}")
-    subprocess.run(["git", "-C", str(clone), "gc", "--aggressive",
-                    "--prune=now", "--quiet"], timeout=28800)
+    # Capture output: this harness writes its JSON result to stdout, and any
+    # git chatter there would corrupt the machine-readable record. Check the
+    # return code: a failed gc leaves loose objects, inflating the BASELINE and
+    # making our ratio look better than it is.
+    gc = subprocess.run(["git", "-C", str(clone), "gc", "--aggressive",
+                         "--prune=now", "--quiet"],
+                        capture_output=True, text=True, errors="replace",
+                        timeout=28800)
+    if gc.returncode != 0:
+        raise L.NotBuilt(f"git gc --aggressive failed, so the baseline would be "
+                         f"inflated by loose objects: {gc.stderr.strip()[:200]}")
     return dir_bytes(clone / ".git" / "objects"), \
         tool_version("git") or "git (unknown)"
 

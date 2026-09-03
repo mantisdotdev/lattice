@@ -21,6 +21,7 @@ docs/DISAGREEMENTS.md:
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import statistics
@@ -77,14 +78,19 @@ def run(args: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT,
 
 
 def percentile(values: list[float], p: float) -> float:
-    """Nearest-rank percentile. Deliberately not interpolated: with >= 100
-    samples the difference is negligible, and an exact observed sample is
-    easier to defend than a synthesised one."""
+    """Nearest-rank percentile: the smallest value at or below which at least
+    p of the samples fall, i.e. the ceil(p*n)-th ordered sample (1-indexed).
+
+    An earlier version used `int(n*p + 0.5) - 1`, which rounds rather than
+    ceilings: for n=111 at p95 it selected the 105th sample where nearest-rank
+    requires the 106th. That UNDER-reports latency, so a gate could pass on a
+    percentile it had not actually met.
+    """
     if not values:
         return float("nan")
     ordered = sorted(values)
-    idx = max(0, min(len(ordered) - 1, int(len(ordered) * p + 0.5) - 1))
-    return ordered[idx]
+    rank = math.ceil(p * len(ordered))
+    return ordered[max(0, min(len(ordered) - 1, rank - 1))]
 
 
 @dataclass
