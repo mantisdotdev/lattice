@@ -188,6 +188,34 @@ entities. The vocabulary lint's noun list is therefore exactly the seven, and th
 lint is enforced against help text, docs, and every error string — including the
 ones this resolution creates.
 
+### Amendment, after independent review
+
+An independent review of the brief raised the same defect and counted **two
+further nouns I had missed**, which this resolution now covers. It proposed
+raising the cap to about ten; I am keeping seven, and the reasoning for each of
+the two is different rather than uniform, so both are stated:
+
+- **`version`** (§4.2: a change "has versions"). This one is genuinely
+  user-facing — amend a change and you need to refer to what it was before.
+  It is resolved not as an eighth noun but as **an ordinal on an existing one**:
+  the surface says *"change `qpvz`, third version"*, the way one says "line 12"
+  without `line-number` being a concept. `ltx log --forensic` shows a change's
+  versions as rows under it. The user learns nothing new; they read an index.
+- **`retraction`** (§5.6). Here the review is right that a noun exists, and
+  wrong that it is user-facing on the normal path. `ltx retract` is a **verb**,
+  and the retraction *record* is an op-log entry — plumbing, reachable at
+  `ltx internals`. The one place it must surface is Challenge 8's
+  `remote_effects_not_undone`, which names the *command* to run, not the record
+  it creates. A user is told "run `ltx retract`", never "inspect the retraction".
+
+The cap stays at seven because raising it is the wrong direction of travel for a
+CONSTRAINT whose entire purpose is resisting exactly this pressure — every
+individual noun looks necessary at the moment it is added. If a later noun
+genuinely cannot be folded in, that is an ADR-11 re-scope with the stakeholder,
+not a quiet increment. What makes seven defensible rather than stubborn is that
+G2.3 is HARD and machine-checked: if this resolution is wrong, the vocabulary
+lint fails on Lattice's own help text and says so.
+
 ---
 
 ## Challenge 4 — `ltx verify` is undefined on a partial clone, which is the v1 default
