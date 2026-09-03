@@ -63,11 +63,16 @@ waiting=$(echo "$checks" | jq -r '[.[] | select(.bucket=="pending")] | length') 
 # in CodeRabbit's body (it embeds ASCII art), leaving `body` silently EMPTY --
 # so every content check below matched nothing and the gate blocked a PR whose
 # review had actually finished.
+# EXACT bot login. A substring match on "coderabbit" would let any account
+# whose name merely contains it -- coderabbit-helper, my-coderabbit -- post a
+# comment that satisfies this gate. The reviewer's identity is the thing being
+# trusted, so it is compared exactly.
+# `gh api --jq` does not accept --arg, so the login is inlined literally.
 body=$(gh api "/repos/$REPO/issues/$PR/comments" --paginate \
-       --jq '[.[] | select(.user.login | test("coderabbit";"i"))] | last | .body' \
+       --jq '[.[] | select(.user.login == "coderabbitai[bot]")] | last | .body' \
        2>/dev/null) || undetermined "cannot read PR comments"
 comment_iso=$(gh api "/repos/$REPO/issues/$PR/comments" --paginate \
-       --jq '[.[] | select(.user.login | test("coderabbit";"i"))] | last | .updated_at' \
+       --jq '[.[] | select(.user.login == "coderabbitai[bot]")] | last | .updated_at' \
        2>/dev/null) || undetermined "cannot read PR comment timestamps"
 [ -n "$body" ] && [ "$body" != "null" ] \
   || fail "CodeRabbit has not commented yet"
@@ -81,7 +86,20 @@ fi
 # Requiring (a) alone produced a false negative that blocked a PR whose review
 # had in fact completed -- so (b) is accepted when the comment is NEWER than the
 # head commit, which is the same guarantee by a different route.
-head_epoch=$(git log -1 --format=%ct "$head" 2>/dev/null || echo 0)
+# When did GITHUB first see this head? The committer date is set by the author
+# (GIT_COMMITTER_DATE), so a backdated commit would make a stale review look
+# newer than the code it did not review -- defeating the SHA-free path entirely.
+# Check-run start times are stamped server-side and cannot be back-dated by a
+# pusher, so the earliest one for this SHA is used instead.
+head_epoch=$(gh api "/repos/$REPO/commits/$head/check-runs" \
+             --jq '[.check_runs[].started_at] | min // empty' 2>/dev/null \
+             | head -1)
+if [ -n "$head_epoch" ]; then
+  head_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$head_epoch" "+%s" 2>/dev/null \
+               || date -u -d "$head_epoch" "+%s" 2>/dev/null || echo 0)
+else
+  head_epoch=0
+fi
 # TZ=UTC is load-bearing: macOS `date -j -f` IGNORES the trailing Z and parses
 # the timestamp in local time, so on a machine at UTC+5:30 a comment posted five
 # minutes ago read as five hours old -- older than the commit, and the gate
@@ -89,13 +107,30 @@ head_epoch=$(git log -1 --format=%ct "$head" 2>/dev/null || echo 0)
 comment_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$comment_iso" "+%s" 2>/dev/null \
                 || date -u -d "$comment_iso" "+%s" 2>/dev/null || echo 0)
 
+# CodeRabbit signals completion in THREE shapes, and a gate that knows only one
+# of them blocks PRs whose review has finished. Each was discovered the same
+# way: by the gate refusing a PR that was demonstrably ready.
+#   a) a walkthrough summary naming the reviewed commit range
+#   b) a bare "Review finished" acknowledgment, carrying no SHA
+#   c) "Already reviewed the last commit" -- the incremental reviewer declining
+#      to repeat itself, which is a POSITIVE statement that head is covered
+# (b) and (c) carry no SHA, so they are accepted only when the comment is newer
+# than the head commit -- the same guarantee by a different route.
 covers_head=false
 echo "$body" | grep -qE "${head:0:7}|${head}" && covers_head=true
-if [ "$covers_head" != "true" ]; then
-  if echo "$body" | grep -qiE "review finished|actionable comments posted" \
-     && [ "$comment_epoch" -gt "$head_epoch" ] && [ "$head_epoch" -gt 0 ]; then
+if [ "$covers_head" != "true" ] \
+   && [ "$comment_epoch" -gt "$head_epoch" ] && [ "$head_epoch" -gt 0 ]; then
+  if echo "$body" | grep -qiE "review finished|actionable comments posted|already reviewed the last commit"; then
     covers_head=true
   fi
+fi
+# The SHA-free path depends entirely on a trustworthy head timestamp. Without
+# one there is no evidence the review covers this code, so refuse rather than
+# guess.
+if [ "$covers_head" = "true" ] && [ "$head_epoch" -eq 0 ] \
+   && ! echo "$body" | grep -qE "${head:0:7}|${head}"; then
+  undetermined "no server-side timestamp for head ${head:0:7} (no check-runs), "\
+               "so a review that does not name the SHA cannot be shown to cover it"
 fi
 [ "$covers_head" = "true" ] \
   || fail "newest CodeRabbit review does not cover head ${head:0:7}; it reviewed an earlier commit"
@@ -122,7 +157,7 @@ for _ in $(seq 1 20); do
   n=$(echo "$page" | jq -r '
         [.data.repository.pullRequest.reviewThreads.nodes[]
          | select(.isResolved == false and .isOutdated == false)
-         | select(.comments.nodes[0].author.login | test("coderabbit";"i"))]
+         | select(.comments.nodes[0].author.login == "coderabbitai[bot]")]
         | length') || undetermined "cannot evaluate review threads"
   open_findings=$((open_findings + n))
 
