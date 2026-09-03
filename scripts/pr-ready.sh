@@ -147,17 +147,26 @@ for _ in $(seq 1 20); do
         pullRequest(number:$pr) {
           reviewThreads(first:100, after:$after) {
             pageInfo { hasNextPage endCursor }
-            nodes { isResolved isOutdated comments(first:1){nodes{author{login}}} }
+            nodes { isResolved isOutdated comments(first:1){nodes{author{__typename login}}} }
           }
         }
       }
     }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="$PR" \
        -F after="$cursor" 2>/dev/null) || undetermined "cannot query review threads"
 
+  # Identify CodeRabbit by its GitHub App bot identity, NOT a login substring
+  # (CWE-287). Two subtleties, both learned the hard way:
+  #   * GraphQL returns a bot's login WITHOUT the `[bot]` suffix REST uses, so
+  #     this must match "coderabbitai", not "coderabbitai[bot]" — the earlier
+  #     mismatch made this whole count silently zero, a false READY.
+  #   * Requiring __typename == "Bot" means a User account named "coderabbitai"
+  #     cannot impersonate the app: only the real GitHub App is a Bot with that
+  #     login slug.
   n=$(echo "$page" | jq -r '
         [.data.repository.pullRequest.reviewThreads.nodes[]
          | select(.isResolved == false and .isOutdated == false)
-         | select(.comments.nodes[0].author.login == "coderabbitai[bot]")]
+         | select(.comments.nodes[0].author.__typename == "Bot")
+         | select(.comments.nodes[0].author.login == "coderabbitai")]
         | length') || undetermined "cannot evaluate review threads"
   open_findings=$((open_findings + n))
 

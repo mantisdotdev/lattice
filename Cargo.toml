@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/ltx-core", "crates/ltx", "crates/ltx-daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/mantisdotdev/lattice"
+
+[workspace.dependencies]
+blake3 = "1.5"
+fastcdc = "3.2"
+zstd = "0.13"
+redb = "2.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
