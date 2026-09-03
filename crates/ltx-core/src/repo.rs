@@ -238,23 +238,26 @@ impl Repo {
     }
 
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
-        // The HEAD file is a convenience cache; the authoritative record of the
-        // current checkpoint is the durable op-log head (redb, crash-atomic).
-        // If the file is present and names a real checkpoint, use it. If it is
-        // missing, empty, or torn — the exact residue of a crash mid-publish —
-        // fall back to the op-log rather than reporting "nothing saved", which
-        // would silently orphan history that was in fact committed.
+        // The durable op-log head in redb is the authoritative, transactional
+        // record of the current checkpoint. The .lattice/HEAD file is a
+        // human-readable cache written AFTER the redb head (in both save and
+        // undo), so it can only ever be equal to or STALER than redb — never
+        // fresher. A crash between the two writes must NOT let the stale file
+        // override redb, or a crash mid-undo would resurrect the undone
+        // checkpoint and a crash mid-save would mask a committed one. So redb is
+        // consulted first; the file is a fallback only when redb records no head
+        // (a repository created before heads were tracked, or a manual edit).
+        if let Some(cp) = self.durable_head_checkpoint()? {
+            return Ok(Some(cp));
+        }
         let path = self.head_pointer_path();
         if let Ok(raw) = fs::read_to_string(&path) {
             let id = raw.trim();
             if ChunkId::from_hex(id).is_some() {
-                if let Some(cp) = self.checkpoint(id)? {
-                    return Ok(Some(cp));
-                }
+                return self.checkpoint(id);
             }
         }
-        // File absent or unusable: recover from the durable op-log head.
-        self.durable_head_checkpoint()
+        Ok(None)
     }
 
     /// Resolve the current checkpoint from the durable op-log head alone.
@@ -344,6 +347,99 @@ impl Repo {
         out.sort_by_key(|c| std::cmp::Reverse(c.oplog_seq));
         out.dedup_by(|a, b| a.id == b.id);
         Ok(out)
+    }
+
+    /// Checkpoints reachable from the current head, newest first.
+    ///
+    /// This is the checkpoint graph as `undo` sees it (ADR-15): undo moves the
+    /// head to a checkpoint's parent, so an undone checkpoint leaves this set
+    /// while remaining immutably in the store. `checkpoints()` — every saved
+    /// checkpoint ever — still backs `verify` and `status`; only the history
+    /// view walks from the head, so that it is invariant under undo-all.
+    pub fn reachable_checkpoints(&self) -> Result<Vec<Checkpoint>> {
+        let mut out = Vec::new();
+        let mut cursor = self.head_checkpoint()?;
+        // A checkpoint's id hashes its parent, so a parent chain cannot form a
+        // cycle; the walk is still bounded — nothing from outside is unbounded.
+        let mut guard = 0usize;
+        while let Some(cp) = cursor {
+            guard += 1;
+            if guard > 10_000_000 {
+                return Err(Error::Corrupt(
+                    "checkpoint parent chain exceeds the sane bound".into(),
+                ));
+            }
+            let parent = cp.parent.clone();
+            let cp_id = cp.id.clone();
+            out.push(cp);
+            cursor = match parent {
+                None => None,
+                Some(pid) => match self.checkpoint(&pid)? {
+                    Some(parent) => Some(parent),
+                    // A named parent that does not resolve is corruption — a
+                    // hole in the history spine — not a silent end of the walk.
+                    // `undo` treats the same condition the same way.
+                    None => {
+                        return Err(Error::Corrupt(format!(
+                            "checkpoint {} names a parent {} that is not present",
+                            crate::short_id(&cp_id),
+                            crate::short_id(&pid)
+                        )))
+                    }
+                },
+            };
+        }
+        Ok(out)
+    }
+
+    /// The history the user sees: reachable checkpoints, newest first,
+    /// optionally capped at `limit`. The default-and-limit policy lives here
+    /// rather than in the CLI (§8) — the CLI and the daemon API share it.
+    pub fn history(&self, limit: Option<usize>) -> Result<Vec<Checkpoint>> {
+        let all = self.reachable_checkpoints()?;
+        Ok(match limit {
+            Some(n) => all.into_iter().take(n).collect(),
+            None => all,
+        })
+    }
+
+    // -------------------------------------------------------------- undo
+
+    /// Reverse the most recent undoable operation on user-visible state.
+    ///
+    /// For the operations that exist today this is a save: undo moves the head
+    /// to the saved checkpoint's parent and appends an `Undo` record. At the
+    /// root checkpoint (no parent) there is nothing to undo and no record is
+    /// appended — ADR-15 explains why the root is the floor. The op-log entry
+    /// is written before the head moves, mirroring save's durable order.
+    pub fn undo(&mut self) -> Result<UndoOutcome> {
+        let Some(head) = self.head_checkpoint()? else {
+            return Ok(UndoOutcome::nothing());
+        };
+        let Some(parent_id) = head.parent.clone() else {
+            return Ok(UndoOutcome::nothing());
+        };
+        let Some(parent) = self.checkpoint(&parent_id)? else {
+            return Err(Error::Corrupt(format!(
+                "checkpoint {} names a parent {} that is not present",
+                crate::short_id(&head.id),
+                crate::short_id(&parent_id)
+            )));
+        };
+
+        let entry = self.oplog.append(Operation::Undo {
+            undone_seq: head.oplog_seq,
+        })?;
+        self.oplog.set_head("checkpoint", parent.oplog_seq)?;
+        self.write_head_pointer(&parent.id)?;
+
+        Ok(UndoOutcome {
+            nothing_to_undo: false,
+            undone_checkpoint: Some(head.id),
+            now_at: Some(parent.id),
+            undo_seq: Some(entry.seq),
+            remote_effects_not_undone: Vec::new(),
+        })
     }
 
     // ------------------------------------------------------------ snapshot
@@ -773,6 +869,34 @@ pub struct Collision {
     pub path: String,
     pub collided_with: String,
     pub reason: String,
+}
+
+/// The result of `undo` — what it reversed, or that there was nothing to.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UndoOutcome {
+    pub nothing_to_undo: bool,
+    /// The checkpoint whose creation was reversed, if any.
+    pub undone_checkpoint: Option<String>,
+    /// The checkpoint now current after the undo, if any.
+    pub now_at: Option<String>,
+    /// Op-log sequence of the appended Undo record, if one was appended.
+    pub undo_seq: Option<u64>,
+    /// Remote effects an undo could not reverse (Challenge 8 / SPEC §4.3).
+    /// Always empty for a purely local undo; present so a future sync-undo can
+    /// name its residue rather than silently leaving it.
+    pub remote_effects_not_undone: Vec<String>,
+}
+
+impl UndoOutcome {
+    fn nothing() -> Self {
+        UndoOutcome {
+            nothing_to_undo: true,
+            undone_checkpoint: None,
+            now_at: None,
+            undo_seq: None,
+            remote_effects_not_undone: Vec::new(),
+        }
+    }
 }
 
 /// What a checkout managed to write.
@@ -1268,6 +1392,117 @@ mod tests {
             "a one-byte edit added {added} chunks on top of {after_first}; \
              cross-pack dedup is not working"
         );
+    }
+
+    #[test]
+    fn undo_moves_the_head_to_the_parent_and_stops_at_the_root() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        let a = repo.save("one").unwrap(); // root: parent is None
+        fs::write(dir.path().join("f"), b"2").unwrap();
+        let b = repo.save("two").unwrap();
+        fs::write(dir.path().join("f"), b"3").unwrap();
+        let c = repo.save("three").unwrap();
+
+        let ids = |r: &Repo| {
+            r.reachable_checkpoints()
+                .unwrap()
+                .into_iter()
+                .map(|k| k.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&repo), vec![c.id.clone(), b.id.clone(), a.id.clone()]);
+
+        let u1 = repo.undo().unwrap();
+        assert!(!u1.nothing_to_undo);
+        assert_eq!(u1.undone_checkpoint.as_deref(), Some(c.id.as_str()));
+        assert_eq!(u1.now_at.as_deref(), Some(b.id.as_str()));
+        assert!(u1.remote_effects_not_undone.is_empty());
+        assert_eq!(ids(&repo), vec![b.id.clone(), a.id.clone()]);
+
+        repo.undo().unwrap();
+        assert_eq!(ids(&repo), vec![a.id.clone()]);
+
+        // At the root there is nothing to undo, and no op is appended.
+        let before = repo.oplog().len().unwrap();
+        let u3 = repo.undo().unwrap();
+        assert!(u3.nothing_to_undo);
+        assert_eq!(u3.now_at, None);
+        assert_eq!(
+            repo.oplog().len().unwrap(),
+            before,
+            "nothing_to_undo must append no op"
+        );
+        assert_eq!(
+            repo.head_checkpoint().unwrap().unwrap().id,
+            a.id,
+            "the head stays at the root"
+        );
+    }
+
+    #[test]
+    fn a_stale_head_file_does_not_override_the_durable_redb_head() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        let a = repo.save("one").unwrap();
+        fs::write(dir.path().join("f"), b"2").unwrap();
+        let b = repo.save("two").unwrap();
+
+        // The residue of a crash mid-undo (or mid-save): the durable redb head
+        // moved to `a`, but the HEAD file still names `b` because
+        // write_head_pointer had not run. The durable redb head must win — a
+        // staler cache file must not resurrect the old head.
+        repo.oplog().set_head("checkpoint", a.oplog_seq).unwrap();
+        fs::write(repo.head_pointer_path(), &b.id).unwrap();
+
+        assert_eq!(
+            repo.head_checkpoint().unwrap().unwrap().id,
+            a.id,
+            "the durable redb head must win over a staler HEAD file"
+        );
+    }
+
+    #[test]
+    fn undo_with_nothing_saved_is_nothing_to_undo() {
+        let (_dir, mut repo) = repo();
+        let u = repo.undo().unwrap();
+        assert!(u.nothing_to_undo);
+        assert_eq!(repo.head_checkpoint().unwrap(), None);
+    }
+
+    #[test]
+    fn save_then_undo_all_restores_the_reachable_graph_to_the_seed() {
+        // The G1.3 property in miniature: from a seed, apply saves, undo until
+        // nothing_to_undo, and the reachable checkpoint graph returns exactly
+        // to the seed.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("seed.txt"), b"seed\n").unwrap();
+        let seed = repo.save("seed").unwrap();
+        let before: Vec<String> = repo
+            .reachable_checkpoints()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+
+        for i in 0..4 {
+            fs::write(dir.path().join("seed.txt"), format!("v{i}").as_bytes()).unwrap();
+            repo.save(&format!("edit {i}")).unwrap();
+        }
+        for _ in 0..50 {
+            if repo.undo().unwrap().nothing_to_undo {
+                break;
+            }
+        }
+
+        let after: Vec<String> = repo
+            .reachable_checkpoints()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(after, before, "undo-all restores the reachable graph");
+        assert_eq!(after, vec![seed.id]);
     }
 
     #[test]

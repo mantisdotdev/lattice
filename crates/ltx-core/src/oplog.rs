@@ -80,11 +80,25 @@ impl Operation {
     /// Challenge 12: §4.3 promises every state-changing command is undoable,
     /// but undoing a redaction would resurrect the secret it destroyed and
     /// falsify a GDPR erasure claim, and thinned data is simply gone. The
-    /// honest scope is local causal undo with these two named exclusions, and
-    /// naming them here means G1.3 can assert that each REFUSES undo rather
-    /// than silently doing nothing.
+    /// honest scope is local causal undo with those two named exclusions among
+    /// the state-changing commands, so G1.3 can assert each REFUSES undo rather
+    /// than silently doing nothing. `Init` is separate: it establishes the
+    /// repository container below the undo floor (ADR-15), is not a
+    /// state-changing command for undo purposes, and is not undoable.
+    ///
+    /// `Undo` is also not itself reversible via `ltx undo` in this model. Undo
+    /// is monotonic toward the root so that undo-all converges (G1.3 requires
+    /// it); reversing an undo would be a forward "redo", which would oscillate
+    /// under repeated `ltx undo` and never reach `nothing_to_undo`. Redo is a
+    /// separate forward mechanism, deferred (ADR-15).
     pub fn is_undoable(&self) -> bool {
-        !matches!(self, Operation::Redact { .. } | Operation::Thin { .. })
+        !matches!(
+            self,
+            Operation::Init
+                | Operation::Undo { .. }
+                | Operation::Redact { .. }
+                | Operation::Thin { .. }
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -600,8 +614,13 @@ mod tests {
         }
         .is_undoable());
         assert!(
-            Operation::Undo { undone_seq: 1 }.is_undoable(),
-            "undo of undo is redo, and must remain available"
+            !Operation::Undo { undone_seq: 1 }.is_undoable(),
+            "undo is monotonic toward the root; reversing it (redo) is a \
+             separate deferred forward move, so undo is not itself undoable"
+        );
+        assert!(
+            !Operation::Init.is_undoable(),
+            "init is the undo floor and is not undoable"
         );
     }
 
