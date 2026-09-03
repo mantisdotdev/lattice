@@ -913,7 +913,10 @@ mod tests {
         #[cfg(windows)]
         {
             assert!(!is_safe_component(b"C:evil"), "drive-relative escapes dest");
-            assert!(!is_safe_component(&[b'a', b'\\', b'b']));
+            assert!(
+                !is_safe_component(b"a\\b"),
+                "backslash separates on Windows"
+            );
         }
     }
 
@@ -980,6 +983,10 @@ mod tests {
         );
     }
 
+    // Fold detection uses platform::file_identity, which is inode-based on
+    // Unix and unavailable on Windows (a documented deferral, see the review
+    // doc), so the no-silent-overwrite invariant is enforced where it holds.
+    #[cfg(unix)]
     #[test]
     fn checkout_never_silently_drops_a_folded_sibling() {
         // Two distinct byte-names that a folding filesystem merges into one:
