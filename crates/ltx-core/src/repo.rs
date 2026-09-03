@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -28,8 +29,31 @@ pub struct Checkpoint {
     pub message: String,
     pub parent: Option<String>,
     pub at_unix_ms: u64,
-    /// The op-log sequence that created this. Ties history to the audit record.
+    /// The op-log sequence that created this. A back-reference resolved from
+    /// the op-log at read time, NOT part of the checkpoint's identity — see
+    /// `body_id`. The stored blob always carries 0.
     pub oplog_seq: u64,
+}
+
+impl Checkpoint {
+    /// The content address that authenticates this checkpoint: the hash of its
+    /// body — tree, message, parent, and timestamp — and nothing else.
+    ///
+    /// `oplog_seq` is deliberately excluded. It is a back-reference resolved
+    /// from the op-log at read time; folding it into the identity would force
+    /// the blob to be rewritten once the sequence is known (a crash window),
+    /// and, worse, letting the stored `id` field be trusted directly lets any
+    /// ordinary file whose bytes deserialise as a Checkpoint impersonate one.
+    fn body_id(&self) -> Result<String> {
+        let body = serde_json::to_vec(&(&self.tree, &self.message, &self.parent, self.at_unix_ms))?;
+        Ok(ChunkId::of(&body).to_hex())
+    }
+
+    /// True iff the blob's declared `id` actually hashes its body. A blob that
+    /// fails this is not a checkpoint, whatever its `id` field claims.
+    fn is_authentic(&self) -> bool {
+        matches!(self.body_id(), Ok(computed) if computed == self.id)
+    }
 }
 
 /// What `verify` found.
@@ -156,17 +180,15 @@ impl Repo {
             at_unix_ms: at,
             oplog_seq: 0,
         };
-        let body = serde_json::to_vec(&(
-            &checkpoint.tree,
-            &checkpoint.message,
-            &checkpoint.parent,
-            at,
-        ))?;
-        checkpoint.id = ChunkId::of(&body).to_hex();
+        checkpoint.id = checkpoint.body_id()?;
 
-        // Content durable BEFORE the metadata referencing it (ADR-3). A crash
-        // between these two leaves unreferenced chunks, never a checkpoint
-        // pointing at content that was never written.
+        // Content — chunks, trees, and the checkpoint blob that names them — is
+        // made durable BEFORE the op-log entry that references the checkpoint
+        // id (ADR-3). A crash before the append leaves unreferenced blobs that
+        // recovery discards; a crash AFTER would leave an op-log entry naming a
+        // checkpoint whose blob was never written. So the blob comes first, and
+        // is written exactly once — `oplog_seq` is not part of its identity, so
+        // there is nothing to fill in afterward.
         let checkpoint_bytes = serde_json::to_vec(&checkpoint)?;
         packer.add(ChunkId::of(&checkpoint_bytes), &checkpoint_bytes);
         self.store.write_pack(packer)?;
@@ -175,16 +197,12 @@ impl Repo {
             message: message.to_string(),
             checkpoint: checkpoint.id.clone(),
         })?;
-        checkpoint.oplog_seq = entry.seq;
-
-        // Re-store with the sequence filled in, then move the head.
-        let mut packer = PackWriter::new();
-        let final_bytes = serde_json::to_vec(&checkpoint)?;
-        packer.add(ChunkId::of(&final_bytes), &final_bytes);
-        self.store.write_pack(packer)?;
         self.oplog.set_head("checkpoint", entry.seq)?;
         self.write_head_pointer(&checkpoint.id)?;
 
+        // The caller's copy carries the real sequence; reads resolve the same
+        // value from the op-log, so the stored blob's 0 is never observed.
+        checkpoint.oplog_seq = entry.seq;
         Ok(checkpoint)
     }
 
@@ -195,7 +213,17 @@ impl Repo {
     fn write_head_pointer(&self, checkpoint_id: &str) -> Result<()> {
         let path = self.head_pointer_path();
         let tmp = path.with_extension("tmp");
-        fs::write(&tmp, checkpoint_id)?;
+        // The tmp file's CONTENTS must be durable BEFORE the rename that
+        // publishes it. `fs::write` only reaches the page cache; a crash after
+        // the rename but before the data reached disk leaves a rename committed
+        // over a zero-length (or zero-filled) file, which is the classic
+        // "rename gave me an empty file" outcome on XFS/btrfs/APFS. So we fsync
+        // the tmp handle first, exactly as the pack store does for its files.
+        {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(checkpoint_id.as_bytes())?;
+            f.sync_all()?;
+        }
         // Atomic replace, then sync the directory so the rename itself is
         // durable — a rename is only committed once the containing directory
         // is fsynced, which is the barrier G1.1's replayer models.
@@ -205,27 +233,60 @@ impl Repo {
     }
 
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
+        // The HEAD file is a convenience cache; the authoritative record of the
+        // current checkpoint is the durable op-log head (redb, crash-atomic).
+        // If the file is present and names a real checkpoint, use it. If it is
+        // missing, empty, or torn — the exact residue of a crash mid-publish —
+        // fall back to the op-log rather than reporting "nothing saved", which
+        // would silently orphan history that was in fact committed.
         let path = self.head_pointer_path();
-        if !path.exists() {
-            return Ok(None);
+        if let Ok(raw) = fs::read_to_string(&path) {
+            let id = raw.trim();
+            if ChunkId::from_hex(id).is_some() {
+                if let Some(cp) = self.checkpoint(id)? {
+                    return Ok(Some(cp));
+                }
+            }
         }
-        let id = fs::read_to_string(&path)?;
-        self.checkpoint(id.trim())
+        // File absent or unusable: recover from the durable op-log head.
+        self.durable_head_checkpoint()
+    }
+
+    /// Resolve the current checkpoint from the durable op-log head alone.
+    ///
+    /// `save` records `set_head("checkpoint", seq)` in redb before publishing
+    /// the HEAD file, so this survives a crash that loses the file. The Save
+    /// entry at that sequence carries the checkpoint id.
+    fn durable_head_checkpoint(&self) -> Result<Option<Checkpoint>> {
+        let Some(seq) = self.oplog.get_head("checkpoint")? else {
+            return Ok(None);
+        };
+        let Some(entry) = self.oplog.get(seq)? else {
+            return Ok(None);
+        };
+        match entry.operation {
+            Operation::Save { checkpoint, .. } => self.checkpoint(&checkpoint),
+            _ => Ok(None),
+        }
     }
 
     pub fn checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
-        let Some(chunk_id) = ChunkId::from_hex(id) else {
+        if ChunkId::from_hex(id).is_none() {
             return Err(Error::Invalid(format!("{id} is not a checkpoint address")));
         };
         // A checkpoint is content-addressed like everything else, but its own
         // address is over its body rather than its serialised form, so the
         // lookup is by scanning the addresses we know. Small and adequate for
         // the current history sizes; a checkpoint index is a later refinement.
-        let _ = chunk_id;
         for candidate in self.store.all_chunk_ids() {
             if let Some(bytes) = self.store.read(candidate)? {
-                if let Ok(cp) = serde_json::from_slice::<Checkpoint>(&bytes) {
-                    if cp.id == id {
+                if let Ok(mut cp) = serde_json::from_slice::<Checkpoint>(&bytes) {
+                    // Authenticate before trusting: the blob's declared id must
+                    // be the one asked for AND must actually hash its body.
+                    // Without the second check, any ordinary file whose bytes
+                    // deserialise as a Checkpoint could impersonate one.
+                    if cp.id == id && cp.is_authentic() {
+                        cp.oplog_seq = self.oplog_seq_for(id)?.unwrap_or(0);
                         return Ok(Some(cp));
                     }
                 }
@@ -234,14 +295,42 @@ impl Repo {
         Ok(None)
     }
 
+    /// Op-log sequence of the Save that created a checkpoint, if any. This is
+    /// the authoritative back-reference; it is never stored in the blob.
+    fn oplog_seq_for(&self, checkpoint_id: &str) -> Result<Option<u64>> {
+        for entry in self.oplog.entries()? {
+            if let Operation::Save { checkpoint, .. } = &entry.operation {
+                if checkpoint == checkpoint_id {
+                    return Ok(Some(entry.seq));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Every checkpoint, newest first.
+    ///
+    /// The op-log is the authority on which checkpoints exist and in what
+    /// order; the store merely holds their blobs. A blob is a checkpoint only
+    /// if some Save entry references its id and its body authenticates — so a
+    /// file that merely looks like a checkpoint never appears here.
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>> {
+        let mut seq_by_id: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for entry in self.oplog.entries()? {
+            if let Operation::Save { checkpoint, .. } = &entry.operation {
+                seq_by_id.insert(checkpoint.clone(), entry.seq);
+            }
+        }
+
         let mut out: Vec<Checkpoint> = Vec::new();
         for candidate in self.store.all_chunk_ids() {
             if let Some(bytes) = self.store.read(candidate)? {
-                if let Ok(cp) = serde_json::from_slice::<Checkpoint>(&bytes) {
-                    if !cp.id.is_empty() && cp.oplog_seq > 0 {
-                        out.push(cp);
+                if let Ok(mut cp) = serde_json::from_slice::<Checkpoint>(&bytes) {
+                    if let Some(&seq) = seq_by_id.get(&cp.id) {
+                        if cp.is_authentic() {
+                            cp.oplog_seq = seq;
+                            out.push(cp);
+                        }
                     }
                 }
             }
@@ -780,5 +869,61 @@ mod tests {
         let a = repo.save("one").unwrap();
         let b = repo.save("two").unwrap();
         assert_eq!(a.tree, b.tree, "identical content must hash identically");
+    }
+
+    #[test]
+    fn a_file_that_looks_like_a_checkpoint_cannot_impersonate_one() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("real.txt"), b"real").unwrap();
+        let real = repo.save("real").unwrap();
+
+        // A working file whose bytes ARE a Checkpoint JSON claiming the real
+        // id but pointing at an attacker-chosen tree. Saving stores it as
+        // ordinary content.
+        let forged = serde_json::to_vec(&Checkpoint {
+            id: real.id.clone(),
+            tree: "de".repeat(32),
+            message: "forged".into(),
+            parent: None,
+            at_unix_ms: 0,
+            oplog_seq: 999,
+        })
+        .unwrap();
+        fs::write(dir.path().join("forged.json"), &forged).unwrap();
+        repo.save("store the forgery").unwrap();
+
+        // Looking up the real id must still return the real checkpoint: the
+        // forgery's declared id does not hash its body, so it fails to
+        // authenticate.
+        let got = repo.checkpoint(&real.id).unwrap().unwrap();
+        assert_eq!(got.tree, real.tree, "the forgery must not be served");
+        assert_ne!(got.message, "forged");
+    }
+
+    #[test]
+    fn a_torn_head_file_recovers_from_the_durable_oplog() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f.txt"), b"content").unwrap();
+        let cp = repo.save("one").unwrap();
+
+        // The residue a crash mid-publish leaves: HEAD present but zero-length.
+        // The durable op-log head must recover the committed checkpoint rather
+        // than the repository reporting it lost.
+        fs::write(repo.head_pointer_path(), b"").unwrap();
+        assert_eq!(
+            repo.head_checkpoint().unwrap().map(|c| c.id),
+            Some(cp.id.clone()),
+            "a zero-length HEAD must recover from the op-log"
+        );
+
+        // 64 zero bytes: a valid-looking hex address that resolves to no
+        // checkpoint. This must NOT read as "nothing saved yet" and silently
+        // orphan history — the op-log fallback must still find the checkpoint.
+        fs::write(repo.head_pointer_path(), "0".repeat(64)).unwrap();
+        assert_eq!(
+            repo.status().unwrap().head.as_deref(),
+            Some(cp.id.as_str()),
+            "a zero-filled HEAD must not orphan committed history"
+        );
     }
 }
