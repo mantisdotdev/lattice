@@ -396,6 +396,18 @@ impl Repo {
         let Some(cp) = self.checkpoint(checkpoint_id)? else {
             return Err(Error::NotFound(format!("no checkpoint {checkpoint_id}")));
         };
+        // Refuse a destination that is itself a symlink: create_dir_all and
+        // every write beneath it would resolve through the link and land
+        // outside the directory the caller named (CWE-59). A real directory,
+        // or a not-yet-existing path, is fine.
+        if let Ok(meta) = fs::symlink_metadata(dest) {
+            if meta.file_type().is_symlink() {
+                return Err(Error::Invalid(format!(
+                    "{} is a symlink; choose a real directory to check out into",
+                    dest.display()
+                )));
+            }
+        }
         fs::create_dir_all(dest)?;
         let mut report = CheckoutReport {
             checkpoint: cp.id.clone(),
@@ -1079,6 +1091,25 @@ mod tests {
             report.entries_written, on_disk,
             "entries_written must equal the files actually present, so a folded \
              sibling is never counted as written when it overwrote another"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_symlinked_destination() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f.txt"), b"x").unwrap();
+        let cp = repo.save("one").unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let dest = dir.path().join("dest_link");
+        std::os::unix::fs::symlink(&outside, &dest).unwrap();
+
+        let err = repo.checkout(&cp.id, &dest).unwrap_err();
+        assert_eq!(err.category(), crate::error::Category::Invalid);
+        assert!(
+            !outside.join("f.txt").exists(),
+            "a symlinked destination must be refused, not written through"
         );
     }
 

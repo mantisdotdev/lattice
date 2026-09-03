@@ -117,6 +117,14 @@ deferred with the user's explicit sign-off, and are tracked here:
   and checkout buffer whole files, and checkout re-inflates a segment once per
   chunk. The 1.1 GB case passes today; these are optimisations the G1.5/G1.9
   gates will measure, per "optimise only a measured hotspot".
+- **Checkout no-follow / TOCTOU hardening** (`repo.rs`, Major): the practical
+  traversal vectors are closed — stored names must be single safe components,
+  a symlinked destination is refused, and any pre-existing symlink at an entry
+  path is removed before writing. The remaining vector is a local TOCTOU race
+  (a component swapped for a symlink between the no-follow check and the write),
+  whose complete fix is `O_NOFOLLOW` / `openat2(RESOLVE_NO_SYMLINKS)`-relative
+  writes — OS-specific facilities not in `std`. **Follow-up: a no-follow write
+  path (likely via `cap-std` or raw `openat`).**
 - **§4.2 seven-noun vocabulary in CLI text** (`main.rs`, Major): the vocabulary
   lint is gate G2.3's scope, with its own harness; the cleanup lands there rather
   than being pre-empted in the engine PR.
