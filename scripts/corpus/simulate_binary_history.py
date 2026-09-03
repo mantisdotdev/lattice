@@ -39,6 +39,8 @@ MANIFEST = REPO / "corpus" / "manifests" / "g0-5-binary-corpus.json"
 SEED = 20260903
 
 BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".ico",
+              ".pgm", ".ppm", ".pbm", ".yml.gz", ".xml.gz", ".pkl", ".caffemodel",
+              ".onnx", ".pb", ".tflite", ".h5", ".weights", ".rlib", ".dylib",
               ".pdf", ".mp4", ".avi", ".mov", ".mkv", ".webm", ".mp3", ".wav",
               ".ttf", ".otf", ".woff", ".woff2", ".zip", ".gz", ".bz2", ".xz",
               ".jar", ".so", ".dylib", ".a", ".rlib", ".o", ".wasm", ".bin",
@@ -115,9 +117,14 @@ def main() -> int:
     OUT.mkdir(parents=True)
 
     rng = random.Random(SEED)
-    roots = [REPO / "corpus" / "data" / "repos",
+    # Seed roots, in priority order. The reference repo's binary-heavy prefix is
+    # first because it holds real test media (images and video from
+    # opencv/opencv_extra) -- genuinely incompressible material of the kind the
+    # large-binary corpus is meant to represent. Bare clones are deliberately
+    # excluded: their contents are packfiles, which are neither representative
+    # binary assets nor cheap to walk.
+    roots = [REPO / "corpus" / "data" / "reference-repo" / "bin-media",
              REPO / "corpus" / "data" / "trees",
-             Path.home() / ".cargo" / "registry" / "cache",
              REPO / "prototypes"]
     seeds = harvest(roots, args.seed_budget, rng)
     if not seeds:

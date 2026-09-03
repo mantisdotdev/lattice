@@ -1,0 +1,2817 @@
+{
+  "seed": 20260903,
+  "note": "Seed material is real binary content; the edit history is simulated. See corpus/manifests/g0-5-statistics-contract.md.",
+  "seed_files": 1997,
+  "seed_bytes": 573177595,
+  "versions_per_seed": 9,
+  "total_files": 17973,
+  "total_bytes_with_history": 5415128666,
+  "mutation_kinds": {
+    "localized_patch": 7975,
+    "prefix_insert": 3247,
+    "append": 3198,
+    "reencode": 1556
+  },
+  "seeds": [
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/omnidir/omnidir_images/7.jpg",
+      "bytes": 237299,
+      "chain": [
+        "append",
+        "append",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_rotary_embedding_no_position_ids_interleaved_expanded/model.onnx",
+      "bytes": 10581,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/ximgproc/results/05.png",
+      "bytes": 84609,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/readwrite/rle8.bmp",
+      "bytes": 34214,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/watershed/wshed_segments.png",
+      "bytes": 10158,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/layers/layer_elu_in.npy",
+      "bytes": 360096,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_attn_mask_bool_expanded/model.onnx",
+      "bytes": 12063,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "append",
+        "reencode",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/QCIF_09.bmp",
+      "bytes": 76086,
+      "chain": [
+        "localized_patch",
+        "append",
+        "append",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/chessboard-artificial1.png",
+      "bytes": 16017,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_sce_NCd1d2d3_none_no_weight_negative_ii/test_data_set_0/input_0.pb",
+      "bytes": 10818,
+      "chain": [
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/edgefilter/dt/authors_statue_IC_ss30_sc0.2.png",
+      "bytes": 405031,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/multi_cameras/images_omnidir/0-155.jpg",
+      "bytes": 59170,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "reencode",
+        "reencode",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/images_datasets/ubc/img2.png",
+      "bytes": 723083,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_nllloss_NCd1d2d3_none_no_weight_negative_ii_expanded/model.onnx",
+      "bytes": 5510,
+      "chain": [
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/images_datasets/leuven/img1.png",
+      "bytes": 898958,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libclap-285f28b97b1c86a7.rlib",
+      "bytes": 14944,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "append",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_3d_softcap_expanded/model.onnx",
+      "bytes": 13906,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/pattern_cam2_im37.jpg",
+      "bytes": 119973,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/stitching/s2.jpg",
+      "bytes": 614190,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode",
+        "append",
+        "localized_patch",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/numpy__numpy/doc/source/user/images/np_reshape.png",
+      "bytes": 108368,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_lppool_2d_strides/test_data_set_0/input_0.pb",
+      "bytes": 12301,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/circles/circles10.png",
+      "bytes": 151882,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_layer_normalization_3d_axis_negative_1_epsilon_expanded_ver18/model.onnx",
+      "bytes": 7478,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/version_3_up.jpg",
+      "bytes": 47129,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_flexattention_double_expanded_ver26/test_data_set_0/input_2.pb",
+      "bytes": 6160,
+      "chain": [
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/circles/circles12.png",
+      "bytes": 3298266,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/images_datasets/graf/img2.png",
+      "bytes": 955882,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "append"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libcc-178e1f5bf682fc28.rlib",
+      "bytes": 2436736,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_with_qk_matmul_softmax_expanded/model.onnx",
+      "bytes": 13212,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/rgbd/normals_check/normals1.yaml.gz",
+      "bytes": 377557,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/text_det_test1.png",
+      "bytes": 38570,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/tensorflow/keras_batch_norm_training_net.pb",
+      "bytes": 32693,
+      "chain": [
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libgetrandom-40e9e2d9ae3e99ed.rlib",
+      "bytes": 75152,
+      "chain": [
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/mcc/VINYL18.png",
+      "bytes": 175578,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "append",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/optflow/frames/1080p_03.png",
+      "bytes": 1030446,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/subpixel/m-1-capt0047.png",
+      "bytes": 141154,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/fsyncbench/target/release/deps/libserde_core-b5043e2a7da5288e.rlib",
+      "bytes": 5340856,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_with_past_and_present_qk_matmul_bias_3d_mask_expanded/model.onnx",
+      "bytes": 16852,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/800x600.png",
+      "bytes": 956487,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/darknet/region_out.npy",
+      "bytes": 84574,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/baboon_256x256.jpg",
+      "bytes": 11416,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/optflow/image1.png",
+      "bytes": 173077,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/stitching/b1.png",
+      "bytes": 202522,
+      "chain": [
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libzstd_safe-9149781a48b77652.rlib",
+      "bytes": 217240,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_averagepool_2d_default/test_data_set_0/input_0.pb",
+      "bytes": 12304,
+      "chain": [
+        "reencode",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/unwrappedPspTest.jpg",
+      "bytes": 34690,
+      "chain": [
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/regression22421.yaml.gz",
+      "bytes": 15890,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/QCIF_08.bmp",
+      "bytes": 76086,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/hdr/exposures/memorial08.png",
+      "bytes": 390256,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libfind_msvc_tools-bfd6d02944a8d882.rlib",
+      "bytes": 205240,
+      "chain": [
+        "localized_patch",
+        "append",
+        "reencode",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/multi_cameras/images_omnidir/1-187.jpg",
+      "bytes": 47210,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cloning/Normal_Cloning/source1.png",
+      "bytes": 31686,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/models/biased_matmul.onnx",
+      "bytes": 4691,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/version_3_down.jpg",
+      "bytes": 49119,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/readwrite/test_3_c3.png",
+      "bytes": 41512,
+      "chain": [
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/pattern_cam1_im36.jpg",
+      "bytes": 83626,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/optflow/frames/1080p_02.png",
+      "bytes": 1007667,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libunicode_ident-58ca8dc885c38e65.rlib",
+      "bytes": 48424,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libanstream-dea0c8f5c323a61e.rlib",
+      "bytes": 322440,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "reencode",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/hdr/exposures/memorial12.png",
+      "bytes": 312964,
+      "chain": [
+        "prefix_insert",
+        "reencode",
+        "reencode",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/django__django/docs/intro/_images/admin01.png",
+      "bytes": 6578,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/data/input_slice_neg_axes_steps.npy",
+      "bytes": 4928,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/pattern_cam2_im2.jpg",
+      "bytes": 30536,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/data/output_deconv3d.npy",
+      "bytes": 6272,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/audio/test_audio.mp4",
+      "bytes": 247883,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/2560x1600.png",
+      "bytes": 940358,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/numpy__numpy/doc/neps/_static/nep-0047-casting-rules-lattice.png",
+      "bytes": 65646,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/features2d/keypoints.xml.gz",
+      "bytes": 26011,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/npr/test4.png",
+      "bytes": 912153,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/data/output_tile.pb",
+      "bytes": 161297,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/symfony__symfony/src/Symfony/Component/Console/Resources/bin/hiddeninput.exe",
+      "bytes": 9216,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/layers/net_roi_pooling.npy",
+      "bytes": 43328,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/rgbd/dynafu/depth/1341846092.395867.png",
+      "bytes": 128671,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/googlenet_prob.npy",
+      "bytes": 8080,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "reencode",
+        "append",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/close/close_3.png",
+      "bytes": 93179,
+      "chain": [
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/017.png",
+      "bytes": 401623,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/rendering/depth_image_Clipping_320x240_CullNone.png",
+      "bytes": 6024,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/monitor/monitor_5.png",
+      "bytes": 94046,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/django__django/docs/intro/_images/admin05t.png",
+      "bytes": 43310,
+      "chain": [
+        "localized_patch",
+        "append",
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/gpu/opticalflow/frame1.png",
+      "bytes": 367247,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/stereomatching/datasets/cones/disp6.png",
+      "bytes": 41926,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/googlenet_0.png",
+      "bytes": 90189,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/hdr/exposures/bug_18180/1.jpg",
+      "bytes": 184196,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "reencode",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/039.png",
+      "bytes": 400577,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libanstyle_parse-8b2bf83850ff8434.rlib",
+      "bytes": 192736,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "append",
+        "reencode",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/close/close_5.png",
+      "bytes": 98152,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/random_pattern/random_patter/5.jpg",
+      "bytes": 359961,
+      "chain": [
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/models/xfeat.onnx",
+      "bytes": 2794711,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "reencode",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/hdr/tonemap/mantiuk.png",
+      "bytes": 519742,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libcc-899c85dc801e1dfd.rlib",
+      "bytes": 2092600,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/numpy__numpy/branding/logo/secondary/numpylogo2.png",
+      "bytes": 21596,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/ximgproc/sources/06.png",
+      "bytes": 316417,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "reencode",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/images_datasets/bikes/img6.png",
+      "bytes": 561920,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/chessboard-artificial1.jpg",
+      "bytes": 23122,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/videos/qcif_YV16.avi",
+      "bytes": 58924,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/ximgproc/results/04.png",
+      "bytes": 66851,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libclap_builder-afdb3daaa0578c47.rlib",
+      "bytes": 4688456,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "append",
+        "append",
+        "reencode",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_softcap_neginf_mask_expanded/model.onnx",
+      "bytes": 13576,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/baboon_256x256.gif",
+      "bytes": 47484,
+      "chain": [
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/shared/1_itseez-0000892.png",
+      "bytes": 168797,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/grace_hopper_227.png",
+      "bytes": 94297,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/numpy__numpy/branding/logo/logomark/numpylogoicondark.png",
+      "bytes": 18242,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/QCIF_01.bmp",
+      "bytes": 76086,
+      "chain": [
+        "reencode",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/fisheye/calib-3_stereo_from_JY/left/stereo_pair_016.jpg",
+      "bytes": 157985,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/ximgproc/results/03.png",
+      "bytes": 99019,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/xphoto/dct_image_denoising/results/01.png",
+      "bytes": 192939,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/layers/layer_eltwise.npy",
+      "bytes": 406880,
+      "chain": [
+        "localized_patch",
+        "append",
+        "append",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/video/sample_322x242_15frames.yuv420p.libx264.mp4",
+      "bytes": 40720,
+      "chain": [
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/shared/box_in_scene.png",
+      "bytes": 122490,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/small_chessboard1.png",
+      "bytes": 698086,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "reencode",
+        "append",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cascadeandhog/images/rehg-thanksgiving-1994.png",
+      "bytes": 179163,
+      "chain": [
+        "reencode",
+        "reencode",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/stereomatching/datasets/bull/disp6.png",
+      "bytes": 6961,
+      "chain": [
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libcolorchoice-046164508a954fc0.rlib",
+      "bytes": 18208,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "append",
+        "reencode",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/features2d/feature_detectors/detector-akaze-with-kaze-desc.xml.gz",
+      "bytes": 15816,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/rgbd/dynafu/depth/1341846092.023879.png",
+      "bytes": 130319,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "append",
+        "append",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/chessboard-artificial2.png",
+      "bytes": 10200,
+      "chain": [
+        "append",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/random_pattern/random_patter/4.jpg",
+      "bytes": 344005,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_flexattention_soft_cap_expanded_ver26/model.onnx",
+      "bytes": 7945,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/features/disk/box_in_scene_512x384_desc.npy",
+      "bytes": 102528,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "append",
+        "append",
+        "localized_patch",
+        "append",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/images_datasets/bark/img4.png",
+      "bytes": 758674,
+      "chain": [
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/fisheye/calib-3_stereo_from_JY/left/stereo_pair_020.jpg",
+      "bytes": 151003,
+      "chain": [
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/hdr/exposures/memorial11.png",
+      "bytes": 318233,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_averagepool_3d_default/test_data_set_0/input_0.pb",
+      "bytes": 393235,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_maxpool_2d_default/test_data_set_0/output_0.pb",
+      "bytes": 11548,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/models/attention_single_head.onnx",
+      "bytes": 30674,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_diff_heads_with_past_and_present_mask4d/test_data_set_0/output_2.pb",
+      "bytes": 4348,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libunicode_ident-58ca8dc885c38e65.rlib",
+      "bytes": 48424,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "append",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/003.png",
+      "bytes": 401439,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/decolor/color_image_4.png",
+      "bytes": 217965,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_gqa_scaled_expanded/model.onnx",
+      "bytes": 11226,
+      "chain": [
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/readwrite/test_1_c3.png",
+      "bytes": 11274,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_with_qk_matmul_expanded/model.onnx",
+      "bytes": 11946,
+      "chain": [
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/gpu/meanshift/cones_segmented_sp10_sr10_minsize340.png",
+      "bytes": 62395,
+      "chain": [
+        "append",
+        "reencode",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_sce_NCd1d2d3_none_no_weight_negative_ii_expanded/test_data_set_0/input_1.pb",
+      "bytes": 4336,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/gpu/caltech/image_00000032_0.png",
+      "bytes": 474689,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/stitching/budapest4.jpg",
+      "bytes": 303075,
+      "chain": [
+        "append",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_tile/test_data_set_0/output_0.pb",
+      "bytes": 161297,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/one_way_train_images/one_way_train_0001.jpg",
+      "bytes": 29553,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cascadeandhog/sample_training_set/octave_-1/sample_5.png",
+      "bytes": 10525,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/multiple/9_qrcodes_version7.jpg",
+      "bytes": 306188,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/videos/indeo.avi",
+      "bytes": 49696,
+      "chain": [
+        "append",
+        "append",
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "localized_patch",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_averagepool_2d_pads/test_data_set_0/output_0.pb",
+      "bytes": 10816,
+      "chain": [
+        "append",
+        "localized_patch",
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/detectors/plots/trees_correspondenceCount.png",
+      "bytes": 9222,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/curved/curved_7.jpg",
+      "bytes": 29617,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cascadeandhog/images/bttf301.png",
+      "bytes": 202246,
+      "chain": [
+        "reencode",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/layers/mha_rope.output.npy",
+      "bytes": 24704,
+      "chain": [
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/rgbd/normals_check/normals_scene.tar.gz",
+      "bytes": 170775,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/imgproc/adaptive_threshold1.png",
+      "bytes": 45238,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/pattern_cam1_im29.jpg",
+      "bytes": 34809,
+      "chain": [
+        "append",
+        "append",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/008.png",
+      "bytes": 398132,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "reencode",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/omnidir/omnidir_images/9.jpg",
+      "bytes": 236340,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "reencode",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/build/zstd-sys-e6feec2ea7eb9d21/out/3f451b2306bc13c8-zstd_v04.o",
+      "bytes": 26840,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/076.png",
+      "bytes": 397287,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/071.png",
+      "bytes": 388673,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/libshlex-43b8fb3237b33579.rlib",
+      "bytes": 96056,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/close/close_4.png",
+      "bytes": 85435,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_3d_scaled_expanded/model.onnx",
+      "bytes": 12909,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/detectors_descriptors_evaluation/detectors/plots/ubc_correspondenceCount.png",
+      "bytes": 8435,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_averagepool_2d_same_upper/test_data_set_0/output_0.pb",
+      "bytes": 12304,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_flexattention_gqa/test_data_set_0/output_0.pb",
+      "bytes": 4112,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/stereo/case1/right02.png",
+      "bytes": 426788,
+      "chain": [
+        "reencode",
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/build/zstd-sys-e6feec2ea7eb9d21/out/fb80479a5fb81f6a-zstdmt_compress.o",
+      "bytes": 15016,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/django__django/docs/_theme/djangodocs/static/fontawesome/webfonts/fa-brands-400.woff2",
+      "bytes": 53928,
+      "chain": [
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "localized_patch",
+        "append",
+        "append",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/trees/django__django/docs/intro/_images/admin03t.png",
+      "bytes": 14981,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/gpu/opticalflow/frame0.png",
+      "bytes": 367192,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/pose.png",
+      "bytes": 157071,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/stereomatching/datasets/tsukuba/im6.png",
+      "bytes": 174105,
+      "chain": [
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/pattern_cam1_im27.jpg",
+      "bytes": 37220,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "append",
+        "reencode",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_3d_with_past_and_present_qk_matmul_softcap_expanded/model.onnx",
+      "bytes": 20490,
+      "chain": [
+        "prefix_insert",
+        "reencode",
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/models/constant.onnx",
+      "bytes": 249266,
+      "chain": [
+        "prefix_insert",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/layers/layer_interp.npy",
+      "bytes": 6200,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/093.png",
+      "bytes": 409839,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/063.png",
+      "bytes": 391741,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/089.png",
+      "bytes": 401380,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/qrcode/curved/curved_3.jpg",
+      "bytes": 21157,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/multi_cameras/images_omnidir/4-28.jpg",
+      "bytes": 50001,
+      "chain": [
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/QCIF_27.bmp",
+      "bytes": 76086,
+      "chain": [
+        "append",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/subpixel/m-0-capt0041.png",
+      "bytes": 149055,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "reencode",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/small_chessboard2.png",
+      "bytes": 691955,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_sce_NCd1d2d3d4d5_none_no_weight_log_prob/test_data_set_0/output_0.pb",
+      "bytes": 25941,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/stereomatching/datasets/barn2/disp6.png",
+      "bytes": 6980,
+      "chain": [
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "append",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cascadeandhog/sample_training_set/octave_-1/sample_4.png",
+      "bytes": 10069,
+      "chain": [
+        "append",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "reencode",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/densenet_121_output.npy",
+      "bytes": 4128,
+      "chain": [
+        "append",
+        "append",
+        "append",
+        "localized_patch",
+        "reencode",
+        "append",
+        "localized_patch",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/readwrite/testExifOrientation_8.jpg",
+      "bytes": 9438,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/tf_inception_prob.npy",
+      "bytes": 4112,
+      "chain": [
+        "localized_patch",
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "append",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/highgui/readwrite/test32FC1.tiff",
+      "bytes": 40122,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_diff_heads_with_past_and_present_mask4d_expanded/test_data_set_0/output_2.pb",
+      "bytes": 4348,
+      "chain": [
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/108.png",
+      "bytes": 409943,
+      "chain": [
+        "append",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/stitching/s1.jpg",
+      "bytes": 446693,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "prefix_insert",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/stitching/boat1.jpg",
+      "bytes": 735707,
+      "chain": [
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/capture_sin_1.jpg",
+      "bytes": 33303,
+      "chain": [
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "reencode",
+        "reencode",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "prototypes/storebench/target/release/deps/libmemchr-d6a63a67786c7f16.rlib",
+      "bytes": 1022296,
+      "chain": [
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/structured_light/data/pattern_cam1_im37.jpg",
+      "bytes": 132055,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_attention_4d_diff_heads_with_past_and_present_mask3d/test_data_set_0/output_2.pb",
+      "bytes": 4348,
+      "chain": [
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "localized_patch",
+        "append",
+        "reencode",
+        "append",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/QCIF_14.bmp",
+      "bytes": 76086,
+      "chain": [
+        "reencode",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/cv/cameracalibration/asymmetric_circles/acircles4.png",
+      "bytes": 101373,
+      "chain": [
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "reencode",
+        "localized_patch",
+        "append",
+        "localized_patch",
+        "reencode"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/dnn/onnx/conformance/node/test_layer_normalization_3d_axis0_epsilon_expanded_ver18/model.onnx",
+      "bytes": 6876,
+      "chain": [
+        "localized_patch",
+        "reencode",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/python/images/QCIF_24.bmp",
+      "bytes": 76086,
+      "chain": [
+        "localized_patch",
+        "append",
+        "prefix_insert",
+        "prefix_insert",
+        "localized_patch",
+        "localized_patch",
+        "append",
+        "prefix_insert"
+      ]
+    },
+    {
+      "seed": "corpus/data/reference-repo/bin-media/testdata/perf/video/070.png",
+      "bytes": 392435,
+      "chain": [
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch",
+        "prefix_insert",
+        "append",
+        "append"
+      ]
+    },
+    {
+      "seed": "prototypes/chunkbench/target/release/deps/librayon_core-2ff39afe880ac55f.rlib",
+      "bytes": 960232,
+      "chain": [
+        "prefix_insert",
+        "prefix_insert",
+        "prefix_insert",
+        "append",
+        "append",
+        "localized_patch",
+        "localized_patch",
+        "localized_patch"
+      ]
+    }
+  ]
+}
