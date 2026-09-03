@@ -52,7 +52,8 @@ KNOWN_INCOMPATIBLE = {
     "GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only", "SSPL-1.0",
     "BUSL-1.1", "Elastic-2.0", "CC-BY-NC-4.0",
 }
-SPDX_SPLIT = re.compile(r"\s+(?:OR|AND)\s+|/", re.I)
+SPDX_OR = re.compile(r"\s+OR\s+|/", re.I)
+SPDX_AND = re.compile(r"\s+AND\s+", re.I)
 LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING)", re.I)
 
 
@@ -64,34 +65,63 @@ def not_implemented(note: str) -> int:
 def classify(expr: str | None) -> tuple[str, str]:
     """Return (verdict, reason) for an SPDX expression.
 
-    A disjunction ("MIT OR Apache-2.0") passes if ANY term is allowed, which is
-    how dual licensing works: the consumer picks. A conjunction is treated the
-    same way here, which is deliberately permissive and is why any dependency
-    using AND is listed in the report for human review rather than silently
-    accepted as clean.
+    OR and AND are NOT interchangeable, and an earlier version treated them as
+    if they were:
+      - "MIT OR Apache-2.0" is a choice, so it passes if ANY term is allowed.
+      - "GPL-3.0-only AND MIT" imposes BOTH obligations, so it passes only if
+        EVERY term is allowed. Treating it like OR made a GPL dependency
+        report as clean.
     """
     if not expr or not expr.strip():
         return "unknown", "no licence declared"
-    terms = [t.strip().strip("()") for t in SPDX_SPLIT.split(expr) if t.strip()]
-    if any(t in ALLOWED for t in terms):
+
+    def term_verdict(term: str) -> str:
+        term = term.strip().strip("()")
+        if term in ALLOWED:
+            return "allowed"
+        if term in KNOWN_INCOMPATIBLE:
+            return "incompatible"
+        return "unknown"
+
+    # Each OR alternative is itself a conjunction; an alternative is acceptable
+    # only if every one of its conjuncts is.
+    alternatives = [a for a in SPDX_OR.split(expr) if a.strip()]
+    verdicts = []
+    for alt in alternatives:
+        conjuncts = [c for c in SPDX_AND.split(alt) if c.strip()]
+        per = [term_verdict(c) for c in conjuncts]
+        if all(v == "allowed" for v in per):
+            verdicts.append("allowed")
+        elif any(v == "incompatible" for v in per):
+            verdicts.append("incompatible")
+        else:
+            verdicts.append("unknown")
+
+    if "allowed" in verdicts:
         return "allowed", expr
-    if any(t in KNOWN_INCOMPATIBLE for t in terms):
+    if all(v == "incompatible" for v in verdicts):
         return "incompatible", expr
     return "unknown", expr
 
 
 def scan_cargo() -> tuple[list[dict], str] | None:
+    """Returns (deps, source), or None when there is no workspace to scan.
+
+    A workspace that EXISTS but cannot be read raises, so the caller can fail
+    the gate: silently treating an unreadable dependency graph as an empty one
+    would report 0 violations having measured nothing.
+    """
     if not CARGO_TOML.exists():
         return None
     r = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--all-features"],
         cwd=REPO, capture_output=True, text=True, errors="replace", timeout=900)
     if r.returncode != 0:
-        return None
+        raise RuntimeError(f"cargo metadata failed: {r.stderr.strip()[:300]}")
     try:
         meta = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"cargo metadata emitted unparseable JSON: {exc}")
 
     workspace = set(meta.get("workspace_members", []))
     out = []
@@ -132,7 +162,15 @@ def scan_grammars() -> list[dict]:
 
 
 def main() -> int:
-    cargo = scan_cargo()
+    try:
+        cargo = scan_cargo()
+    except RuntimeError as exc:
+        print(json.dumps({
+            "gate": "G1.13", "value": 1, "unit": "violations",
+            "note": f"dependency graph could not be scanned, so no dependency "
+                    f"was measured: {exc}",
+            "detail": {"scan_error": str(exc)}}))
+        return 0
     grammars = scan_grammars()
 
     if cargo is None and not grammars:

@@ -1,6 +1,6 @@
 {
   "iteration": 4,
-  "timestamp": "2026-09-03T06:07:07Z",
+  "timestamp": "2026-09-03T06:15:59Z",
   "stages_measured": [
     "G0",
     "G1",
@@ -203,7 +203,7 @@
           }
         ]
       },
-      "duration_s": 0.047
+      "duration_s": 0.036
     },
     {
       "gate": "G0.2",
@@ -362,7 +362,7 @@
           }
         ]
       },
-      "duration_s": 0.036
+      "duration_s": 0.025
     },
     {
       "gate": "G0.3",
@@ -444,7 +444,7 @@
         },
         "problems": []
       },
-      "duration_s": 0.431
+      "duration_s": 0.398
     },
     {
       "gate": "G0.4",
@@ -517,7 +517,7 @@
         "cross_directory_moves": 204975,
         "problems": []
       },
-      "duration_s": 0.862
+      "duration_s": 0.777
     },
     {
       "gate": "G0.5",
@@ -646,6 +646,13 @@
             "commits": 85525
           }
         },
+        "contract_bases": [
+          "git/git",
+          "golang/go",
+          "nodejs/node",
+          "opencv/opencv_extra",
+          "symfony/symfony"
+        ],
         "binary_corpus": {
           "seed_bytes": 573177595,
           "total_bytes_with_history": 5415128666,
@@ -654,7 +661,7 @@
         },
         "problems": []
       },
-      "duration_s": 15.291
+      "duration_s": 15.709
     },
     {
       "gate": "G0.6",
@@ -722,7 +729,7 @@
           }
         ]
       },
-      "duration_s": 0.028
+      "duration_s": 0.032
     },
     {
       "gate": "G0.7",
@@ -1043,7 +1050,7 @@
           }
         ]
       },
-      "duration_s": 7.637
+      "duration_s": 8.354
     },
     {
       "gate": "G0.8",
@@ -1074,7 +1081,7 @@
         ],
         "stakeholder_response": []
       },
-      "duration_s": 0.026
+      "duration_s": 0.03
     },
     {
       "gate": "G1.1",
@@ -1112,7 +1119,7 @@
       "note": "ltx binary not built yet (Stage G0 forbids product code)",
       "evidence": [],
       "detail": {},
-      "duration_s": 0.044
+      "duration_s": 0.043
     },
     {
       "gate": "G1.3",
@@ -1299,7 +1306,7 @@
       "unit": "platforms",
       "value": 0.0,
       "status": "FAIL",
-      "note": "job succeeded without building on: macos-latest, ubuntu-latest, windows-latest (a self-skipped job is not a platform pass); measured run is at 1bb6cfc6ce85, HEAD is 2ab6067cc9fc \u2014 stale, so no platform is credited",
+      "note": "job succeeded without building on: macos-latest, ubuntu-latest, windows-latest (a self-skipped job is not a platform pass); measured run is at 1bb6cfc6ce85, HEAD is 4dd6d841ca4b \u2014 stale, so no platform is credited",
       "evidence": [
         ".github/workflows/rust.yml"
       ],
@@ -1308,7 +1315,7 @@
         "run_id": 33712466991,
         "run_sha": "1bb6cfc6ce85ac107540847f1522dcec5ac3de07",
         "run_created_at": "2026-09-03T03:44:39Z",
-        "repo_head": "2ab6067cc9fcde1f24542349ae3aa9d1c00c6fc8",
+        "repo_head": "4dd6d841ca4b95984b9fe3785824244941bbe633",
         "required_steps": [
           "test"
         ],
@@ -1372,7 +1379,7 @@
           }
         }
       },
-      "duration_s": 4.712
+      "duration_s": 4.153
     },
     {
       "gate": "G1.13",
@@ -1391,7 +1398,7 @@
       "note": "no Cargo workspace and no vendored grammars yet (Stage G0 forbids product code)",
       "evidence": [],
       "detail": {},
-      "duration_s": 0.087
+      "duration_s": 0.045
     },
     {
       "gate": "G2.1",

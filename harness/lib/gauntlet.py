@@ -332,12 +332,22 @@ def validate_waiver(gate: Gate, waiver: dict, measured: float | None) -> list[st
                 f"gate is REGRESSING: gap to target grew from {prev_gap:g} to "
                 f"{cur_gap:g}. A regressing gate has not plateaued (Challenge 14)")
 
-    # Each targeted iteration must have changed something.
+    # Each targeted iteration must have changed something, and the commit it
+    # names must EXIST. Accepting any truthy string let five fabricated hashes
+    # satisfy the anti-stall rule, which defeats the point of requiring them.
     for i, it in enumerate(waiver.get("iteration_log", [])):
-        if not it.get("commit"):
+        sha = it.get("commit")
+        if not sha:
             problems.append(
                 f"targeted iteration {i + 1} links no commit — re-measuring an "
                 f"unchanged system is not a remediation iteration")
+            continue
+        proc = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
+                               f"{sha}^{{commit}}"], capture_output=True)
+        if proc.returncode != 0:
+            problems.append(
+                f"targeted iteration {i + 1} names commit {str(sha)[:12]}, which "
+                f"does not resolve in this repository")
     if waiver.get("iterations", 0) >= 5 and \
             len(waiver.get("iteration_log", [])) < waiver.get("iterations", 0):
         problems.append(

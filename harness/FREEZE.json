@@ -1,61 +1,61 @@
 {
   "G0.1": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_1_prior_art.py",
     "sha256": "69ba07b7ca1a3f5c1805063418f5096f29149ba801441513121e5e374d1b6a88"
   },
   "G0.2": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_2_disagreements.py",
     "sha256": "eed8d5fedb6c2e27cf2b0b41832869a798c4020d2a5341b283efdc8eb3b1fe9f"
   },
   "G0.3": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_3_merge_corpus.py",
     "sha256": "8efa0e71ded06254c49df2e1427126cabb95b27f8d5a9ee8733fd7c994c5ac44"
   },
   "G0.4": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_4_refactor_corpus.py",
     "sha256": "42ccd6385b0e1a9cad20476bf5c8ed26f215820f93338edb0497f0e0dab15af6"
   },
   "G0.5": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_5_corpora.py",
-    "sha256": "48d5b61a1c95c1c68ca71856e78f19c26d405aa5419b41e8d4597bfe558cd696"
+    "sha256": "a556cc7b7f5ab2924a2600f06b241b9c1f975ade487e6b2ae33be98fc68ae8f8"
   },
   "G0.6": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_6_adrs.py",
     "sha256": "04ef545d55f35705575884efb29439252883da4e0b00795fefe0174fd027670d"
   },
   "G0.7": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_7_demand_probe.py",
     "sha256": "de448b9159fb3548433a65f43107e7ccb08e1492b7364442882ebee116b46620"
   },
   "G0.8": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g0/g0_8_spec_package.py",
     "sha256": "25b00a42ebf34155ea7d917e4acda6d6099609a22f3dd21e1db0b7f0c1132abf"
   },
   "G1.12": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g1/g1_12_cross_platform.py",
     "sha256": "48e5347e142d033abcbbcc2a37198d886c644f6bb7dce22e7ac382db2c2056e3"
   },
   "G1.13": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g1/g1_13_licences.py",
-    "sha256": "8bb80a46c4f42b6ca3fbb8a80a4b85f3f0ce53146a51f67313ffb97b05eb0b89"
+    "sha256": "10b58d572da3a8e9e16c91a7d14df61a53419ca106f8895d4fe2c051bf9982af"
   },
   "G1.2": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g1/g1_2_byte_fidelity.py",
     "sha256": "ddc946bc20d8382fd852d5fb0344518f5c415b9a78c0594bb95971d37ca56d90"
   },
   "G1.3": {
-    "frozen_at": "2026-09-03T04:34:50Z",
+    "frozen_at": "2026-09-03T06:15:29Z",
     "harness": "harness/g1/g1_3_universal_undo.py",
     "sha256": "8638b30297218eecf858d8fa6c286d66aabea65e3801f2c878999530b9547fdb"
   }

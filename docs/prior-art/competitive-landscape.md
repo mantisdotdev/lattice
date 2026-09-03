@@ -54,7 +54,7 @@ here so the trigger is visible in advance rather than argued about later.
 | **What** | Cloud-native version control; Y Combinator S22 |
 | **Original market** | Game studios and creative teams — a Perforce alternative |
 | **Strengths** | Large binaries and exclusive file locking by design; Unreal and Unity integrations; asset review; ~70% claimed cost reduction vs Perforce |
-| **Architecture** | **Centralized and cloud-hosted.** Every repository operation is an API call against serverless infrastructure; the desktop client syncs work-in-progress to the cloud in real time |
+| **Architecture** | **Centralized.** Every repository operation is an API call; the desktop client syncs work-in-progress to the server in real time. Managed cloud is the default, but **enterprise on-premises and private-cloud deployment are offered** — see the correction below |
 | **Agentic move** | Recently repositioned as "version control for an agentic world", with a Claude Code plugin capturing "prompt provenance, decisions, reasoning traces, implementation context" |
 | **Status** | Shipping, with paying customers |
 
@@ -64,19 +64,30 @@ exclusive-locking problem for binary assets that `docs/prior-art/centralized-and
 identifies as an open gap in Lattice's design and that §8 does not list as a
 non-goal.
 
-**The architectural fork is genuine, not spin.** Diversion is centralized,
-cloud-hosted and online-first. §2 makes "offline-everything distribution" and "no
-mandatory server" CONSTRAINTs Lattice must preserve. These are not two
-implementations of one idea; they are opposite answers to "where does the truth
-live." Each is correct for a different customer, and neither can easily become
-the other.
+**The architectural fork is genuine, but narrower than first written.** The first
+draft of this document claimed Diversion was cloud-only and concluded that
+regulated customers were therefore structurally unavailable to them. **That was
+wrong**, caught in review and corrected here: Diversion's product page offers
+on-premises and private-cloud deployment on its Enterprise tier — *"Run Diversion
+on your own servers or private cloud for full control."* A bank that cannot send
+source to a vendor can run Diversion.
 
-**Where Lattice differs concretely:** provenance in Diversion is a *plugin
-capturing prompt context into their cloud*. In Lattice it is a signed record in
-the checkpoint's own data model, verifiable offline, with no third party holding
-the source (§5.5, gates G5.1/G5.2/G5.4). A team that cannot send source code to a
-vendor — regulated finance, health, defence — can use one of these and not the
-other.
+What remains genuinely different is **centralized versus distributed**, not
+hosted versus self-hosted. Diversion has a server that is the source of truth and
+a client that syncs to it; §2 makes "offline-everything distribution" and "no
+mandatory server" CONSTRAINTs Lattice must preserve, meaning every Lattice clone
+is complete and authoritative with no server in the picture at all. Those are
+opposite answers to "where does the truth live," and neither easily becomes the
+other. But self-hosting closes most of the *commercial* gap that this document
+originally leaned on.
+
+**Where Lattice still differs concretely:** provenance in Diversion is a *plugin
+capturing prompt context* (their Claude Code plugin, which "capture[s] the 'why'
+behind every AI-generated code change"). In Lattice it is a signed record in the
+checkpoint's own data model, verifiable by anyone holding the repository with no
+server participating (§5.5, gates G5.1/G5.2/G5.4). That is a difference in *where
+the guarantee lives*, not in *who hosts the box* — and it is a smaller claim than
+the one this document originally made.
 
 ---
 
@@ -102,15 +113,23 @@ should be able to *emit* in-toto-shaped attestations rather than replace them.
 ## The market is validated, and that is not purely good news
 
 Widely-quoted figures at the time of writing: **41% of code is AI-generated or
-AI-assisted**, and **82% of developers use AI tools weekly**. A published census
-detects AI coding agents across **180 million repositories**.
+AI-assisted**, and **82% of developers use AI tools weekly**. These are secondary
+figures repeated across vendor and analyst writing; this document has **not**
+traced them to a primary survey with a stated population, date and definition,
+and they should not be cited by the project until it has.
+
+Separately, a published census applies a validated multi-method detector for AI
+coding agents across a corpus **spanning more than 180 million repositories**.
+Note the distinction, which an earlier draft of this document got wrong: 180
+million is the size of the corpus the framework covers, **not** the number of
+repositories in which agents were found.
 
 This confirms G0.7's GO verdict from an independent direction, which is
 reassuring. It also means:
 
 - **G0.7's measurement is no longer novel.** Our 14.4% median / 67.4% recent
-  figures are real, reproducible and ours, but a 180-million-repository census
-  makes them internal validation rather than a publishable finding. Any external
+  figures are real, reproducible and ours, but a census at that scale makes them
+  internal validation rather than a publishable finding. Any external
   communication treating them as new is overclaiming.
 - **The problem is visible to everyone.** A market this legible does not stay
   uncontested, and the entrants above are evidence that it already has not.
@@ -158,7 +177,11 @@ project's public language should reflect that.
 
 - [ERSC — Martin von Zweigbergk named CTO](https://ersc.io/blog/martin-joins-ersc) [primary]
 - [East River Source Control](https://ersc.io/) [primary]
-- [Diversion — Version Control for an Agentic World](https://www.diversion.dev/blog/diversion-version-control-for-an-agentic-world) [primary]
+- [Diversion — Version Control for an Agentic World](https://www.diversion.dev/blog/diversion-version-control-for-an-agentic-world) [primary] — the agentic positioning; note it describes prompt provenance as a need, and does **not** by itself document the shipped plugin
+- [Diversion — Product](https://www.diversion.dev/product) [primary] — documents the Claude Code plugin, and the Enterprise on-premises / private-cloud tier that corrects this document's original claim
+- [SLSA specification](https://slsa.dev/spec/) [primary]
+- [Sigstore](https://www.sigstore.dev/) [primary]
+- [in-toto specification](https://github.com/in-toto/attestation) [primary]
 - [Diversion — Launch HN (YC S22)](https://news.ycombinator.com/item?id=39088551) [primary]
 - [Diversion vs Git LFS](https://www.diversion.dev/compare-diversion-to-git-lfs) [primary]
 - [Code provenance is the missing control for AI-generated commits](https://nhimg.org/articles/code-provenance-is-the-missing-control-for-ai-generated-commits/) [secondary]

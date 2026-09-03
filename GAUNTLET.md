@@ -99,7 +99,7 @@ python3 scripts/corpus/build_reference_repo.py   # G0.5 reference repo
 python3 scripts/corpus/simulate_binary_history.py --force  # G0.5 binary corpus
 ```
 
-### Iteration 4 — 2026-09-03T06:07:07Z
+### Iteration 4 — 2026-09-03T06:15:59Z
 
 Stages measured: **G0** CLEAR, **G1** BLOCKED, **G2** IN PROGRESS, **G3** IN PROGRESS, **G4** IN PROGRESS, **G5** IN PROGRESS, **G6** IN PROGRESS  
 Delivery state (§0.6): **NOT DELIVERABLE**
@@ -125,7 +125,7 @@ Delivery state (§0.6): **NOT DELIVERABLE**
 | G1.9 | Storage honesty (dual baseline) | SOFT [A] | `< 1 ratio` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |
 | G1.10 | Fuzzing | HARD [A] | `== 0 defects` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |
 | G1.11 | Mutation testing | SOFT [A] | `>= 80 percent` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |
-| G1.12 | Cross-platform | HARD [A] | `>= 3 platforms` | 0 platforms | FAIL<br><sub>job succeeded without building on: macos-latest, ubuntu-latest, windows-latest (a self-skipped job is not a platform pass); measured run is at 1bb6cfc6ce85, HEAD is 2ab6067cc9fc — stale, so no platform is credited</sub> | new |
+| G1.12 | Cross-platform | HARD [A] | `>= 3 platforms` | 0 platforms | FAIL<br><sub>job succeeded without building on: macos-latest, ubuntu-latest, windows-latest (a self-skipped job is not a platform pass); measured run is at 1bb6cfc6ce85, HEAD is 4dd6d841ca4b — stale, so no platform is credited</sub> | new |
 | G1.13 | Licence compatibility | HARD [A] | `== 0 violations` | — | N/A-yet<br><sub>no Cargo workspace and no vendored grammars yet (Stage G0 forbids product code)</sub> | — |
 | G2.1 | Ten-minute scenario — floor | SOFT [A] | `>= 90 percent` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |
 | G2.2 | Ten-minute scenario — human | SOFT [S] | `>= 80 percent` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |

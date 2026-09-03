@@ -42,8 +42,14 @@ def _load_expected_pins() -> dict[str, str]:
         return {}
     try:
         doc = json.loads(PINS.read_text())
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as exc:
+        # An unreadable manifest is not an absent one. Returning {} here let a
+        # rebuild accept whatever the clones currently point at and overwrite
+        # the pins without --repin, which is exactly the silent drift the pin
+        # mechanism exists to prevent.
+        raise SystemExit(
+            f"{PINS} exists but is not valid JSON ({exc}). Refusing to build: "
+            f"fix or delete it, or pass --repin to record new pins deliberately.")
     return {slug: v.get("head") for slug, v in doc.get("bases", {}).items()
             if v.get("head")}
 

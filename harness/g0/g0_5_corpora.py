@@ -108,6 +108,18 @@ def parse_bounds(text: str) -> dict[str, tuple[float | None, float | None]]:
     return out
 
 
+def contract_bases(text: str) -> set[str]:
+    """The base repositories the contract names, parsed from its own table."""
+    out: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
+        if len(cells) >= 2 and re.fullmatch(r"[\w.-]+/[\w.-]+", cells[1]):
+            out.add(cells[1])
+    return out
+
+
 def dir_bytes(p: Path) -> int:
     total = 0
     for root, _, files in os.walk(p):
@@ -233,8 +245,18 @@ def main() -> int:
                 f"unmeasured for them")
         if PINS.exists():
             detail["base_pins"] = json.loads(PINS.read_text()).get("bases", {})
-            if len(detail["base_pins"]) < 3:
-                problems.append("fewer than 3 pinned base repositories")
+            # Compare against the bases the CONTRACT names, not a bare count.
+            # `len(...) < 3` let a composite omit a named base, still satisfy
+            # every numeric bound, and report 1 -- the contract names five.
+            named = contract_bases(CONTRACT.read_text()) if CONTRACT.exists() else set()
+            detail["contract_bases"] = sorted(named)
+            missing_bases = sorted(named - set(detail["base_pins"]))
+            if not named:
+                problems.append("could not parse the base set from the contract")
+            elif missing_bases:
+                problems.append(
+                    "composite omits contract-named base(s): "
+                    + ", ".join(missing_bases))
         else:
             problems.append("base repository pins not recorded")
 
