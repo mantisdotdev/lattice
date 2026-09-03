@@ -1,0 +1,82 @@
+{
+  "iteration": 5,
+  "timestamp": "2026-09-03T07:30:42Z",
+  "stages_measured": [
+    "G1"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "8 gate(s) in G0 were not measured in this run",
+    "12 gate(s) in G1 were not measured in this run",
+    "8 gate(s) in G2 were not measured in this run",
+    "6 gate(s) in G3 were not measured in this run",
+    "7 gate(s) in G4 were not measured in this run",
+    "8 gate(s) in G5 were not measured in this run",
+    "5 gate(s) in G6 were not measured in this run"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G1": "IN PROGRESS"
+  },
+  "results": [
+    {
+      "gate": "G1.8",
+      "stage": "G1",
+      "title": "Chunking efficiency",
+      "metric": "p95 new bytes persisted for a 1-byte edit in a 50MB file (100 trials \u00d7 5 file types)",
+      "type": "SOFT",
+      "class": "A",
+      "perf": true,
+      "timing": false,
+      "target": 262144.0,
+      "cmp": "<",
+      "unit": "bytes",
+      "value": null,
+      "status": "N/A-yet",
+      "note": "engine not built, so the store cannot be measured. The chunking design alone measures p95 32,768 bytes against a 262,144 target -- reported as evidence, not claimed as a pass.",
+      "evidence": [],
+      "detail": {
+        "measured_against": "chunking design only",
+        "design_p95_bytes": 32768,
+        "chunk_params": {
+          "min": 2048,
+          "avg": 8192,
+          "max": 32768
+        },
+        "per_type": {
+          "incompressible": {
+            "p50": 10947,
+            "p95": 21314,
+            "max": 30621,
+            "trials": 100
+          },
+          "source_text": {
+            "p50": 10279,
+            "p95": 24540,
+            "max": 31894,
+            "trials": 100
+          },
+          "structured_binary": {
+            "p50": 11001,
+            "p95": 19860,
+            "max": 32768,
+            "trials": 100
+          },
+          "sparse_zeros": {
+            "p50": 32768,
+            "p95": 32768,
+            "max": 32768,
+            "trials": 100
+          },
+          "mixed_media": {
+            "p50": 12195,
+            "p95": 22363,
+            "max": 26329,
+            "trials": 100
+          }
+        }
+      },
+      "duration_s": 24.522
+    }
+  ]
+}

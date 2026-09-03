@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+Replay a recorded I/O journal as a plausible post-power-loss filesystem.
+
+Reads the journal produced by libiofault, truncates it at a random point (the
+instant power was lost), and applies the three failures real storage exhibits to
+the writes that had not yet been made durable:
+
+  DROP     an un-fsynced write never reached the platter
+  REORDER  un-fsynced writes landed out of order within a barrier window
+  TEAR     one write landed partially, at a sector boundary
+
+The rule that keeps this honest in the engine's favour: a write is durable once
+an fsync/fdatasync on the SAME path follows it in the journal, and durable
+writes are never dropped, reordered across the barrier, or torn. That is exactly
+what fsync buys, and a replayer that violated it would fail the engine for a
+promise the platform never made -- producing "bugs" nobody could fix.
+
+Emits the set of critical sections the surviving faults touched, so G1.1 can
+assert §6's coverage contract rather than assuming a fault landed somewhere
+interesting.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import struct
+from dataclasses import dataclass
+from pathlib import Path
+
+(OP_WRITE, OP_PWRITE, OP_FSYNC, OP_FDATASYNC, OP_RENAME, OP_FTRUNCATE,
+ OP_UNLINK, OP_DIRSYNC) = range(1, 9)
+SYNC_OPS = (OP_FSYNC, OP_FDATASYNC, OP_DIRSYNC)
+SECTOR = 512
+
+# Map a path inside the store to the critical section it belongs to, so
+# coverage is derived from what was actually touched rather than declared by
+# the product. §6 names these five.
+SECTION_MARKERS = [
+    ("compaction", ("/compact", ".compact", "/archive")),
+    ("thinning", ("/thin", ".thin", "/ephemeral")),
+    ("merge", ("/merge", ".merge", "/conflict")),
+    ("sync", ("/sync", ".sync", "/remote", "/fetch")),
+    ("store_write", ("/pack", ".pack", "/objects", "/chunks", "/oplog", ".redb")),
+]
+
+
+@dataclass
+class Record:
+    op: int
+    seq: int
+    offset: int
+    length: int
+    path: str
+    payload: bytes
+
+
+def parse(journal: Path):
+    data = journal.read_bytes()
+    pos, out = 0, []
+    while pos + 32 <= len(data):
+        op, seq, offset, length, plen = struct.unpack_from("<IQQQI", data, pos)
+        pos += 32
+        if pos + plen > len(data):
+            break
+        path = data[pos:pos + plen].decode("utf-8", "replace")
+        pos += plen
+        payload = b""
+        if op in (OP_WRITE, OP_PWRITE, OP_RENAME):
+            take = length if op != OP_RENAME else length
+            if pos + take > len(data):
+                break
+            payload = data[pos:pos + take]
+            pos += take
+        out.append(Record(op, seq, offset, length, path, payload))
+    return out
+
+
+def section_for(path: str) -> str | None:
+    low = path.lower()
+    for name, markers in SECTION_MARKERS:
+        if any(m in low for m in markers):
+            return name
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--journal", required=True)
+    ap.add_argument("--root", required=True)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--drop", action="store_true")
+    ap.add_argument("--reorder", action="store_true")
+    ap.add_argument("--tear", action="store_true")
+    args = ap.parse_args()
+
+    journal = Path(args.journal)
+    if not journal.exists():
+        print(json.dumps({"error": "journal missing", "sections_hit": []}))
+        return 1
+    records = parse(journal)
+    if not records:
+        print(json.dumps({"sections_hit": [], "note": "empty journal"}))
+        return 0
+
+    rng = random.Random(args.seed)
+
+    # 1. Power was lost at a uniformly random point in the journal.
+    cut = rng.randrange(1, len(records) + 1)
+    prefix = records[:cut]
+
+    # 2. Which records were made durable? POSIX has TWO barriers and both must
+    #    be modelled:
+    #      - fsync on a FILE makes that file's data durable
+    #      - fsync on its containing DIRECTORY is what makes a rename, create or
+    #        unlink durable
+    #    Keying only on the file path treated every rename as permanently
+    #    volatile, which is stricter than reality and would have failed an
+    #    engine that followed the rules correctly.
+    last_sync: dict[str, int] = {}
+    last_dir_sync: dict[str, int] = {}
+    for r in prefix:
+        if r.op in (OP_FSYNC, OP_FDATASYNC):
+            # A FILE sync. It makes that file's data durable and nothing else.
+            # An earlier version also credited the parent directory here, which
+            # is wrong in the engine's favour: fsync on a file does not make a
+            # rename or unlink in its directory durable, so the replayer would
+            # refuse to drop metadata the engine never actually committed.
+            last_sync[r.path] = max(last_sync.get(r.path, -1), r.seq)
+        elif r.op == OP_DIRSYNC:
+            # A DIRECTORY sync, recorded distinctly by the shim. This is what
+            # makes rename/create/unlink metadata durable.
+            last_dir_sync[r.path] = max(last_dir_sync.get(r.path, -1), r.seq)
+
+    def barrier_for(rec: Record) -> int:
+        if rec.op in (OP_RENAME, OP_UNLINK):
+            return last_dir_sync.get(str(Path(rec.path).parent), -1)
+        return last_sync.get(rec.path, -1)
+
+    durable, volatile = [], []
+    for r in prefix:
+        if r.op in SYNC_OPS:
+            continue
+        (durable if r.seq < barrier_for(r) else volatile).append(r)
+
+    # 3. Mutilate only the volatile tail.
+    surviving = list(volatile)
+    dropped = []
+    if args.drop and surviving:
+        keep = []
+        for r in surviving:
+            if rng.random() < 0.35:
+                dropped.append(r)
+            else:
+                keep.append(r)
+        surviving = keep
+    if args.reorder and len(surviving) > 1:
+        rng.shuffle(surviving)
+    torn = None
+    if args.tear and surviving:
+        victim = rng.randrange(len(surviving))
+        r = surviving[victim]
+        if r.op in (OP_WRITE, OP_PWRITE) and len(r.payload) > SECTOR:
+            sectors = max(1, len(r.payload) // SECTOR)
+            keep_sectors = rng.randrange(1, sectors + 1)
+            surviving[victim] = Record(r.op, r.seq, r.offset,
+                                       keep_sectors * SECTOR, r.path,
+                                       r.payload[:keep_sectors * SECTOR])
+            torn = {"path": r.path, "kept_bytes": keep_sectors * SECTOR,
+                    "original_bytes": len(r.payload)}
+
+    # 4. Rebuild the filesystem: durable writes in journal order, then the
+    #    mutilated volatile tail in its (possibly reordered) order.
+    # Resolve the root for the same reason the shim does: the journal holds
+    # fully-resolved paths (/private/var/...) while the caller usually passes
+    # the symlinked form (/var/...). Comparing them unresolved applied nothing
+    # while reporting a perfectly plausible crash.
+    root = Path(args.root).resolve()
+    applied = skipped = 0
+    errors: list[str] = []
+    sections: set[str] = set()
+    def contained(path: Path) -> bool:
+        """Component-aware containment. `startswith` accepted siblings:
+        "/tmp/root-other" starts with "/tmp/root"."""
+        try:
+            path.resolve().relative_to(root)
+            return True
+        except (ValueError, OSError):
+            # An unresolvable path (parent removed by an earlier record) is
+            # still ours if it is lexically inside the root.
+            try:
+                Path(os.path.normpath(str(path))).relative_to(root)
+                return True
+            except ValueError:
+                return False
+
+    for r in sorted(durable, key=lambda x: x.seq) + surviving:
+        target = Path(r.path)
+        if not contained(target):
+            continue
+
+        landed = False
+        try:
+            if r.op in (OP_WRITE, OP_PWRITE):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "r+b" if target.exists() else "wb") as fh:
+                    fh.seek(r.offset)
+                    fh.write(r.payload)
+                landed = True
+            elif r.op == OP_FTRUNCATE:
+                if target.exists():
+                    os.truncate(target, r.length)
+                    landed = True
+            elif r.op == OP_UNLINK:
+                target.unlink(missing_ok=True)
+                landed = True
+            elif r.op == OP_RENAME:
+                src = Path(r.payload.decode("utf-8", "replace"))
+                if src.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(src, target)
+                    landed = True
+        except FileNotFoundError:
+            # A missing parent is itself a plausible crash outcome: the
+            # directory entry was volatile and did not survive.
+            skipped += 1
+            continue
+        except OSError as exc:
+            # Anything else means the REPLAYER failed, not the engine.
+            # Swallowing it produced a "successful" replay that had applied
+            # nothing, which G1.1 would have scored as a clean survival trial.
+            errors.append(f"{r.path}: {exc}")
+            continue
+
+        if landed:
+            applied += 1
+            # Coverage is credited only for records that ACTUALLY landed;
+            # crediting before the attempt let a replay that applied nothing
+            # still report full critical-section coverage.
+            sec = section_for(r.path)
+            if sec:
+                sections.add(sec)
+        else:
+            skipped += 1
+
+    print(json.dumps({
+        "journal_records": len(records),
+        "crash_point": cut,
+        "durable": len(durable),
+        "volatile": len(volatile),
+        "dropped": len(dropped),
+        "reordered": bool(args.reorder and len(volatile) > 1),
+        "torn": torn,
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors[:20],
+        "sections_hit": sorted(sections),
+    }))
+    # Fail closed. An unexpected replay error means the crash state was never
+    # built, and a trial scored against a state that does not exist is worse
+    # than no trial at all.
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

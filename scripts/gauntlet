@@ -146,6 +146,12 @@ def cmd_freeze(args) -> int:
         freeze[gate.gid] = {
             "harness": str(path.relative_to(G.REPO)),
             "sha256": G._sha256_file(path),
+            # Everything the harness executes, not just its entry script.
+            "dependencies": {
+                str(dep.relative_to(G.REPO)): G._sha256_file(dep)
+                for dep in gate.dependency_closure
+                if dep != path
+            },
             "frozen_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         frozen.append(gate.gid)
