@@ -112,6 +112,11 @@ def mine(slug: str, lang_hint: str) -> list[dict]:
         print(f"  {slug}: TIMEOUT", file=sys.stderr)
         return []
     if r.returncode != 0:
+        # Loud, not silent. This branch dropped rails/rails and
+        # opencv/opencv_extra from a 2.5-hour run with no trace in the log --
+        # the corpus was simply two repositories smaller and nothing said so.
+        print(f"  {slug:<40} FAILED: git exited {r.returncode}: "
+              f"{r.stderr.strip()[:160]}", file=sys.stderr, flush=True)
         return []
 
     out: list[dict] = []

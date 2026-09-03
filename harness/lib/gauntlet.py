@@ -423,7 +423,23 @@ def stage_state(results: list[Result], stage: str) -> str:
 
 
 def delivery_state(results: list[Result]) -> tuple[str, list[str]]:
-    """§0.6. Only two endings."""
+    """§0.6. Only two endings.
+
+    Computed over the ENTIRE registry, not just the gates measured in this run.
+    Measuring one stage and reporting CHAMPION would be exactly the false claim
+    this runner exists to prevent: a gate that was not measured has not passed,
+    and §0.6 requires "every gate in every stage" for CHAMPION.
+    """
+    measured = {r.gate.gid for r in results}
+    unmeasured = [g for gid, g in load_gates().items() if gid not in measured]
+    if unmeasured:
+        by_stage: dict[str, int] = {}
+        for g in unmeasured:
+            by_stage[g.stage] = by_stage.get(g.stage, 0) + 1
+        return "NOT DELIVERABLE", [
+            f"{n} gate(s) in {stage} were not measured in this run"
+            for stage, n in sorted(by_stage.items())]
+
     reasons = []
     hard = [r for r in results if r.gate.type == "HARD"]
     soft = [r for r in results if r.gate.type == "SOFT"]
