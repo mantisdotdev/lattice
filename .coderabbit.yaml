@@ -1,0 +1,96 @@
+# CodeRabbit configuration for Lattice (LTX)
+# https://docs.coderabbit.ai/guides/configure-coderabbit
+language: en-US
+early_access: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  # The Gauntlet demands adversarial review. Tell CodeRabbit the house rules.
+  path_instructions:
+    - path: "crates/ltx-core/**/*.rs"
+      instructions: |
+        This is the storage/history core of a version control system whose
+        headline HARD gate is "no checkpointed data is ever lost".
+        Review with that as the primary lens:
+        - Any write path that is not crash-safe (missing fsync of data AND the
+          containing directory, wrong ordering of rename-vs-fsync, a torn-write
+          window, un-journalled multi-file mutation) is a CRITICAL finding.
+        - Flag any `unwrap()`, `expect()`, or panic reachable from a public API
+          on non-invariant input. Panics in a VCS core are data-loss adjacent.
+        - Flag silent error swallowing (`let _ =`, `.ok()`, empty match arms)
+          on I/O results.
+        - Content addressing: flag any place a hash is computed over a
+          non-canonical byte sequence, or where two distinct logical objects
+          could collide into one key.
+        - Flag unbounded allocation driven by untrusted input (chunk counts,
+          recursion depth, path depth, header-declared lengths).
+        - GAUNTLET RULE §0.3 (anti-gaming): product code must never detect or
+          special-case test/harness execution. Flag any reference to harness,
+          bench, or test identifiers inside ltx-core as a CRITICAL finding.
+    - path: "crates/ltx/**/*.rs"
+      instructions: |
+        CLI shell only. CONSTRAINT: the CLI must contain no logic the daemon API
+        lacks. Flag any business logic here that is not a thin call into
+        ltx-core. Also flag: any user-facing string that introduces a noun
+        outside the seven-concept model (working state, change, checkpoint,
+        line, lens, workspace, remote), and any graph jargon (DAG, HEAD,
+        detached, rebase, ref, blob, tree-ish) on a normal (non-`internals`)
+        path -- these break HARD gates G2.3 and G2.4.
+    - path: "harness/**"
+      instructions: |
+        Gauntlet harnesses. These are the measurement instruments; a harness
+        that can pass without measuring is worse than no harness. Flag:
+        weakened assertions, silently-caught exceptions, sampling that reduces
+        the mandated iteration counts, and any nondeterminism (unseeded RNG,
+        wall-clock dependence, network access) in a harness that claims to be
+        deterministic.
+    - path: "**/*.md"
+      instructions: |
+        Documentation is a deliverable here, not decoration. For GAUNTLET.md
+        and docs/adr/**, flag any claim of a PASS that is not accompanied by
+        harness output, and any numeric result stated without the harness that
+        produced it.
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 300000
+    markdownlint:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    ruff:
+      enabled: true
+    clippy:
+      enabled: true
+    gitleaks:
+      enabled: true
+    semgrep:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: auto

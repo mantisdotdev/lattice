@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+/corpus/data/
+/corpus/cache/
+/bench/results/raw/
+/harness/.venv/
+/prototypes/*/target
+.DS_Store
+*.profraw
+/tmp/
+/.lattice/
+__pycache__/
+*.pyc

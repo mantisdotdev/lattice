@@ -1,0 +1,636 @@
+# ============================================================================
+# THE GAUNTLET — frozen gate registry
+# ============================================================================
+# This file is the single authoritative definition of every gate. The scorecard
+# in GAUNTLET.md is GENERATED from this file plus harness output; it is never
+# hand-written. Editing a target here is a re-scope under §0.4 and requires an
+# ADR. HARD gates may never be re-scoped downward.
+#
+# Fields:
+#   stage       G0..G6
+#   title       human name
+#   metric      what is measured, in words
+#   target      numeric target (or true for boolean gates)
+#   cmp         comparator applied as: measured <cmp> target  => PASS
+#               one of >=, <=, >, <, ==
+#   unit        unit of the measured value
+#   type        HARD | SOFT
+#   klass       A | S | A+S
+#   perf        true if a §6 "perf gate" (waiver-capped)
+#   timing      true if a timing gate (§0.4 5% tolerance instead of 2%)
+#   harness     argv executed to measure; must print one JSON object on stdout
+#   entry       gate IDs that must be CLEAR before work on this gate begins
+# ============================================================================
+
+[G0-1]
+stage="G0"
+title="Prior-art analyses"
+metric="§3 entries with all 3 questions answered, ≥400 words of substantive analysis each"
+target=11
+cmp=">="
+unit="analyses"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_1_prior_art.py"]
+
+[G0-2]
+stage="G0"
+title="Disagreements memo"
+metric="substantive challenges to the spec, each resolved with evidence or accepted-as-bet"
+target=5
+cmp=">="
+unit="challenges"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_2_disagreements.py"]
+
+[G0-3]
+stage="G0"
+title="Merge-replay corpus + oracle"
+metric="real merge commits mined (≥20 repos, ≥5 languages) with line-baselines measured and oracle hash-pinned"
+target=10000
+cmp=">="
+unit="merge commits"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_3_merge_corpus.py"]
+
+[G0-4]
+stage="G0"
+title="Refactoring corpus"
+metric="ground-truthed rename/move instances (≥10 repos, ≥3 languages)"
+target=1000
+cmp=">="
+unit="instances"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_4_refactor_corpus.py"]
+
+[G0-5]
+stage="G0"
+title="Corpora assembly"
+metric="reference repo satisfies frozen corpus-statistics contract + binary corpus ≥5GB (1=all contracts met)"
+target=1
+cmp=">="
+unit="contract"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_5_corpora.py"]
+
+[G0-6]
+stage="G0"
+title="Foundational ADRs"
+metric="ADR-1..4 + calibration procedure, each with prototype benchmark or cited literature"
+target=5
+cmp=">="
+unit="ADRs"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_6_adrs.py"]
+
+[G0-7]
+stage="G0"
+title="Provenance demand probe"
+metric="repos probed with pre-registered go/no-go criteria (criteria file hash-pinned BEFORE probe)"
+target=3
+cmp=">="
+unit="repos"
+type="HARD"
+klass="A"
+harness=["python3","harness/g0/g0_7_demand_probe.py"]
+
+[G0-8]
+stage="G0"
+title="Revised-spec package"
+metric="revised spec + disagreements memo delivered to stakeholder before G1 entry"
+target=1
+cmp=">="
+unit="package"
+type="SOFT"
+klass="S"
+harness=["python3","harness/g0/g0_8_spec_package.py"]
+
+# --------------------------------------------------------------------------
+[G1-1]
+stage="G1"
+title="Crash & power-loss safety"
+metric="failures across ≥2000 SIGKILL + ≥1000 torn/reordered-write injections (0 required); coverage-gated"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_1_crash_safety.py"]
+
+[G1-2]
+stage="G1"
+title="Byte fidelity"
+metric="save→checkout round-trip mismatches on adversarial corpus"
+target=0
+cmp="=="
+unit="mismatches"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_2_byte_fidelity.py"]
+
+[G1-3]
+stage="G1"
+title="Universal undo"
+metric="failures over ≥100k in-process + ≥1000 CLI property-generated command sequences; coverage-gated"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_3_universal_undo.py"]
+
+[G1-4]
+stage="G1"
+title="Concurrency safety"
+metric="corruption/deadlock/linearizability failures over 8 workspaces × 10000 ops"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_4_concurrency.py"]
+
+[G1-5]
+stage="G1"
+title="`ltx status` latency"
+metric="p95 latency, watcher resident, reference repo"
+target=100
+cmp="<"
+unit="ms"
+type="SOFT"
+klass="A"
+perf=true
+timing=true
+harness=["python3","harness/g1/g1_5_status_latency.py"]
+
+[G1-6]
+stage="G1"
+title="`ltx save` latency"
+metric="p95 latency on replayed real-commit edit sets"
+target=250
+cmp="<"
+unit="ms"
+type="SOFT"
+klass="A"
+perf=true
+timing=true
+harness=["python3","harness/g1/g1_6_save_latency.py"]
+
+[G1-7]
+stage="G1"
+title="`ltx switch` / `ltx log` latency"
+metric="max(switch p95 / 500ms, log p95 / 100ms) — normalized, <1.0 passes both"
+target=1.0
+cmp="<"
+unit="ratio"
+type="SOFT"
+klass="A"
+perf=true
+timing=true
+harness=["python3","harness/g1/g1_7_switch_log_latency.py"]
+
+[G1-8]
+stage="G1"
+title="Chunking efficiency"
+metric="p95 new bytes persisted for a 1-byte edit in a 50MB file (100 trials × 5 file types)"
+target=262144
+cmp="<"
+unit="bytes"
+type="SOFT"
+klass="A"
+perf=true
+harness=["python3","harness/g1/g1_8_chunking.py"]
+
+[G1-9]
+stage="G1"
+title="Storage honesty (dual baseline)"
+metric="max(store/restic ÷ 1.25, store/git-gc ÷ 1.5) — normalized, <1.0 passes both baselines"
+target=1.0
+cmp="<"
+unit="ratio"
+type="SOFT"
+klass="A"
+perf=true
+harness=["python3","harness/g1/g1_9_storage_honesty.py"]
+
+[G1-10]
+stage="G1"
+title="Fuzzing"
+metric="outstanding crashes/hangs/leaks after ≥24 CPU-hours across all parser/decoder/store-reader targets"
+target=0
+cmp="=="
+unit="defects"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_10_fuzzing.py"]
+
+[G1-11]
+stage="G1"
+title="Mutation testing"
+metric="mutation-kill rate on ltx-core store, op-log, merge modules"
+target=80
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="A"
+harness=["python3","harness/g1/g1_11_mutation.py"]
+
+[G1-12]
+stage="G1"
+title="Cross-platform"
+metric="platforms (Linux/macOS/Windows) with full suite green in CI"
+target=3
+cmp=">="
+unit="platforms"
+type="HARD"
+klass="A"
+harness=["python3","harness/g1/g1_12_cross_platform.py"]
+
+# --------------------------------------------------------------------------
+[G2-1]
+stage="G2"
+title="Ten-minute scenario — floor"
+metric="persona completion rate (≥20 runs), scripted end-state checks, negative control ≥30pp lower"
+target=90
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="A"
+harness=["python3","harness/g2/g2_1_persona_floor.py"]
+
+[G2-2]
+stage="G2"
+title="Ten-minute scenario — human"
+metric="power-user persona completion on the partial-save battery (floor); kit delivered for ≥10 humans"
+target=80
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="S"
+harness=["python3","harness/g2/g2_2_human_kit.py"]
+
+[G2-3]
+stage="G2"
+title="Concept lint"
+metric="vocabulary violations: user-facing nouns beyond 7, plus graph jargon on normal paths"
+target=0
+cmp="=="
+unit="violations"
+type="HARD"
+klass="A"
+harness=["python3","harness/g2/g2_3_concept_lint.py"]
+
+[G2-4]
+stage="G2"
+title="Error recoverability"
+metric="error paths missing a recovery action, causal category, or §4.2 concept"
+target=0
+cmp="=="
+unit="deficient errors"
+type="HARD"
+klass="A"
+harness=["python3","harness/g2/g2_4_error_recoverability.py"]
+
+[G2-5]
+stage="G2"
+title="JSON contract"
+metric="commands lacking --json, schema validation, or docs coverage"
+target=0
+cmp="=="
+unit="gaps"
+type="HARD"
+klass="A"
+harness=["python3","harness/g2/g2_5_json_contract.py"]
+
+[G2-6]
+stage="G2"
+title="Changeset partitioning"
+metric="scripted split scenarios (20, incl. interrupted mid-split) not completable-and-undoable"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g2/g2_6_changesets.py"]
+
+[G2-7]
+stage="G2"
+title="Lens integrity"
+metric="information-loss or reconstruction failures over ≥10000 generated cases"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g2/g2_7_lens_integrity.py"]
+
+[G2-8]
+stage="G2"
+title="Thinning safety"
+metric="checkpointed objects collected, or thinnings absent from op-log, over year-long traces"
+target=0
+cmp="=="
+unit="violations"
+type="HARD"
+klass="A"
+harness=["python3","harness/g2/g2_8_thinning.py"]
+
+# --------------------------------------------------------------------------
+[G3-1]
+stage="G3"
+title="Round-trip fidelity"
+metric="tree/commit/authorship fidelity over ≥1000 round-trips across ≥10 real repos"
+target=100
+cmp=">="
+unit="percent"
+type="HARD"
+klass="A"
+harness=["python3","harness/g3/g3_1_roundtrip.py"]
+
+[G3-2]
+stage="G3"
+title="Change-ID survival"
+metric="change-ID + provenance recovery across ≥500 simulated PR flows"
+target=99
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="A"
+harness=["python3","harness/g3/g3_2_change_id.py"]
+
+[G3-3]
+stage="G3"
+title="Invisible-to-teammates"
+metric="observable anomalies in the Git-only teammate suite (clone/pull/blame/bisect/CI)"
+target=0
+cmp="=="
+unit="anomalies"
+type="HARD"
+klass="A"
+harness=["python3","harness/g3/g3_3_invisible.py"]
+
+[G3-4]
+stage="G3"
+title="Lossy-edge ledger"
+metric="undocumented lossy edges found by ≥24 CPU-hours of adversarial round-trip fuzzing"
+target=0
+cmp="=="
+unit="undocumented edges"
+type="HARD"
+klass="A"
+harness=["python3","harness/g3/g3_4_lossy_ledger.py"]
+
+[G3-5]
+stage="G3"
+title="Dogfood by volume"
+metric="composite: own-history replay lossless AND self-hosting volume thresholds met AND 0 data-loss incidents"
+target=1
+cmp=">="
+unit="composite"
+type="HARD"
+klass="A"
+harness=["python3","harness/g3/g3_5_dogfood.py"]
+
+[G3-6]
+stage="G3"
+title="Lens sufficiency"
+metric="fraction of Git publishes using lens-defined history; rewrite-desire incidents logged"
+target=100
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="A+S"
+harness=["python3","harness/g3/g3_6_lens_sufficiency.py"]
+
+# --------------------------------------------------------------------------
+[G4-1]
+stage="G4"
+title="Entity-match precision"
+metric="precision on the G0.4 refactoring corpus"
+target=99
+cmp=">="
+unit="percent"
+type="HARD"
+klass="A"
+harness=["python3","harness/g4/g4_1_precision.py"]
+
+[G4-2]
+stage="G4"
+title="Entity-match recall"
+metric="overall recall (≥75 overall; ≥85 on two best-supported languages, checked internally)"
+target=75
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="A"
+harness=["python3","harness/g4/g4_2_recall.py"]
+
+[G4-3]
+stage="G4"
+title="Silent mis-merges"
+metric="structural silent mis-merge rate at the pinned operating point (must also be ≤ line baseline)"
+target=0.1
+cmp="<="
+unit="percent"
+type="HARD"
+klass="A"
+harness=["python3","harness/g4/g4_3_mismerges.py"]
+
+[G4-4]
+stage="G4"
+title="Conflict reduction"
+metric="line-level conflicts auto-resolved by structural merge at the G4.3 operating point"
+target=20
+cmp=">="
+unit="percent"
+type="SOFT"
+klass="A"
+harness=["python3","harness/g4/g4_4_conflict_reduction.py"]
+
+[G4-5]
+stage="G4"
+title="Degradation honesty"
+metric="fatal errors or unflagged fallbacks on unsupported-language/unparseable suites"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g4/g4_5_degradation.py"]
+
+[G4-6]
+stage="G4"
+title="Structural diff performance"
+metric="semantic-mode p95 ÷ --raw p95 on the reference corpus"
+target=2.0
+cmp="<"
+unit="ratio"
+type="SOFT"
+klass="A"
+perf=true
+timing=true
+harness=["python3","harness/g4/g4_6_diff_perf.py"]
+
+[G4-7]
+stage="G4"
+title="Index regenerability"
+metric="query-result divergences after index delete+regenerate, ≥100 randomized trials"
+target=0
+cmp="=="
+unit="divergences"
+type="HARD"
+klass="A"
+harness=["python3","harness/g4/g4_7_regenerability.py"]
+
+# --------------------------------------------------------------------------
+[G5-1]
+stage="G5"
+title="Provenance correctness"
+metric="incorrect provenance query results on the ≥1000-checkpoint seeded ground-truth suite"
+target=0
+cmp="=="
+unit="errors"
+type="HARD"
+klass="A"
+harness=["python3","harness/g5/g5_1_provenance.py"]
+
+[G5-2]
+stage="G5"
+title="Attestation integrity"
+metric="tampering cases neither detected nor correctly surfaced as unverified"
+target=0
+cmp="=="
+unit="misses"
+type="HARD"
+klass="A"
+harness=["python3","harness/g5/g5_2_attestation.py"]
+
+[G5-3]
+stage="G5"
+title="Multi-agent trial"
+metric="composite: pinned suite passes AND ≥15 merges AND 0 corruption/lost work AND all merges attributable"
+target=1
+cmp=">="
+unit="composite"
+type="HARD"
+klass="A"
+harness=["python3","harness/g5/g5_3_multi_agent.py"]
+
+[G5-4]
+stage="G5"
+title="Provenance query latency"
+metric="p95 of `ltx trace --agent --unreviewed --touching <path>` on the reference repo"
+target=200
+cmp="<"
+unit="ms"
+type="SOFT"
+klass="A"
+perf=true
+timing=true
+harness=["python3","harness/g5/g5_4_trace_latency.py"]
+
+[G5-5]
+stage="G5"
+title="Daemon/API parity"
+metric="CLI operations missing from the API, plus out-of-order/dropped events"
+target=0
+cmp="=="
+unit="gaps"
+type="HARD"
+klass="A"
+harness=["python3","harness/g5/g5_5_api_parity.py"]
+
+[G5-6]
+stage="G5"
+title="Native sync convergence"
+metric="divergent final states over ≥10000 randomized topologies; coverage-gated"
+target=0
+cmp="=="
+unit="divergences"
+type="HARD"
+klass="A"
+harness=["python3","harness/g5/g5_6_sync_convergence.py"]
+
+[G5-7]
+stage="G5"
+title="Redaction under sync"
+metric="post-redaction verify failures or incomplete audit trails over ≥1000 trials"
+target=0
+cmp="=="
+unit="failures"
+type="HARD"
+klass="A"
+harness=["python3","harness/g5/g5_7_redaction.py"]
+
+[G5-8]
+stage="G5"
+title="Partial clone"
+metric="initial transfer as a fraction of full store size"
+target=25
+cmp="<="
+unit="percent"
+type="SOFT"
+klass="A"
+perf=true
+harness=["python3","harness/g5/g5_8_partial_clone.py"]
+
+# --------------------------------------------------------------------------
+[G6-1]
+stage="G6"
+title="Data-loss hunter"
+metric="CONFIRMED reproducible losses of checkpointed data (round must pass canary validity)"
+target=0
+cmp="=="
+unit="confirmed findings"
+type="HARD"
+klass="A"
+harness=["python3","harness/g6/g6_review.py","G6.1"]
+
+[G6-2]
+stage="G6"
+title="Security review"
+metric="open CONFIRMED critical/high findings; external review kit delivered"
+target=0
+cmp="=="
+unit="confirmed findings"
+type="HARD"
+klass="A+S"
+harness=["python3","harness/g6/g6_review.py","G6.2"]
+
+[G6-3]
+stage="G6"
+title="Performance audit"
+metric="gated metrics outside their §0.4 tolerance on a fresh clean checkout"
+target=0
+cmp="=="
+unit="regressions"
+type="HARD"
+klass="A"
+harness=["python3","harness/g6/g6_review.py","G6.3"]
+
+[G6-4]
+stage="G6"
+title="Spec-compliance audit"
+metric="unacknowledged deviations + invalid waivers"
+target=0
+cmp="=="
+unit="deviations"
+type="HARD"
+klass="A"
+harness=["python3","harness/g6/g6_review.py","G6.4"]
+
+[G6-5]
+stage="G6"
+title="Cold-start UX walkthrough"
+metric="§4.1 scenario completed from README alone, no source access, no questions (1=completed)"
+target=1
+cmp=">="
+unit="completion"
+type="HARD"
+klass="A"
+harness=["python3","harness/g6/g6_review.py","G6.5"]

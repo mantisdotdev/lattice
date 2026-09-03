@@ -1,0 +1,62 @@
+name: rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # G1.12 is a HARD gate: full suite green on Linux, macOS AND Windows.
+  # Windows is tier-1 from month one, so it is in the matrix from commit one.
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Skip if the workspace does not exist yet
+        id: guard
+        shell: bash
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No Rust workspace yet (Stage G0 forbids product code). Skipping."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.guard.outputs.exists == 'true'
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.guard.outputs.exists == 'true'
+
+      - name: fmt
+        if: steps.guard.outputs.exists == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        if: steps.guard.outputs.exists == 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        if: steps.guard.outputs.exists == 'true'
+        run: cargo test --workspace --all-targets
+
+      - name: doc tests
+        if: steps.guard.outputs.exists == 'true'
+        run: cargo test --workspace --doc

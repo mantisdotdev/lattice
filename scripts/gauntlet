@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+gauntlet — measure gates, emit the scorecard, enforce the ratchet.
+
+  gauntlet measure [STAGE...]   run harnesses and write bench/results/iteration-N.json
+  gauntlet scorecard            render the scorecard for the latest measurement
+  gauntlet append               append the latest scorecard to GAUNTLET.md as a new iteration
+  gauntlet freeze STAGE         pin harness hashes for a stage (§0.3 harness-first rule)
+  gauntlet status               one-line delivery state
+
+Nothing here can mark a gate PASS without harness output. That is the point.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "lib"))
+import gauntlet as G  # noqa: E402
+
+
+def _iteration_files() -> list[Path]:
+    G.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted(G.RESULTS_DIR.glob("iteration-*.json"),
+                  key=lambda p: int(p.stem.split("-")[1]))
+
+
+def _next_iteration() -> int:
+    files = _iteration_files()
+    return int(files[-1].stem.split("-")[1]) + 1 if files else 1
+
+
+def _load_iteration(n: int | None = None) -> dict:
+    files = _iteration_files()
+    if not files:
+        sys.exit("no measurements yet — run `scripts/gauntlet measure` first")
+    if n is None:
+        return json.loads(files[-1].read_text())
+    return json.loads((G.RESULTS_DIR / f"iteration-{n}.json").read_text())
+
+
+def cmd_measure(args) -> int:
+    gates = G.load_gates()
+    freeze = G.load_json(G.FREEZE_FILE, {})
+    waivers = G.load_waivers()
+
+    selected = [g for g in gates.values()
+                if not args.stage or g.stage in args.stage
+                or g.gid in args.stage]
+    selected.sort(key=lambda g: (g.stage, [int(x) for x in g.gid[1:].split(".")]))
+
+    results: list[G.Result] = []
+    for gate in selected:
+        print(f"  measuring {gate.gid} {gate.title} …", file=sys.stderr, flush=True)
+        r = G.run_harness(gate)
+        r = G.apply_freeze_and_waivers(r, freeze, waivers)
+        results.append(r)
+        val = "—" if r.value is None else f"{r.value:g}"
+        print(f"    {r.status:<22} {val} {gate.unit}", file=sys.stderr, flush=True)
+
+    violations, baselines = G.ratchet_check(results)
+    violations += G.waiver_cap_check(results)
+    if not args.no_ratchet_update:
+        G.RATCHET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        G.RATCHET_FILE.write_text(json.dumps(baselines, indent=2, sort_keys=True) + "\n")
+
+    state, reasons = G.delivery_state(results)
+    n = _next_iteration()
+    payload = {
+        "iteration": n,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "stages_measured": sorted({g.stage for g in selected}),
+        "delivery_state": state,
+        "delivery_reasons": reasons,
+        "ratchet_violations": violations,
+        "stage_state": {s: G.stage_state(results, s)
+                        for s in sorted({g.stage for g in selected})},
+        "results": [
+            {"gate": r.gate.gid, "stage": r.gate.stage, "title": r.gate.title,
+             "metric": r.gate.metric, "type": r.gate.type, "class": r.gate.klass,
+             "perf": r.gate.perf, "timing": r.gate.timing,
+             "target": r.gate.target, "cmp": r.gate.cmp, "unit": r.gate.unit,
+             "value": r.value, "status": r.status, "note": r.note,
+             "evidence": r.evidence, "detail": r.detail,
+             "duration_s": round(r.duration_s, 3)}
+            for r in results
+        ],
+    }
+    out = G.RESULTS_DIR / f"iteration-{n}.json"
+    out.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nwrote {out.relative_to(G.REPO)}", file=sys.stderr)
+
+    if violations:
+        print("\nRATCHET VIOLATIONS (§0.4 — these block all other work):",
+              file=sys.stderr)
+        for v in violations:
+            print(f"  ✗ {v}", file=sys.stderr)
+    return 0
+
+
+render = G.render
+
+
+def cmd_scorecard(args) -> int:
+    payload = _load_iteration(args.iteration)
+    files = _iteration_files()
+    prev = None
+    if len(files) > 1 and args.iteration is None:
+        prev = json.loads(files[-2].read_text())
+    print(render(payload, prev))
+    return 0
+
+
+def cmd_append(args) -> int:
+    payload = _load_iteration(None)
+    files = _iteration_files()
+    prev = json.loads(files[-2].read_text()) if len(files) > 1 else None
+    body = render(payload, prev)
+    existing = G.GAUNTLET_MD.read_text() if G.GAUNTLET_MD.exists() else ""
+    marker = f"### Iteration {payload['iteration']} —"
+    if marker in existing:
+        print(f"iteration {payload['iteration']} already in GAUNTLET.md", file=sys.stderr)
+        return 0
+    with G.GAUNTLET_MD.open("a") as fh:
+        fh.write("\n" + body + "\n")
+    print(f"appended iteration {payload['iteration']} to GAUNTLET.md", file=sys.stderr)
+    return 0
+
+
+def cmd_freeze(args) -> int:
+    gates = G.load_gates()
+    freeze = G.load_json(G.FREEZE_FILE, {})
+    frozen, skipped = [], []
+    for gate in gates.values():
+        if args.stage and gate.stage not in args.stage and gate.gid not in args.stage:
+            continue
+        path = gate.harness_path
+        if not path.exists():
+            skipped.append(gate.gid)
+            continue
+        if gate.gid in freeze and not args.refreeze:
+            continue
+        freeze[gate.gid] = {
+            "harness": str(path.relative_to(G.REPO)),
+            "sha256": G._sha256_file(path),
+            "frozen_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        frozen.append(gate.gid)
+    G.FREEZE_FILE.write_text(json.dumps(freeze, indent=2, sort_keys=True) + "\n")
+    print(f"froze {len(frozen)}: {', '.join(frozen) or '(none)'}", file=sys.stderr)
+    if skipped:
+        print(f"skipped (no harness file yet): {', '.join(skipped)}", file=sys.stderr)
+    return 0
+
+
+def cmd_status(args) -> int:
+    payload = _load_iteration(None)
+    counts: dict[str, int] = {}
+    for r in payload["results"]:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    summary = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+    print(f"iteration {payload['iteration']} | {payload['delivery_state']} | {summary}")
+    for s, st in payload["stage_state"].items():
+        print(f"  {s}: {st}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="gauntlet")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    m = sub.add_parser("measure")
+    m.add_argument("stage", nargs="*", help="stage (G0..G6) or gate id; default all")
+    m.add_argument("--no-ratchet-update", action="store_true")
+    m.set_defaults(fn=cmd_measure)
+
+    s = sub.add_parser("scorecard")
+    s.add_argument("--iteration", type=int, default=None)
+    s.set_defaults(fn=cmd_scorecard)
+
+    a = sub.add_parser("append")
+    a.set_defaults(fn=cmd_append)
+
+    f = sub.add_parser("freeze")
+    f.add_argument("stage", nargs="*")
+    f.add_argument("--refreeze", action="store_true")
+    f.set_defaults(fn=cmd_freeze)
+
+    st = sub.add_parser("status")
+    st.set_defaults(fn=cmd_status)
+
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
