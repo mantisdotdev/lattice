@@ -216,6 +216,19 @@ fn run(cli: &Cli) -> Result<u8> {
                 cli,
                 || serde_json::json!({ "ok": healthy, "report": report }),
                 || {
+                    // An unhealthy report must never render as a success
+                    // sentence: the words the user reads have to match the
+                    // exit code. The problems are listed rather than hidden.
+                    if !healthy {
+                        let mut out = format!(
+                            "NOT verified — {} problem(s) found:",
+                            report.errors.len()
+                        );
+                        for e in &report.errors {
+                            out.push_str(&format!("\n  - {e}"));
+                        }
+                        return out;
+                    }
                     if *complete {
                         format!(
                             "verified {} checkpoints and {} chunks; {} operations chained",
@@ -225,7 +238,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         // Challenge 4: the default form reports coverage rather
                         // than claiming completeness.
                         format!(
-                            "verified 100% of history structure; content verified for {} chunks; \
+                            "verified history structure; content verified for {} chunks; \
                          {} not present locally\nrun `ltx verify --complete` for the full check",
                             report.chunks_verified, report.chunks_absent
                         )

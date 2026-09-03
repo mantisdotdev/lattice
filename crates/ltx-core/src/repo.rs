@@ -539,13 +539,32 @@ impl Repo {
             report.errors.push(format!("operation log: {break_at}"));
         }
 
-        for cp in self.checkpoints()? {
+        let checkpoints = self.checkpoints()?;
+        let known: std::collections::HashSet<&str> =
+            checkpoints.iter().map(|c| c.id.as_str()).collect();
+        for cp in &checkpoints {
             report.checkpoints += 1;
             if let Err(e) = self.verify_tree(&cp.tree, &mut report) {
                 report.structure_verified = false;
                 report
                     .errors
                     .push(format!("checkpoint {}: {e}", &cp.id[..12.min(cp.id.len())]));
+            }
+        }
+
+        // Every Save the op-log records must resolve to a present, authentic
+        // checkpoint. One that does not means its blob is missing — a hole
+        // verify must surface rather than silently walk past, since without it
+        // a repository missing its checkpoints reports a clean 0 checkpoints.
+        for entry in self.oplog.entries()? {
+            if let Operation::Save { checkpoint, .. } = &entry.operation {
+                if !known.contains(checkpoint.as_str()) {
+                    report.errors.push(format!(
+                        "operation {} saved checkpoint {} but its record is not present",
+                        entry.seq,
+                        &checkpoint[..12.min(checkpoint.len())]
+                    ));
+                }
             }
         }
 
@@ -563,7 +582,15 @@ impl Repo {
             return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
         };
         let Some(bytes) = self.store.read(id)? else {
+            // A missing TREE is a hole in the history structure itself, not
+            // merely absent file content. It is recorded as an error so verify
+            // cannot report a clean, fully-verified repository when it never
+            // read the spine — the exact false-clean the review found.
             report.chunks_absent += 1;
+            report.errors.push(format!(
+                "tree {} is not present locally",
+                &tree_id[..12.min(tree_id.len())]
+            ));
             return Ok(());
         };
         report.chunks_verified += 1;
@@ -820,6 +847,32 @@ mod tests {
             full.errors
         );
         let _ = dir;
+    }
+
+    #[test]
+    fn verify_does_not_claim_clean_when_history_is_missing() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f.txt"), b"content").unwrap();
+        repo.save("one").unwrap();
+        drop(repo);
+
+        // Remove every pack index: the checkpoint and its tree are now
+        // unreadable, but the op-log still records the Save. A damaged
+        // repository like this must NOT verify clean.
+        let packs = dir.path().join(".lattice/packs");
+        for e in fs::read_dir(&packs).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().and_then(|x| x.to_str()) == Some("idx") {
+                fs::remove_file(p).unwrap();
+            }
+        }
+
+        let repo = Repo::open(dir.path()).unwrap();
+        let report = repo.verify(false).unwrap();
+        assert!(
+            !report.errors.is_empty(),
+            "a repository missing its checkpoints must not verify clean"
+        );
     }
 
     #[test]
