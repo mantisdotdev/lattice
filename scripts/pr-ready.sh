@@ -58,22 +58,47 @@ waiting=$(echo "$checks" | jq -r '[.[] | select(.bucket=="pending")] | length') 
 [ "$waiting" -eq 0 ] || fail "$waiting CI check(s) still running"
 
 # ------------------------------------------------- 2. review is for THIS head
-summary=$(gh api "/repos/$REPO/issues/$PR/comments" --paginate \
-          --jq '[.[] | select(.user.login | test("coderabbit";"i"))] | last' 2>/dev/null) \
-  || undetermined "cannot read PR comments"
-[ -n "$summary" ] && [ "$summary" != "null" ] \
+# Each field is extracted by its own --jq. Round-tripping the whole comment
+# object through a shell variable and re-parsing it broke on control characters
+# in CodeRabbit's body (it embeds ASCII art), leaving `body` silently EMPTY --
+# so every content check below matched nothing and the gate blocked a PR whose
+# review had actually finished.
+body=$(gh api "/repos/$REPO/issues/$PR/comments" --paginate \
+       --jq '[.[] | select(.user.login | test("coderabbit";"i"))] | last | .body' \
+       2>/dev/null) || undetermined "cannot read PR comments"
+comment_iso=$(gh api "/repos/$REPO/issues/$PR/comments" --paginate \
+       --jq '[.[] | select(.user.login | test("coderabbit";"i"))] | last | .updated_at' \
+       2>/dev/null) || undetermined "cannot read PR comment timestamps"
+[ -n "$body" ] && [ "$body" != "null" ] \
   || fail "CodeRabbit has not commented yet"
-
-body=$(echo "$summary" | jq -r '.body')
 if echo "$body" | grep -qiE "review in progress|currently processing"; then
   fail "CodeRabbit review still in progress"
 fi
-# CodeRabbit names the commit range it reviewed. If the current head is not in
-# that summary, the review predates the code about to be merged -- which is the
-# state that must NOT read as ready.
-if ! echo "$body" | grep -qE "${head:0:7}|${head}"; then
-  fail "newest CodeRabbit review does not cover head ${head:0:7}; it reviewed an earlier commit"
+# Has CodeRabbit reviewed THIS head? Two acceptable proofs, because CodeRabbit
+# emits two shapes of completion:
+#   a) a walkthrough summary naming the commit range it reviewed, or
+#   b) a bare "Review finished" acknowledgment, which carries NO sha.
+# Requiring (a) alone produced a false negative that blocked a PR whose review
+# had in fact completed -- so (b) is accepted when the comment is NEWER than the
+# head commit, which is the same guarantee by a different route.
+head_epoch=$(git log -1 --format=%ct "$head" 2>/dev/null || echo 0)
+# TZ=UTC is load-bearing: macOS `date -j -f` IGNORES the trailing Z and parses
+# the timestamp in local time, so on a machine at UTC+5:30 a comment posted five
+# minutes ago read as five hours old -- older than the commit, and the gate
+# blocked a PR whose review had finished.
+comment_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$comment_iso" "+%s" 2>/dev/null \
+                || date -u -d "$comment_iso" "+%s" 2>/dev/null || echo 0)
+
+covers_head=false
+echo "$body" | grep -qE "${head:0:7}|${head}" && covers_head=true
+if [ "$covers_head" != "true" ]; then
+  if echo "$body" | grep -qiE "review finished|actionable comments posted" \
+     && [ "$comment_epoch" -gt "$head_epoch" ] && [ "$head_epoch" -gt 0 ]; then
+    covers_head=true
+  fi
 fi
+[ "$covers_head" = "true" ] \
+  || fail "newest CodeRabbit review does not cover head ${head:0:7}; it reviewed an earlier commit"
 
 # ------------------------------------ 3. zero unresolved findings, ALL of them
 # reviewThreads(first:100) silently truncates, so an unresolved thread past the
