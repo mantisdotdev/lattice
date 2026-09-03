@@ -169,8 +169,9 @@ daemon and be unusable without one, entirely green.*
 
 *Cause: Challenge 2, now empirically confirmed. For a clean auto-merge the tree
 recorded in the merge commit **is** the line merge's output, because that is
-literally how the human produced it. Measured: **93.77%** of 14,990 replayed real
-merges reproduce byte-identically. A "line-based silent mis-merge rate" over that
+literally how the human produced it. Measured: **90.64%** of 15,993 replayed real
+merges (from 284,316 mined across 24 repositories and 10 languages) reproduce
+byte-identically. A "line-based silent mis-merge rate" over that
 population is therefore identically zero for a tautological reason, and G4.3's
 "structural rate ≤ line baseline" would have collapsed to "exactly zero" —
 strictly stronger than the 0.1% absolute beside it, and unsatisfiable.*
@@ -182,16 +183,17 @@ reported baselines:
    zero by construction, reported with that reasoning attached so the number is
    never mistaken for evidence that line merge is safe.
 2. **Divergence** — clean replays whose tree differs from the recorded tree,
-   after normalization and after excluding evil merges. **Measured: 0.1492%**
-   (CI95 0.0976–0.2279, n = 14,078). This is the honest comparator and is what
+   after normalization and after excluding evil merges. **Measured: 0.2957%**
+   (CI95 0.2196–0.3981, n = 14,541). This is the honest comparator and is what
    G4.3's "≤ line baseline" clause is evaluated against.
 3. **Resolved-conflict** — merges where replay conflicts and the human resolution
-   is genuine ground truth. **Measured line conflict rate: 5.6605%** (CI95
-   5.3017–6.0420, n = 14,981). This is G4.4's denominator and the correct
+   is genuine ground truth. **Measured line conflict rate: 8.6655%** (CI95
+   8.2392–9.1116, n = 15,983). This is G4.4's denominator and the correct
    comparator for G4.3-b below.
 
-Because baseline (2) is 0.1492%, **G4.3's 0.1% absolute target is the binding
-constraint** — which is what makes the gate satisfiable at all.
+Because baseline (2) is 0.2957%, **G4.3's 0.1% absolute target is the binding
+constraint** — which is what makes the gate satisfiable at all. Under the naive
+reading it would have been 0.00% and unsatisfiable.
 
 ---
 
