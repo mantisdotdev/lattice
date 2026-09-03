@@ -28,6 +28,7 @@ import argparse
 import collections
 import concurrent.futures as cf
 import json
+import os
 import random
 import re
 import subprocess
@@ -38,6 +39,7 @@ REPO = Path(__file__).resolve().parents[2]
 REPOS = REPO / "corpus" / "data" / "repos"
 MANIFEST = REPO / "corpus" / "manifests" / "mining-repos.tsv"
 OUT = REPO / "corpus" / "data" / "refactorings.jsonl"
+PARTIAL = REPO / "corpus" / "data" / "refactorings.partial.jsonl"
 SPOT = REPO / "corpus" / "data" / "refactorings-spotcheck.json"
 
 SEED = 20260903
@@ -173,15 +175,30 @@ def main() -> int:
         if len(p) >= 2:
             rows.append((p[0], p[1]))
 
+    # Checkpoint each repository as it completes. An earlier version accumulated
+    # every record in memory and wrote once at the end, so a crash or a kill an
+    # hour into a run destroyed all of it and left the gate unmeasurable. The
+    # partial file is valid input for the harness -- it just has fewer repos.
+    #
+    # This changes WHEN records are written, never WHICH records are produced:
+    # mine() and its tier classification are untouched, and the final file is
+    # sorted into the same deterministic order as before.
+    PARTIAL.parent.mkdir(parents=True, exist_ok=True)
     all_out: list[dict] = []
-    with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        for recs in ex.map(lambda r: mine(*r), rows):
-            all_out.extend(recs)
+    with PARTIAL.open("w") as partial:
+        with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            for recs in ex.map(lambda r: mine(*r), rows):
+                all_out.extend(recs)
+                for r in recs:
+                    partial.write(json.dumps(r, sort_keys=True) + "\n")
+                partial.flush()
+                os.fsync(partial.fileno())
 
     all_out.sort(key=lambda r: (r["repo"], r["commit"], r["new_path"]))
     with OUT.open("w") as fh:
         for r in all_out:
             fh.write(json.dumps(r, sort_keys=True) + "\n")
+    PARTIAL.unlink(missing_ok=True)
 
     truth = [r for r in all_out if r["tier"] in ("TIER_A", "TIER_B")]
     rng = random.Random(SEED)
