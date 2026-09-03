@@ -13,6 +13,7 @@
 pub mod chunk;
 pub mod error;
 pub mod oplog;
+pub mod platform;
 pub mod repo;
 pub mod store;
 pub mod tree;

@@ -224,9 +224,7 @@ impl PackWriter {
 }
 
 fn sync_dir(dir: &Path) -> Result<()> {
-    let handle = File::open(dir)?;
-    handle.sync_all()?;
-    Ok(())
+    crate::platform::sync_dir(dir)
 }
 
 /// Read-side view of one pack.

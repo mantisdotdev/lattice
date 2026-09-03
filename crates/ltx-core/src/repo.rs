@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::chunk::ChunkId;
 use crate::error::{Error, Result};
 use crate::oplog::{Entry, OpLog, Operation};
+use crate::platform;
 use crate::store::{PackWriter, Store};
 use crate::tree::{self, Node, Tree};
 
@@ -200,8 +200,7 @@ impl Repo {
         // durable — a rename is only committed once the containing directory
         // is fsynced, which is the barrier G1.1's replayer models.
         fs::rename(&tmp, &path)?;
-        let dir = fs::File::open(Self::repo_dir(&self.root))?;
-        dir.sync_all()?;
+        platform::sync_dir(&Self::repo_dir(&self.root))?;
         Ok(())
     }
 
@@ -283,7 +282,7 @@ impl Repo {
                 tree.entries.insert(raw, Node::Directory { tree: child });
             } else {
                 let content = fs::read(&path)?;
-                let mode = meta.permissions().mode();
+                let mode = platform::file_mode(&meta);
                 tree.entries
                     .insert(raw, tree::file_node(&content, mode, packer));
             }
@@ -324,7 +323,21 @@ impl Repo {
         let mut placed: Vec<Vec<u8>> = Vec::new();
 
         for (name, node) in &tree.entries {
-            let path = dest.join(bytes_to_os(name));
+            // Windows names are UTF-16, so a byte sequence that is not valid
+            // UTF-8 has no faithful representation there. Reported rather than
+            // approximated: a silently renamed file is a lost file.
+            let Some(name_os) = platform::os_string_from_bytes(name) else {
+                report.collisions.push(Collision {
+                    path: String::from_utf8_lossy(name).into_owned(),
+                    collided_with: String::new(),
+                    reason: format!(
+                        "this platform ({}) cannot represent these name bytes",
+                        platform::platform_name()
+                    ),
+                });
+                continue;
+            };
+            let path = dest.join(&name_os);
 
             // If the target already exists but this checkout has not written
             // that exact name, the filesystem has folded two distinct names
@@ -355,7 +368,19 @@ impl Repo {
                     if path.exists() || fs::symlink_metadata(&path).is_ok() {
                         fs::remove_file(&path).ok();
                     }
-                    std::os::unix::fs::symlink(bytes_to_os(target), &path)?;
+                    let Some(target_os) = platform::os_string_from_bytes(target) else {
+                        report.collisions.push(Collision {
+                            path: String::from_utf8_lossy(name).into_owned(),
+                            collided_with: String::new(),
+                            reason: format!(
+                                "this platform ({}) cannot represent the link \
+                                 target's bytes",
+                                platform::platform_name()
+                            ),
+                        });
+                        continue;
+                    };
+                    platform::symlink(Path::new(&target_os), &path)?;
                     written += 1;
                 }
                 Node::File { chunks, size, mode } => {
@@ -379,7 +404,21 @@ impl Repo {
                         )));
                     }
                     fs::write(&path, &content)?;
-                    fs::set_permissions(&path, fs::Permissions::from_mode(*mode))?;
+                    platform::set_file_mode(&path, *mode)?;
+                    if platform::mode_is_lossy_here(*mode) {
+                        // Named, not silent: on Windows the executable bit does
+                        // not survive, and a user whose script will not run
+                        // deserves to be told why.
+                        report.collisions.push(Collision {
+                            path: String::from_utf8_lossy(name).into_owned(),
+                            collided_with: String::new(),
+                            reason: format!(
+                                "written, but this platform ({}) cannot record \
+                                 the executable bit",
+                                platform::platform_name()
+                            ),
+                        });
+                    }
                     written += 1;
                 }
             }
@@ -543,11 +582,6 @@ fn folds_together(a: &[u8], b: &[u8]) -> bool {
     norm(a) == norm(b)
 }
 
-fn bytes_to_os(bytes: &[u8]) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStringExt;
-    std::ffi::OsString::from_vec(bytes.to_vec())
-}
-
 /// Unused import guard for BTreeMap in non-test builds.
 #[allow(dead_code)]
 fn _btree_marker(_: BTreeMap<Vec<u8>, Node>) {}
@@ -618,6 +652,11 @@ mod tests {
     }
 
     #[test]
+    // Creating a symlink on Windows needs administrator rights or
+    // Developer Mode, so this runs where the platform permits it. The
+    // engine's symlink SUPPORT is cross-platform; only the test fixture
+    // is not.
+    #[cfg(unix)]
     fn a_symlink_round_trips_as_a_symlink() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("target.txt"), b"x").unwrap();
@@ -637,6 +676,11 @@ mod tests {
     }
 
     #[test]
+    // Creating a symlink on Windows needs administrator rights or
+    // Developer Mode, so this runs where the platform permits it. The
+    // engine's symlink SUPPORT is cross-platform; only the test fixture
+    // is not.
+    #[cfg(unix)]
     fn a_dangling_symlink_round_trips() {
         let (dir, mut repo) = repo();
         std::os::unix::fs::symlink("/nowhere/at/all", dir.path().join("dangling")).unwrap();
@@ -650,19 +694,18 @@ mod tests {
     }
 
     #[test]
+    // The executable bit is not representable on Windows; platform.rs names
+    // that as a lossy edge and checkout reports it per file.
+    #[cfg(unix)]
     fn the_executable_bit_round_trips() {
         let (dir, mut repo) = repo();
         let script = dir.path().join("run.sh");
         fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::set_file_mode(&script, 0o755).unwrap();
         let cp = repo.save("executable").unwrap();
         let out = dir.path().join("out");
         repo.checkout(&cp.id, &out).unwrap();
-        let mode = fs::metadata(out.join("run.sh"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = crate::platform::file_mode(&fs::metadata(out.join("run.sh")).unwrap());
         assert_eq!(mode, 0o755);
     }
 
