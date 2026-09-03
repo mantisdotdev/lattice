@@ -108,13 +108,44 @@ static int fd_path(int fd, char *out, size_t cap) {
 #endif
 }
 
-static int under_root(const char *path) {
-  return root_len > 0 && strncmp(path, root, root_len) == 0;
+/* Resolve a possibly-relative path against the process cwd, then compare on
+ * PATH COMPONENTS. The harness runs `ltx` with cwd=repo while IOFAULT_ROOT is
+ * absolute, so raw relative paths from rename()/unlink() failed the prefix
+ * test and were never journalled at all. Plain strncmp also accepted siblings:
+ * "/tmp/root-other" starts with "/tmp/root". */
+static int canonical_under_root(const char *path, char *out, size_t cap) {
+  char joined[PATH_MAX];
+  if (path[0] == '/') {
+    snprintf(joined, sizeof(joined), "%s", path);
+  } else {
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) return 0;
+    snprintf(joined, sizeof(joined), "%s/%s", cwd, path);
+  }
+  /* realpath() fails for a path being created or just removed, so fall back to
+   * the lexically joined form rather than dropping the record. */
+  char resolved[PATH_MAX];
+  if (realpath(joined, resolved) == NULL)
+    snprintf(resolved, sizeof(resolved), "%s", joined);
+
+  if (root_len == 0) return 0;
+  if (strncmp(resolved, root, root_len) != 0) return 0;
+  /* Component boundary: the next character must end the root or be a slash. */
+  if (resolved[root_len] != '\0' && resolved[root_len] != '/') return 0;
+  snprintf(out, cap, "%s", resolved);
+  return 1;
 }
 
-static void journal(uint32_t op, const char *path, uint64_t offset,
+static int under_root(const char *path) {
+  char scratch[PATH_MAX];
+  return canonical_under_root(path, scratch, sizeof(scratch));
+}
+
+static void journal(uint32_t op, const char *raw_path, uint64_t offset,
                     const void *payload, uint64_t length) {
-  if (journal_fd < 0 || !under_root(path)) return;
+  char path[PATH_MAX];
+  if (journal_fd < 0 || !canonical_under_root(raw_path, path, sizeof(path)))
+    return;
   uint64_t s = atomic_fetch_add(&seq, 1);
   uint32_t plen = (uint32_t)strlen(path);
 
@@ -221,7 +252,13 @@ int IOFAULT_NAME(rename)(const char *from, const char *to) {
   if (!real) real = (int (*)(const char *, const char *))dlsym(RTLD_NEXT, "rename");
 #endif
   int rc = real(from, to);
-  if (rc == 0) journal(OP_RENAME, to, 0, from, strlen(from));
+  if (rc == 0) {
+    /* The source is recorded canonically too, so replay can find it. */
+    char from_abs[PATH_MAX];
+    if (!canonical_under_root(from, from_abs, sizeof(from_abs)))
+      snprintf(from_abs, sizeof(from_abs), "%s", from);
+    journal(OP_RENAME, to, 0, from_abs, strlen(from_abs));
+  }
   return rc;
 }
 

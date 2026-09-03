@@ -125,8 +125,21 @@ def verify(repo: Path) -> tuple[bool, str]:
         json.dumps(doc.get("errors", []))[:300]
 
 
-def sigkill_trial(work: Path, rng: random.Random, trial: int) -> dict:
-    """Kill `ltx` mid-operation at a random moment, then verify."""
+def sigkill_trial(work: Path, rng: random.Random, trial: int,
+                  shim: Path) -> dict:
+    """Kill `ltx` at a seeded point in its I/O SEQUENCE, then verify.
+
+    The injection point is chosen by how much the operation has written, not by
+    elapsed wall-clock time. An earlier version slept for a seeded duration,
+    which is not reproducible: the delay was seeded but the scheduler and the
+    machine's load were not, so the same seed killed different operations at
+    different internal states and a failure could not be re-run.
+
+    Running the trial under the recording shim gives a monotonic progress
+    signal -- journal bytes written -- that is a property of the operation
+    rather than of the machine. The same seed now targets the same point in the
+    same I/O sequence.
+    """
     repo = work / f"sk-{trial}"
     shutil.rmtree(repo, ignore_errors=True)
     repo.mkdir(parents=True)
@@ -147,15 +160,41 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int) -> dict:
     (repo / f"edit-{trial}.bin").write_bytes(
         seeded_bytes(rng, rng.randrange(1024, 1 << 20)))
     argv = rng.choice(OPERATION_POOL)
-    proc = subprocess.Popen([str(L.LTX), *argv], cwd=repo,
+
+    journal = work / f"sk-journal-{trial}.bin"
+    env = dict(os.environ, IOFAULT_JOURNAL=str(journal), IOFAULT_ROOT=str(repo),
+               DYLD_INSERT_LIBRARIES=str(shim), LD_PRELOAD=str(shim))
+    # Seeded fraction of the operation's I/O to let through before killing.
+    target_fraction = rng.uniform(0.05, 0.95)
+
+    proc = subprocess.Popen([str(L.LTX), *argv], cwd=repo, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(rng.uniform(0.001, 0.250))
-    # A process that already exited received no signal. Counting that as an
-    # injection inflates the trial count with runs that tested nothing, so it
-    # is recorded as not-injected and excluded from the mandated total.
-    injected = proc.poll() is None
-    if injected:
+    injected = False
+    deadline = time.monotonic() + 120
+    observed_peak = 0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            written = journal.stat().st_size
+        except OSError:
+            written = 0
+        observed_peak = max(observed_peak, written)
+        # Kill once the operation has emitted its seeded share of I/O. The
+        # threshold adapts to the operation because it is expressed relative to
+        # what THIS operation has produced so far plus a floor, rather than an
+        # absolute byte count that would suit only one command.
+        if written > 0 and written >= target_fraction * max(observed_peak, 4096):
+            proc.send_signal(signal.SIGKILL)
+            injected = True
+            break
+        time.sleep(0.002)
+    if proc.poll() is None:
         proc.send_signal(signal.SIGKILL)
+        injected = True
+    # A process that had already exited received no signal. Counting that as an
+    # injection inflates the trial count with runs that tested nothing, so it is
+    # recorded as not-injected and excluded from the mandated total.
     proc.wait(timeout=60)
 
     ok, why = verify(repo)
@@ -164,7 +203,9 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int) -> dict:
     return {"trial": trial, "operation": argv[0], "injected": injected,
             "ok": ok and not lost,
             "why": why if not ok else (f"{len(lost)} checkpoints lost" if lost else ""),
-            "checkpoints_lost": len(lost)}
+            "checkpoints_lost": len(lost),
+            "io_bytes_at_kill": observed_peak,
+            "target_fraction": round(target_fraction, 4)}
 
 
 def powerloss_trial(work: Path, rng: random.Random, trial: int,
@@ -270,7 +311,7 @@ def main() -> int:
         attempts = 0
         while (sum(1 for r in sk if r.get("injected")) < SIGKILL_TRIALS
                and attempts < SIGKILL_TRIALS * 3):
-            sk.append(sigkill_trial(work, rng, attempts))
+            sk.append(sigkill_trial(work, rng, attempts, shim))
             attempts += 1
         pl = [powerloss_trial(work, rng, i, shim) for i in range(POWERLOSS_TRIALS)]
 

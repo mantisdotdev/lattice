@@ -47,13 +47,18 @@ def main() -> int:
         return L.not_implemented(
             GATE, "cargo-mutants not installed (cargo install cargo-mutants)")
 
-    files = [f"crates/ltx-core/src/{m}**" for m in SCOPED_MODULES]
-    args = ["cargo", "mutants", "--no-shuffle", "--json", "--output",
-            str(OUTPUT.parent)]
+    # Two patterns per module: the flat file and everything under a directory
+    # of that name. `src/{m}**` matches `{m}.rs` but does NOT recurse into
+    # `{m}/`, so a store split across files would have gone unmutated.
+    files = []
+    for m in SCOPED_MODULES:
+        files += [f"crates/ltx-core/src/{m}.rs", f"crates/ltx-core/src/{m}/**/*.rs"]
+    # `--json` applies to `--list`, not to a mutation run.
+    args = ["cargo", "mutants", "--no-shuffle", "--output", str(OUTPUT.parent)]
     for f in files:
         args += ["--file", f]
     proc = subprocess.run(args, cwd=REPO, capture_output=True, text=True,
-                          errors="replace", timeout=86400)
+                          errors="replace", timeout=86400, check=False)
 
     if proc.returncode not in (0, 1, 2, 3):
         # cargo-mutants uses 1/2/3 to signal surviving/timeout/unviable mutants,
@@ -117,7 +122,17 @@ def main() -> int:
             unviable += 1
 
     total = killed + missed
-    rate = (100.0 * killed / total) if total else 0.0
+    if total == 0:
+        # Zero viable mutants means the run measured nothing -- usually a bad
+        # --file pattern. Reporting 0.0% would look like a catastrophic score
+        # when the truth is that no mutation was attempted.
+        return L.emit({
+            "gate": GATE, "value": 0.0, "unit": "percent",
+            "note": f"cargo-mutants produced no viable mutants for "
+                    f"{', '.join(SCOPED_MODULES)}; the file patterns matched "
+                    f"nothing, so nothing was measured",
+            "detail": {"file_patterns": files, "outcomes": len(outcomes)}})
+    rate = 100.0 * killed / total
     return L.emit({
         "gate": GATE, "value": round(rate, 2), "unit": "percent",
         "note": (f"{killed} killed / {total} viable = {rate:.1f}% on "

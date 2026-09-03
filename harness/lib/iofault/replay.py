@@ -173,9 +173,24 @@ def main() -> int:
     applied = skipped = 0
     errors: list[str] = []
     sections: set[str] = set()
+    def contained(path: Path) -> bool:
+        """Component-aware containment. `startswith` accepted siblings:
+        "/tmp/root-other" starts with "/tmp/root"."""
+        try:
+            path.resolve().relative_to(root)
+            return True
+        except (ValueError, OSError):
+            # An unresolvable path (parent removed by an earlier record) is
+            # still ours if it is lexically inside the root.
+            try:
+                Path(os.path.normpath(str(path))).relative_to(root)
+                return True
+            except ValueError:
+                return False
+
     for r in sorted(durable, key=lambda x: x.seq) + surviving:
         target = Path(r.path)
-        if not str(target).startswith(str(root)):
+        if not contained(target):
             continue
 
         landed = False
