@@ -100,6 +100,16 @@ impl PackWriter {
     /// references it still resolves through `Store::read`. Without this, every
     /// save re-stored the entire working tree and a one-byte edit re-persisted
     /// every unchanged file, which is exactly what G1.8 and G1.9 forbid.
+    ///
+    /// The presence test is an index lookup (`contains`), not a re-read of the
+    /// payload. This is the content-addressed dedup contract that git, restic
+    /// and borg all use: a save trusts that an already-stored address holds
+    /// correct bytes. Re-verifying every candidate would re-read the whole
+    /// working set on each save — O(content), blowing the G1.5 latency budget
+    /// and defeating the point of dedup. A pack that bit-rots after it was
+    /// written is a separate failure surfaced by `verify` and recovered by
+    /// refetch, not something a write-time check can prevent without paying
+    /// that cost on every save.
     pub fn retain_unknown(&mut self, store: &Store) {
         self.pending.retain(|(id, _)| !store.contains(*id));
         self.seen = self.pending.iter().map(|(id, _)| (*id, ())).collect();

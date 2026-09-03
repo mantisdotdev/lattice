@@ -37,10 +37,12 @@ jobs:
             echo "No Rust workspace yet (Stage G0 forbids product code). Skipping."
           fi
 
-      # No version here: the action reads rust-toolchain.toml, so CI and every
-      # developer machine run the same compiler and the same lints. `@stable`
-      # floats, and a floating toolchain made G1.12's result depend on the day.
-      - uses: dtolnay/rust-toolchain@master
+      # Pin BOTH the action (to an immutable commit, not the mutable @master
+      # branch — CWE-494) and the toolchain version. dtolnay/rust-toolchain
+      # installs the `toolchain:` input, not rust-toolchain.toml, so 1.96.0 is
+      # named here explicitly and kept in step with the toml; `@stable` floats,
+      # and a floating toolchain made G1.12's result depend on the day.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master @ 2025, pinned
         if: steps.guard.outputs.exists == 'true'
         with:
           toolchain: "1.96.0"
