@@ -17,7 +17,7 @@
 //! ordering, so it is stated here rather than left implicit in the call order.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -126,13 +126,13 @@ impl PackWriter {
         let mut segment_offsets: Vec<(u64, u32)> = Vec::new();
         let mut pack_cursor: u64 = PACK_MAGIC.len() as u64;
 
-        let mut flush_segment = |out: &mut BufWriter<File>,
-                                 payload: &mut Vec<u8>,
-                                 members: &mut Vec<(ChunkId, u32, u32)>,
-                                 seg: &mut u64,
-                                 cursor: &mut u64,
-                                 offsets: &mut Vec<(u64, u32)>,
-                                 located: &mut Vec<(ChunkId, Located)>|
+        let flush_segment = |out: &mut BufWriter<File>,
+                             payload: &mut Vec<u8>,
+                             members: &mut Vec<(ChunkId, u32, u32)>,
+                             seg: &mut u64,
+                             cursor: &mut u64,
+                             offsets: &mut Vec<(u64, u32)>,
+                             located: &mut Vec<(ChunkId, Located)>|
          -> Result<()> {
             if payload.is_empty() {
                 return Ok(());
@@ -200,7 +200,7 @@ impl PackWriter {
             .map_err(|e| Error::Io(e.into_error()))?
             .sync_all()?;
 
-        located.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        located.sort_unstable_by_key(|a| a.0);
         let mut idx = BufWriter::new(File::create(&index_path)?);
         idx.write_all(INDEX_MAGIC)?;
         idx.write_all(&(located.len() as u64).to_le_bytes())?;

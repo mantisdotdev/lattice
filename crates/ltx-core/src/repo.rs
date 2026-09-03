@@ -247,7 +247,7 @@ impl Repo {
                 }
             }
         }
-        out.sort_by(|a, b| b.oplog_seq.cmp(&a.oplog_seq));
+        out.sort_by_key(|c| std::cmp::Reverse(c.oplog_seq));
         out.dedup_by(|a, b| a.id == b.id);
         Ok(out)
     }
