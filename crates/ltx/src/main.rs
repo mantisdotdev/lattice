@@ -186,12 +186,10 @@ fn run(cli: &Cli) -> Result<u8> {
             // History is the checkpoint graph reachable from the current head,
             // which undo moves — so this view is invariant under undo-all
             // (ADR-15). The raw op-log is not history; it lives at
-            // `ltx internals oplog`. `--limit` keeps the most recent N, and
-            // applies to both renderings so they never disagree.
-            let mut checkpoints = repo.reachable_checkpoints()?;
-            if let Some(n) = limit {
-                checkpoints.truncate(*n);
-            }
+            // `ltx internals oplog`. The default-and-limit policy is in
+            // ltx-core (§8); the CLI only renders, and `--limit` applies to
+            // both renderings so they never disagree.
+            let checkpoints = repo.history(*limit)?;
             emit(
                 cli,
                 || {

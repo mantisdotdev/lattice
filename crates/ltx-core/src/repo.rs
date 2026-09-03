@@ -392,6 +392,17 @@ impl Repo {
         Ok(out)
     }
 
+    /// The history the user sees: reachable checkpoints, newest first,
+    /// optionally capped at `limit`. The default-and-limit policy lives here
+    /// rather than in the CLI (§8) — the CLI and the daemon API share it.
+    pub fn history(&self, limit: Option<usize>) -> Result<Vec<Checkpoint>> {
+        let all = self.reachable_checkpoints()?;
+        Ok(match limit {
+            Some(n) => all.into_iter().take(n).collect(),
+            None => all,
+        })
+    }
+
     // -------------------------------------------------------------- undo
 
     /// Reverse the most recent undoable operation on user-visible state.

@@ -115,13 +115,14 @@ if it lands, is a separate forward command, deferred.
 - Evidence for the "0 failures" claim — the `undo-property` harness at the gate's
   seed, on the reference machine:
 
-  ```
+  ```text
   $ ./target/release/undo-property --sequences 1000 --seed 20260903 --json
   {"emitted":{"save":4403,"undo":2159},"failures":0,"seed":20260903,"sequences":1000}
   ```
 
-  The full ≥100,000-sequence run is performed by the G1.3 harness on the
-  measurement machine (on tmpfs, where the throwaway repos cost no fsync).
+  Only this 1,000-sequence spot check was run here (fsync-bound on macOS). The
+  G1.3 harness performs the full-scale run it requires (`IN_PROCESS_SEQUENCES`)
+  on the measurement machine, on tmpfs where the throwaway repos cost no fsync.
 - The general undo surface (start, switch, assign, split, sync, redact, thin,
   lens, merge, workspace), redo-branch truncation, working-tree restoration for
   tree-mutating undo, and op-log compaction (ADR-13) are tracked follow-ups.
