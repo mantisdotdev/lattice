@@ -160,6 +160,30 @@ pub fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A stable identity for a filesystem object, WITHOUT following a final
+/// symlink, for detecting when two distinct names the filesystem folded
+/// together landed on the same object during checkout.
+///
+/// On Unix this is `(dev, ino)` from `symlink_metadata`: two names the
+/// filesystem folds into one share an inode, while two distinct symlinks to the
+/// same target do not (each link is its own inode). `None` means the platform
+/// cannot supply a cheap identity here — the caller then cannot distinguish a
+/// folded sibling from an unrelated pre-existing file, and overwrites, which is
+/// a documented Windows limitation rather than silent loss on Unix.
+#[cfg(unix)]
+pub fn file_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+pub fn file_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    // std's symlink_metadata does not expose a stable file index on Windows
+    // without opening the file, and opening would follow the link. Fold
+    // detection on a case-insensitive Windows volume is a documented gap.
+    None
+}
+
 /// Human-readable name for the current platform, for reports.
 pub fn platform_name() -> &'static str {
     if cfg!(windows) {

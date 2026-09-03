@@ -415,10 +415,12 @@ impl Repo {
             )));
         };
         let tree = Tree::from_bytes(&bytes)?;
-        // Names this checkout has already placed in THIS directory, keyed by
-        // the exact bytes. Used to tell "the filesystem folded two names
-        // together" apart from "an unrelated file was already there".
-        let mut placed: Vec<Vec<u8>> = Vec::new();
+        // Names this checkout has already written in THIS directory, each with
+        // the filesystem identity (inode) of the object it created. Used to
+        // tell "the filesystem folded two of our names onto one object" apart
+        // from "an unrelated file was already here" — the filesystem, not a
+        // guess about which names fold, is the authority.
+        let mut written_ids: Vec<(Vec<u8>, (u64, u64))> = Vec::new();
 
         for (name, node) in &tree.entries {
             // A tree entry name is a single path component by construction.
@@ -452,26 +454,30 @@ impl Repo {
             };
             let path = dest.join(&name_os);
 
-            // A fold collision is specifically: the path already exists AND a
-            // DIFFERENT name we placed in this directory folds together with
-            // this one on this filesystem. A pre-existing but unrelated file is
-            // not that — checkout overwrites it, which is the point of writing
-            // a checkpoint into a directory. The earlier code skipped any
-            // pre-existing path, silently dropping whole subtrees on a
-            // re-checkout or a populated destination.
-            if fs::symlink_metadata(&path).is_ok() {
-                if let Some(sibling) = placed.iter().find(|prior| folds_together(prior, name)) {
-                    report.collisions.push(Collision {
-                        path: String::from_utf8_lossy(name).into_owned(),
-                        collided_with: String::from_utf8_lossy(sibling).into_owned(),
-                        reason: "this filesystem does not distinguish these names \
-                                 (case folding or Unicode normalisation)"
-                            .to_string(),
-                    });
-                    continue;
+            // A fold collision is specifically: the path already exists AND it
+            // is the SAME filesystem object as a name we already wrote in this
+            // directory — the filesystem folded two distinct names into one.
+            // An unrelated pre-existing file is not that; checkout overwrites
+            // it, which is the point of writing a checkpoint into a directory.
+            // The authority is the inode, not a guess about which names fold:
+            // an earlier approximation missed real NFC/NFD and non-ASCII case
+            // folds and silently overwrote the sibling.
+            if let Ok(existing) = fs::symlink_metadata(&path) {
+                if let Some(id) = platform::file_identity(&existing) {
+                    if let Some((sibling, _)) = written_ids.iter().find(|(_, wid)| *wid == id) {
+                        report.collisions.push(Collision {
+                            path: String::from_utf8_lossy(name).into_owned(),
+                            collided_with: String::from_utf8_lossy(sibling).into_owned(),
+                            reason: "this filesystem does not distinguish these names \
+                                     (case folding or Unicode normalisation)"
+                                .to_string(),
+                        });
+                        continue;
+                    }
                 }
+                // Otherwise a pre-existing unrelated file (or, where identity is
+                // unavailable, a fold this platform cannot detect): overwrite.
             }
-            placed.push(name.clone());
             match node {
                 Node::Directory { tree } => {
                     fs::create_dir_all(&path)?;
@@ -533,6 +539,15 @@ impl Repo {
                         });
                     }
                     report.entries_written += 1;
+                }
+            }
+            // Record the identity of what we just wrote so a later name the
+            // filesystem folds onto it is detected as a collision, not
+            // silently overwritten. Reached only on a successful write — the
+            // unrepresentable-target arm above `continue`s before here.
+            if let Ok(meta) = fs::symlink_metadata(&path) {
+                if let Some(id) = platform::file_identity(&meta) {
+                    written_ids.push((name.clone(), id));
                 }
             }
         }
@@ -719,31 +734,17 @@ fn is_safe_component(name: &[u8]) -> bool {
         return false;
     }
     // '/' and NUL separate or terminate a path on every platform Lattice runs
-    // on; '\\' does so on Windows but is a legal byte in a Unix filename, so it
-    // is only rejected where it is actually a separator.
+    // on; '\\' and ':' do so on Windows (directory separator and drive/stream
+    // marker — "C:evil" is drive-relative and escapes the destination) but are
+    // legal bytes in a Unix filename, so they are rejected only where they are
+    // actually significant.
     if name.iter().any(|&b| b == b'/' || b == 0) {
         return false;
     }
-    if cfg!(windows) && name.contains(&b'\\') {
+    if cfg!(windows) && name.iter().any(|&b| b == b'\\' || b == b':') {
         return false;
     }
     true
-}
-
-/// Would these two names be the same file on a folding filesystem?
-///
-/// ASCII case folding plus a coarse NFC/NFD equivalence. Deliberately
-/// approximate: it only decides which sibling to NAME in a collision report,
-/// never whether a collision occurred — that is decided by asking the
-/// filesystem, which is the only authority on what it folds.
-fn folds_together(a: &[u8], b: &[u8]) -> bool {
-    let norm = |s: &[u8]| -> Vec<u8> {
-        s.iter()
-            .map(|c| c.to_ascii_lowercase())
-            .filter(|c| *c != 0xcc && *c != 0x81) // strip a common combining mark
-            .collect()
-    };
-    norm(a) == norm(b)
 }
 
 /// Unused import guard for BTreeMap in non-test builds.
@@ -906,6 +907,14 @@ mod tests {
         assert!(!is_safe_component(&[b'a', 0, b'b']));
         assert!(is_safe_component(b"normal.txt"));
         assert!(is_safe_component("café".as_bytes()));
+        // Drive-relative and backslash-separated names escape only on Windows,
+        // and a backslash is a legal byte in a Unix filename, so these are
+        // checked where they are actually significant.
+        #[cfg(windows)]
+        {
+            assert!(!is_safe_component(b"C:evil"), "drive-relative escapes dest");
+            assert!(!is_safe_component(&[b'a', b'\\', b'b']));
+        }
     }
 
     #[test]
@@ -968,6 +977,45 @@ mod tests {
             fs::read(out.join("pre-existing.txt")).unwrap(),
             b"keep",
             "an unrelated file is left alone"
+        );
+    }
+
+    #[test]
+    fn checkout_never_silently_drops_a_folded_sibling() {
+        // Two distinct byte-names that a folding filesystem merges into one:
+        // 'É' (C3 89) and 'é' (C3 A9) — a non-ASCII case pair. On a
+        // case-sensitive filesystem they are two files. Whatever the filesystem
+        // does, every tree entry must be either written or reported — never
+        // silently overwritten with entries_written claiming both landed. This
+        // is the case the earlier ASCII-only fold guess missed.
+        let (dir, mut repo) = repo();
+        let mut packer = PackWriter::new();
+        let n1 = tree::file_node(b"content-of-upper", 0o644, &mut packer);
+        let n2 = tree::file_node(b"content-of-lower", 0o644, &mut packer);
+        let mut t = Tree::new();
+        t.entries.insert("É.txt".as_bytes().to_vec(), n1);
+        t.entries.insert("é.txt".as_bytes().to_vec(), n2);
+        let tree_id = t.write(&mut packer).unwrap();
+        repo.store.write_pack(packer).unwrap();
+
+        let out = dir.path().join("dest");
+        fs::create_dir_all(&out).unwrap();
+        let mut report = CheckoutReport {
+            entries_written: 0,
+            collisions: Vec::new(),
+        };
+        repo.restore_tree(&tree_id, &out, &mut report).unwrap();
+
+        assert_eq!(
+            report.entries_written as usize + report.collisions.len(),
+            2,
+            "every entry must be written or reported, never silently dropped"
+        );
+        let on_disk = fs::read_dir(&out).unwrap().count() as u64;
+        assert_eq!(
+            report.entries_written, on_disk,
+            "entries_written must equal the files actually present, so a folded \
+             sibling is never counted as written when it overwrote another"
         );
     }
 

@@ -393,11 +393,17 @@ impl OpLog {
     /// edited historical entry changes its own id, which no longer matches the
     /// `prev` its successor recorded.
     pub fn verify_chain(&self) -> Result<Option<String>> {
-        // A tampered entry may carry a `prev` or `id` shorter than 12 bytes.
-        // This function exists to REPORT such tampering, so it must never panic
-        // slicing the very field it is inspecting.
+        // A tampered entry may carry a `prev` or `id` that is short OR whose
+        // 12th byte falls inside a multibyte UTF-8 codepoint. This function
+        // exists to REPORT such tampering, so it must never panic slicing the
+        // very field it is inspecting — hence a char-boundary-safe truncation,
+        // not a raw byte index.
         fn short(s: &str) -> &str {
-            &s[..s.len().min(12)]
+            let mut end = s.len().min(12);
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            &s[..end]
         }
         let mut expected_prev = "0".repeat(64);
         for entry in self.entries()? {
@@ -611,11 +617,13 @@ mod tests {
             log.append(Operation::Thin { collected: 1 }).is_err(),
             "a failed commit must not report the entry as durable"
         );
-        // The log is now poisoned: a further append fails rather than
-        // silently corrupting the chain.
+        // Clear the fault. A log that merely dropped-and-forgot the failed
+        // batch would now accept an append; a POISONED log stays unwritable.
+        // This is what distinguishes the fix from the old behaviour.
+        log.fail_commits.store(false, Ordering::SeqCst);
         assert!(
             log.append(Operation::Thin { collected: 2 }).is_err(),
-            "a poisoned log must refuse further appends"
+            "a poisoned log must refuse further appends even after the fault clears"
         );
         drop(log);
 
@@ -659,6 +667,40 @@ mod tests {
         assert!(
             broken.is_some(),
             "a tampered entry must be reported, not panicked on"
+        );
+    }
+
+    #[test]
+    fn verify_chain_does_not_panic_on_a_multibyte_field_at_byte_twelve() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oplog.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+        }
+        // Tamper entry 1's `prev` to 11 ASCII bytes + a 3-byte codepoint, so
+        // byte index 12 lands INSIDE the euro sign — a raw [..12] slice would
+        // panic "not a char boundary".
+        let db = Database::create(&path).unwrap();
+        {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(ENTRIES).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut e: Entry = serde_json::from_slice(&raw).unwrap();
+                e.prev = format!("{}\u{20AC}", "a".repeat(11));
+                let bytes = serde_json::to_vec(&e).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        drop(db);
+
+        let log = OpLog::open(&path).unwrap();
+        let broken = log.verify_chain().unwrap();
+        assert!(
+            broken.is_some(),
+            "a hostile multibyte field must be reported, not panicked on"
         );
     }
 
