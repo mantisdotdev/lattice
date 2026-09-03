@@ -320,7 +320,8 @@ impl Repo {
     /// if some Save entry references its id and its body authenticates — so a
     /// file that merely looks like a checkpoint never appears here.
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>> {
-        let mut seq_by_id: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut seq_by_id: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
         for entry in self.oplog.entries()? {
             if let Operation::Save { checkpoint, .. } = &entry.operation {
                 seq_by_id.insert(checkpoint.clone(), entry.seq);

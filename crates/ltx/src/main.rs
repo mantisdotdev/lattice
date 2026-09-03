@@ -220,10 +220,8 @@ fn run(cli: &Cli) -> Result<u8> {
                     // sentence: the words the user reads have to match the
                     // exit code. The problems are listed rather than hidden.
                     if !healthy {
-                        let mut out = format!(
-                            "NOT verified — {} problem(s) found:",
-                            report.errors.len()
-                        );
+                        let mut out =
+                            format!("NOT verified — {} problem(s) found:", report.errors.len());
                         for e in &report.errors {
                             out.push_str(&format!("\n  - {e}"));
                         }

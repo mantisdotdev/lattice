@@ -622,7 +622,10 @@ mod tests {
         // On reopen from durable state the chain is intact and gap-free — only
         // the Init that actually committed survives.
         let log = OpLog::open(&path).unwrap();
-        assert!(log.verify_chain().unwrap().is_none(), "chain must stay intact");
+        assert!(
+            log.verify_chain().unwrap().is_none(),
+            "chain must stay intact"
+        );
         assert_eq!(log.len().unwrap(), 1, "only the durable Init survived");
     }
 
