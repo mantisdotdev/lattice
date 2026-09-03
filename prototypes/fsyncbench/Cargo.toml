@@ -1,0 +1,11 @@
+[package]
+name = "fsyncbench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "ADR-3/ADR-4 prototype: what does one durable op-log append actually cost?"
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+[profile.release]
+opt-level = 3
