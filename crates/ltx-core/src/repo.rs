@@ -238,23 +238,26 @@ impl Repo {
     }
 
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
-        // The HEAD file is a convenience cache; the authoritative record of the
-        // current checkpoint is the durable op-log head (redb, crash-atomic).
-        // If the file is present and names a real checkpoint, use it. If it is
-        // missing, empty, or torn — the exact residue of a crash mid-publish —
-        // fall back to the op-log rather than reporting "nothing saved", which
-        // would silently orphan history that was in fact committed.
+        // The durable op-log head in redb is the authoritative, transactional
+        // record of the current checkpoint. The .lattice/HEAD file is a
+        // human-readable cache written AFTER the redb head (in both save and
+        // undo), so it can only ever be equal to or STALER than redb — never
+        // fresher. A crash between the two writes must NOT let the stale file
+        // override redb, or a crash mid-undo would resurrect the undone
+        // checkpoint and a crash mid-save would mask a committed one. So redb is
+        // consulted first; the file is a fallback only when redb records no head
+        // (a repository created before heads were tracked, or a manual edit).
+        if let Some(cp) = self.durable_head_checkpoint()? {
+            return Ok(Some(cp));
+        }
         let path = self.head_pointer_path();
         if let Ok(raw) = fs::read_to_string(&path) {
             let id = raw.trim();
             if ChunkId::from_hex(id).is_some() {
-                if let Some(cp) = self.checkpoint(id)? {
-                    return Ok(Some(cp));
-                }
+                return self.checkpoint(id);
             }
         }
-        // File absent or unusable: recover from the durable op-log head.
-        self.durable_head_checkpoint()
+        Ok(None)
     }
 
     /// Resolve the current checkpoint from the durable op-log head alone.
@@ -367,10 +370,23 @@ impl Repo {
                 ));
             }
             let parent = cp.parent.clone();
+            let cp_id = cp.id.clone();
             out.push(cp);
             cursor = match parent {
-                Some(pid) => self.checkpoint(&pid)?,
                 None => None,
+                Some(pid) => match self.checkpoint(&pid)? {
+                    Some(parent) => Some(parent),
+                    // A named parent that does not resolve is corruption — a
+                    // hole in the history spine — not a silent end of the walk.
+                    // `undo` treats the same condition the same way.
+                    None => {
+                        return Err(Error::Corrupt(format!(
+                            "checkpoint {} names a parent {} that is not present",
+                            crate::short_id(&cp_id),
+                            crate::short_id(&pid)
+                        )))
+                    }
+                },
             };
         }
         Ok(out)
@@ -1410,6 +1426,28 @@ mod tests {
             repo.head_checkpoint().unwrap().unwrap().id,
             a.id,
             "the head stays at the root"
+        );
+    }
+
+    #[test]
+    fn a_stale_head_file_does_not_override_the_durable_redb_head() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        let a = repo.save("one").unwrap();
+        fs::write(dir.path().join("f"), b"2").unwrap();
+        let b = repo.save("two").unwrap();
+
+        // The residue of a crash mid-undo (or mid-save): the durable redb head
+        // moved to `a`, but the HEAD file still names `b` because
+        // write_head_pointer had not run. The durable redb head must win — a
+        // staler cache file must not resurrect the old head.
+        repo.oplog().set_head("checkpoint", a.oplog_seq).unwrap();
+        fs::write(repo.head_pointer_path(), &b.id).unwrap();
+
+        assert_eq!(
+            repo.head_checkpoint().unwrap().unwrap().id,
+            a.id,
+            "the durable redb head must win over a staler HEAD file"
         );
     }
 
