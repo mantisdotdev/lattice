@@ -83,6 +83,48 @@ is validated on (macOS, Linux). They are tracked for follow-up.
 - **Checkpoint lookup performance**: `checkpoint()` scans all chunk addresses.
   Correct but O(store); a checkpoint index is a documented later refinement.
 
+## Deferred after CodeRabbit's review of the remediation (tracked follow-ups)
+
+CodeRabbit reviewed the remediation and raised further findings. The genuinely
+open bugs were fixed (destination-symlink traversal / CWE-59, the mode-loss
+report text, the §8 checkout policy, duplicate tree names, tree-size bound,
+char-boundary id slicing, the poison test seam, the toolchain-action pin, and a
+merge-gate bug that had made the finding count silently zero). The following were
+deferred with the user's explicit sign-off, and are tracked here:
+
+- **Windows crash-durability protocol** (`platform.rs`, Critical): `sync_dir` is a
+  no-op on Windows, so an acknowledged rename is not guaranteed durable across a
+  power loss the way it is on Unix. A correct Windows commit protocol needs
+  Windows-specific work (not `FlushFileBuffers` on a directory handle, which is
+  not a guaranteed barrier) and a Windows host to validate. **Follow-up: a
+  Windows-tested durability change.**
+- **Windows symlink kind** (`platform.rs`, Critical): `symlink()` picks file-vs-dir
+  from `target.is_dir()` resolved against the process CWD, which can mis-create a
+  relative or dangling directory link. The fix stores the kind in `Node::Symlink`
+  — a tree-format change affecting all platforms — so it is deferred to the same
+  Windows-tested effort.
+- **Windows folded-sibling detection** (`platform.rs` / `repo.rs`, Critical):
+  `file_identity` is inode-based and returns `None` on Windows, so fold detection
+  (and thus the no-silent-overwrite guarantee) is Unix-only for now; the
+  regression test is `#[cfg(unix)]`. **Follow-up: a Windows file-identity
+  implementation and matching test.**
+- **Cross-pack dedup trusts the content-address index** (`store.rs`, Critical):
+  by design — the standard content-addressed contract (git/restic/borg). Re-reading
+  every candidate on each save is O(content) and blows the G1.5 latency budget;
+  post-write bit-rot is surfaced by `verify` and recovered by refetch. Documented
+  at `PackWriter::retain_unknown`.
+- **Streaming save/checkout and a segment cache** (`store.rs`, Major, perf): save
+  and checkout buffer whole files, and checkout re-inflates a segment once per
+  chunk. The 1.1 GB case passes today; these are optimisations the G1.5/G1.9
+  gates will measure, per "optimise only a measured hotspot".
+- **§4.2 seven-noun vocabulary in CLI text** (`main.rs`, Major): the vocabulary
+  lint is gate G2.3's scope, with its own harness; the cleanup lands there rather
+  than being pre-empted in the engine PR.
+- **G1.2 fold-coverage measured from a committed manifest** (`harness/g1/…`,
+  Major): the harness is frozen (§0.3); changing it to probe the live filesystem
+  is a harness amendment, not an engine change. ADR-14 records the current
+  manifest-driven approach.
+
 ## What the exercise confirmed
 
 The most serious finding — the un-fsynced HEAD — was reproduced empirically, and
