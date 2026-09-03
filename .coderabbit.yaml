@@ -60,6 +60,13 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # Effectively never auto-pause. CodeRabbit stops reviewing a branch it
+    # considers "under active development", which on this project is every
+    # branch -- the house rule is that nothing merges until its findings reach
+    # zero, so a paused reviewer is a blocked merge, not a courtesy. The setting
+    # is a commit COUNT, not a boolean, and its documentation says "Set to 0 to
+    # disable" -- a large number would only postpone the pause.
+    auto_pause_after_reviewed_commits: 0
     base_branches:
       - main
 
