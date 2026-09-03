@@ -1,0 +1,29 @@
+# Repositories mined for G0.3 (merge-replay corpus) and G0.4 (refactoring corpus).
+# Chosen for: merge-rich history, language diversity (>=5 required, 9 present),
+# maintained-in-public, and a size that permits full-history clones.
+# slug	primary_language	why_included
+git/git	C	integration-heavy history; Junio's merge workflow yields many real merges
+redis/redis	C	C systems code, long history, active merge use
+postgres/postgres	C	deep history, conservative merge discipline — a contrast case
+django/django	Python	large Python codebase with a long, well-documented refactor record
+pandas-dev/pandas	Python	heavy refactoring; many file moves
+numpy/numpy	Python	Python+C mix, deep history
+ansible/ansible	Python	very large module tree; frequent cross-directory moves
+scipy/scipy	Python	scientific Python, long history
+rails/rails	Ruby	Ruby, merge-heavy, famous for large-scale renames
+ruby/ruby	Ruby	language implementation; C+Ruby mix
+symfony/symfony	PHP	PHP, monorepo-ish component layout, many moves
+microsoft/TypeScript	TypeScript	compiler in TS; deep history
+sveltejs/svelte	TypeScript	modern TS/JS, restructured repeatedly
+vuejs/core	TypeScript	TS, monorepo packages layout
+facebook/react	JavaScript	JS, very large refactor record
+nodejs/node	JavaScript	JS+C++, huge merge count
+moby/moby	Go	Go, historic large-scale package moves
+hashicorp/terraform	Go	Go, deep history, many internal moves
+prometheus/prometheus	Go	Go, clean merge history
+golang/go	Go	language implementation; deep history
+apache/kafka	Java	Java/Scala, merge-heavy
+netty/netty	Java	Java, long history
+spring-projects/spring-framework	Java	Java, extensive package restructuring
+tokio-rs/tokio	Rust	Rust async runtime; crate reorganisations
+rust-lang/rust	Rust	bors-merge history: an unusually rich merge corpus
