@@ -251,18 +251,10 @@ fn run(cli: &Cli) -> Result<u8> {
 
         Command::Checkout { checkpoint, into } => {
             let repo = Repo::discover(&cwd)?;
-            let id = match checkpoint {
-                Some(id) => id.clone(),
-                None => match repo.head_checkpoint()? {
-                    Some(cp) => cp.id,
-                    None => {
-                        return Err(ltx_core::Error::NotFound(
-                            "nothing has been saved yet, so there is nothing to write out".into(),
-                        ))
-                    }
-                },
-            };
-            let report = repo.checkout(&id, into)?;
+            // The default-to-current policy lives in ltx-core (§8); the CLI only
+            // passes the optional argument through and renders the result.
+            let report = repo.checkout_into(checkpoint.as_deref(), into)?;
+            let id = report.checkpoint.clone();
             let n = report.entries_written;
             let collisions = report.collisions.clone();
             emit(

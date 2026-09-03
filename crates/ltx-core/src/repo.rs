@@ -398,11 +398,34 @@ impl Repo {
         };
         fs::create_dir_all(dest)?;
         let mut report = CheckoutReport {
+            checkpoint: cp.id.clone(),
             entries_written: 0,
             collisions: Vec::new(),
         };
         self.restore_tree(&cp.tree, dest, &mut report)?;
         Ok(report)
+    }
+
+    /// Materialise a checkpoint into `dest`, defaulting to the current one.
+    ///
+    /// `None` selects the current checkpoint; if nothing has been saved, that
+    /// is an error. The default-to-current policy lives here rather than in the
+    /// CLI, which §8 (G5.5) requires: the CLI must hold no decision the API
+    /// lacks.
+    pub fn checkout_into(&self, checkpoint: Option<&str>, dest: &Path) -> Result<CheckoutReport> {
+        let id = match checkpoint {
+            Some(id) => id.to_string(),
+            None => {
+                self.head_checkpoint()?
+                    .ok_or_else(|| {
+                        Error::NotFound(
+                            "nothing has been saved yet, so there is nothing to write out".into(),
+                        )
+                    })?
+                    .id
+            }
+        };
+        self.checkout(&id, dest)
     }
 
     fn restore_tree(&self, tree_id: &str, dest: &Path, report: &mut CheckoutReport) -> Result<()> {
@@ -478,6 +501,20 @@ impl Repo {
                 // Otherwise a pre-existing unrelated file (or, where identity is
                 // unavailable, a fold this platform cannot detect): overwrite.
             }
+
+            // Never write THROUGH a pre-existing symlink at this path:
+            // create_dir_all and fs::write both follow a final symlink, so a
+            // link left in the destination (by an earlier checkout, or a
+            // hostile actor) could redirect the write outside dest — a
+            // path-traversal / link-following hole (CWE-59). Remove it first;
+            // checkout replaces whatever is here. A folded sibling we wrote was
+            // already caught above, so this only clears an unrelated link.
+            if let Ok(meta) = fs::symlink_metadata(&path) {
+                if meta.file_type().is_symlink() {
+                    fs::remove_file(&path)?;
+                }
+            }
+
             match node {
                 Node::Directory { tree } => {
                     fs::create_dir_all(&path)?;
@@ -535,16 +572,18 @@ impl Repo {
                     fs::write(&path, &content)?;
                     platform::set_file_mode(&path, *mode)?;
                     if platform::mode_is_lossy_here(*mode) {
-                        // Named, not silent: on Windows the executable bit does
-                        // not survive, and a user whose script will not run
-                        // deserves to be told why.
+                        // Named, not silent. The lost bits vary — the executable
+                        // bit, or the group/other distinctions of a mode like
+                        // 0o640 — so the report states the mode that could not
+                        // be recorded rather than naming one specific bit.
                         report.collisions.push(Collision {
                             path: String::from_utf8_lossy(name).into_owned(),
                             collided_with: String::new(),
                             reason: format!(
                                 "written, but this platform ({}) cannot record \
-                                 the executable bit",
-                                platform::platform_name()
+                                 the permission mode {:04o}",
+                                platform::platform_name(),
+                                mode & 0o777
                             ),
                         });
                     }
@@ -717,6 +756,8 @@ pub struct Collision {
 /// What a checkout managed to write.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckoutReport {
+    /// The checkpoint that was materialised (its authenticated address).
+    pub checkpoint: String,
     pub entries_written: u64,
     /// Names this filesystem cannot hold alongside one already written. Empty
     /// on a case-sensitive filesystem.
@@ -948,6 +989,7 @@ mod tests {
         let out = dir.path().join("dest");
         fs::create_dir_all(&out).unwrap();
         let mut report = CheckoutReport {
+            checkpoint: String::new(),
             entries_written: 0,
             collisions: Vec::new(),
         };
@@ -1021,6 +1063,7 @@ mod tests {
         let out = dir.path().join("dest");
         fs::create_dir_all(&out).unwrap();
         let mut report = CheckoutReport {
+            checkpoint: String::new(),
             entries_written: 0,
             collisions: Vec::new(),
         };
@@ -1036,6 +1079,40 @@ mod tests {
             report.entries_written, on_disk,
             "entries_written must equal the files actually present, so a folded \
              sibling is never counted as written when it overwrote another"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_does_not_write_through_a_destination_symlink() {
+        let (dir, mut repo) = repo();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/f.txt"), b"safe").unwrap();
+        let cp = repo.save("one").unwrap();
+
+        // Destination pre-seeded with a symlink "sub" pointing OUTSIDE dest.
+        let out = dir.path().join("dest");
+        fs::create_dir_all(&out).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, out.join("sub")).unwrap();
+
+        repo.checkout(&cp.id, &out).unwrap();
+
+        assert!(
+            out.join("sub/f.txt").exists(),
+            "content must be written under dest"
+        );
+        assert!(
+            !outside.join("f.txt").exists(),
+            "checkout must not follow a destination symlink and write outside dest"
+        );
+        assert!(
+            !fs::symlink_metadata(out.join("sub"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the destination symlink must be replaced by a real directory"
         );
     }
 
