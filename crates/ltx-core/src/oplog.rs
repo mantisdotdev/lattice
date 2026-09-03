@@ -299,7 +299,10 @@ impl OpLog {
             let (guard, _) = self.ready.wait_timeout(state, GROUP_WINDOW).unwrap();
             state = guard;
 
-            let batch: Vec<Entry> = state.pending.drain(..).collect();
+            // `mem::take` rather than `drain(..).collect()`: same effect,
+            // one allocation instead of two, and it is what
+            // `clippy::drain_collect` asks for.
+            let batch: Vec<Entry> = std::mem::take(&mut state.pending);
             drop(state);
 
             let result = self.commit_batch(&batch);

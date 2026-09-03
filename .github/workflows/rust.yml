@@ -37,9 +37,13 @@ jobs:
             echo "No Rust workspace yet (Stage G0 forbids product code). Skipping."
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      # No version here: the action reads rust-toolchain.toml, so CI and every
+      # developer machine run the same compiler and the same lints. `@stable`
+      # floats, and a floating toolchain made G1.12's result depend on the day.
+      - uses: dtolnay/rust-toolchain@master
         if: steps.guard.outputs.exists == 'true'
         with:
+          toolchain: "1.96.0"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2

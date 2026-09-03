@@ -1,0 +1,14 @@
+# One source of truth for the toolchain.
+#
+# CI previously used `dtolnay/rust-toolchain@stable`, which floats: the runner
+# resolves whatever stable is on the day. That is how PR #3 failed on a
+# `clippy::drain_collect` lint that no locally installable toolchain raised,
+# leaving "clippy clean locally" unverifiable against what CI would actually run.
+#
+# Pinning costs us new lints until someone bumps this deliberately. That is the
+# right trade for a project where CI green is a HARD gate (G1.12): a gate whose
+# result depends on the day it ran is not a measurement.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
