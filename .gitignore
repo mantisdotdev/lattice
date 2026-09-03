@@ -12,3 +12,6 @@ Cargo.lock.bak
 /.lattice/
 __pycache__/
 *.pyc
+harness/lib/iofault/*.dylib
+harness/lib/iofault/*.so
+harness/lib/iofault/*.o

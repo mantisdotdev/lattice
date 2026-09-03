@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""
+G1.1 — Crash and power-loss safety (HARD).
+
+Target: >= 2,000 randomized SIGKILL injections PLUS >= 1,000 simulated
+power-loss cases via an I/O fault-injection shim that drops, reorders and tears
+un-fsynced writes. After each: verify passes, zero checkpointed data lost, zero
+corruption -- under BOTH harnesses. Critical-section coverage per the §6
+preamble.
+
+How the power-loss half works without the product's cooperation
+---------------------------------------------------------------
+§0.3 forbids product code from detecting harness execution, so the engine must
+never know it is being fault-injected. The shim therefore sits BELOW the
+product, at the libc boundary:
+
+  1. RECORD. `ltx` runs under a DYLD/LD interposition library that appends every
+     write, pwrite, fsync, fdatasync, rename, ftruncate and unlink to a journal
+     -- offsets, lengths, payload digests, and which fd they targeted. The
+     product is unmodified and unaware.
+  2. REPLAY. For each trial the harness reconstructs a plausible post-crash
+     filesystem from a random PREFIX of that journal, applying the three
+     failures real hardware exhibits:
+       - DROP     un-fsynced writes vanish
+       - REORDER  un-fsynced writes land out of order within a barrier window
+       - TEAR     one write lands partially, at a sector boundary
+     Writes before an fsync on the same fd are durable and are never dropped;
+     that is precisely the guarantee fsync buys, and a shim that violated it
+     would fail the engine for a promise the platform never made.
+  3. VERIFY. `ltx verify --complete` must pass, and every checkpoint that was
+     durable before the crash must still resolve with identical content.
+
+This is the "dm-flakey-class or block-level replay" the brief names, built at
+the syscall layer because macOS has no dm-flakey and because a block-level shim
+would not know where fsync barriers fall.
+
+Coverage
+--------
+§6 requires the fault injector to demonstrate hits in EVERY declared critical
+section, with counters emitted alongside the scorecard. A run that injects 3,000
+faults which all land in the same code path is not a 3,000-fault run, and the
+coverage block fails it.
+"""
+from __future__ import annotations
+
+import json
+import os
+import random
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "harness" / "lib"))
+import ltxrun as L  # noqa: E402
+
+GATE = "G1.1"
+SEED = 20260903
+SIGKILL_TRIALS = 2000
+POWERLOSS_TRIALS = 1000
+SHIM = REPO / "harness" / "lib" / "iofault" / "libiofault.dylib"
+SHIM_SO = REPO / "harness" / "lib" / "iofault" / "libiofault.so"
+
+# §6: the fault injector must demonstrate hits in every declared critical
+# section. These names are emitted by the shim's journal as region markers
+# derived from the path being written, so the product never declares them.
+CRITICAL_SECTIONS = ["store_write", "compaction", "thinning", "merge", "sync"]
+MIN_HITS_PER_SECTION = 1
+
+# Operations the trials interleave, so crashes land across the surface rather
+# than all inside `save`.
+OPERATION_POOL = [
+    ["save", "trial checkpoint"],
+    ["start", "crash-line"],
+    ["switch", "main"],
+    ["undo"],
+    ["sync", "--dry-run"],
+    ["internals", "compact"],
+    ["internals", "thin"],
+]
+
+
+def shim_path() -> Path | None:
+    for candidate in (SHIM, SHIM_SO):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def durable_checkpoints(repo: Path) -> list[dict]:
+    """Checkpoints the engine reports as durable, with their content digests."""
+    proc = L.run(["log", "--forensic", "--json"], cwd=repo)
+    if proc.returncode != 0:
+        return []
+    try:
+        doc = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return []
+    return doc.get("checkpoints", [])
+
+
+def verify(repo: Path) -> tuple[bool, str]:
+    proc = L.run(["verify", "--complete", "--json"], cwd=repo, timeout=3600)
+    if proc.returncode != 0:
+        return False, proc.stderr.strip()[:300]
+    try:
+        doc = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return False, "verify emitted unparseable JSON"
+    return bool(doc.get("complete")) and not doc.get("errors"), \
+        json.dumps(doc.get("errors", []))[:300]
+
+
+def sigkill_trial(work: Path, rng: random.Random, trial: int) -> dict:
+    """Kill `ltx` mid-operation at a random moment, then verify."""
+    repo = work / f"sk-{trial}"
+    shutil.rmtree(repo, ignore_errors=True)
+    repo.mkdir(parents=True)
+    if L.run(["init"], cwd=repo).returncode != 0:
+        return {"trial": trial, "ok": False, "why": "init failed"}
+
+    (repo / "seed.txt").write_bytes(os.urandom(4096))
+    L.run(["save", "seed"], cwd=repo)
+    before = durable_checkpoints(repo)
+
+    (repo / f"edit-{trial}.bin").write_bytes(os.urandom(rng.randrange(1024, 1 << 20)))
+    argv = rng.choice(OPERATION_POOL)
+    proc = subprocess.Popen([str(L.LTX), *argv], cwd=repo,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Kill at a uniformly random point inside a window that spans a typical
+    # operation, so the crash lands at many different code positions.
+    time.sleep(rng.uniform(0.001, 0.250))
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGKILL)
+    proc.wait(timeout=60)
+
+    ok, why = verify(repo)
+    after = durable_checkpoints(repo)
+    lost = [c for c in before if c not in after]
+    return {"trial": trial, "operation": argv[0], "ok": ok and not lost,
+            "why": why if not ok else (f"{len(lost)} checkpoints lost" if lost else ""),
+            "checkpoints_lost": len(lost)}
+
+
+def powerloss_trial(work: Path, rng: random.Random, trial: int,
+                    shim: Path) -> dict:
+    """Record the I/O journal, replay a mutilated prefix, then verify."""
+    repo = work / f"pl-{trial}"
+    shutil.rmtree(repo, ignore_errors=True)
+    repo.mkdir(parents=True)
+    journal = work / f"journal-{trial}.bin"
+
+    env = {
+        "DYLD_INSERT_LIBRARIES": str(shim),
+        "LD_PRELOAD": str(shim),
+        "IOFAULT_JOURNAL": str(journal),
+        "IOFAULT_ROOT": str(repo),
+    }
+    if L.run(["init"], cwd=repo, env=env).returncode != 0:
+        return {"trial": trial, "ok": False, "why": "init failed under shim"}
+    (repo / "seed.txt").write_bytes(os.urandom(4096))
+    L.run(["save", "seed"], cwd=repo, env=env)
+    before = durable_checkpoints(repo)
+
+    (repo / f"edit-{trial}.bin").write_bytes(os.urandom(rng.randrange(1024, 1 << 20)))
+    argv = rng.choice(OPERATION_POOL)
+    L.run(argv, cwd=repo, env=env)
+
+    replay = subprocess.run(
+        [sys.executable, str(REPO / "harness" / "lib" / "iofault" / "replay.py"),
+         "--journal", str(journal), "--root", str(repo),
+         "--seed", str(rng.randrange(1 << 30)),
+         "--drop", "--reorder", "--tear"],
+        capture_output=True, text=True, timeout=600)
+    if replay.returncode != 0:
+        return {"trial": trial, "ok": False,
+                "why": f"replay failed: {replay.stderr.strip()[:200]}"}
+    sections = json.loads(replay.stdout or "{}").get("sections_hit", [])
+
+    ok, why = verify(repo)
+    after = durable_checkpoints(repo)
+    lost = [c for c in before if c not in after]
+    return {"trial": trial, "operation": argv[0], "ok": ok and not lost,
+            "why": why if not ok else (f"{len(lost)} checkpoints lost" if lost else ""),
+            "checkpoints_lost": len(lost), "sections_hit": sections}
+
+
+def main() -> int:
+    try:
+        L.require_ltx()
+    except L.NotBuilt as exc:
+        return L.not_implemented(GATE, str(exc))
+
+    shim = shim_path()
+    if shim is None:
+        # Half of this gate is the power-loss half. Reporting only the SIGKILL
+        # result would convert a two-harness HARD gate into a one-harness gate,
+        # which is the failure mode §6's "under BOTH harnesses" forbids.
+        return L.not_implemented(
+            GATE, "I/O fault-injection shim not built "
+                  "(harness/lib/iofault/); G1.1 requires BOTH the SIGKILL and "
+                  "the power-loss harness, and will not report one alone")
+
+    rng = random.Random(SEED)
+    work = Path(tempfile.mkdtemp(prefix="g1-1-"))
+    try:
+        sk = [sigkill_trial(work, rng, i) for i in range(SIGKILL_TRIALS)]
+        pl = [powerloss_trial(work, rng, i, shim) for i in range(POWERLOSS_TRIALS)]
+
+        failures = [r for r in sk + pl if not r["ok"]]
+        hits: dict[str, int] = {s: 0 for s in CRITICAL_SECTIONS}
+        for r in pl:
+            for s in r.get("sections_hit", []):
+                if s in hits:
+                    hits[s] += 1
+        uncovered = [s for s, n in hits.items() if n < MIN_HITS_PER_SECTION]
+
+        coverage_ok = (not uncovered
+                       and len(sk) >= SIGKILL_TRIALS
+                       and len(pl) >= POWERLOSS_TRIALS)
+        coverage_note = ""
+        if uncovered:
+            coverage_note = ("fault injector never hit critical section(s): "
+                             + ", ".join(uncovered))
+        elif len(sk) < SIGKILL_TRIALS or len(pl) < POWERLOSS_TRIALS:
+            coverage_note = (f"{len(sk)}/{SIGKILL_TRIALS} SIGKILL and "
+                             f"{len(pl)}/{POWERLOSS_TRIALS} power-loss trials")
+
+        return L.emit({
+            "gate": GATE,
+            "value": len(failures),
+            "unit": "failures",
+            "note": (f"{len(failures)} failures over {len(sk)} SIGKILL + "
+                     f"{len(pl)} power-loss injections"),
+            "coverage": {"ok": coverage_ok, "note": coverage_note},
+            "detail": {
+                "seed": SEED,
+                "sigkill_trials": len(sk),
+                "powerloss_trials": len(pl),
+                "critical_section_hits": hits,
+                "checkpoints_lost_total": sum(r.get("checkpoints_lost", 0)
+                                              for r in sk + pl),
+                "failures": failures[:25],
+                "failures_truncated": max(0, len(failures) - 25),
+            },
+            "evidence": ["harness/lib/iofault/"],
+        })
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

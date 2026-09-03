@@ -39,24 +39,69 @@
     "harness": "harness/g0/g0_8_spec_package.py",
     "sha256": "25b00a42ebf34155ea7d917e4acda6d6099609a22f3dd21e1db0b7f0c1132abf"
   },
+  "G1.1": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_1_crash_safety.py",
+    "sha256": "aa8de34997feb2017be361c46370ed4d02c410b6b546a3f133fee20aa20e0c21"
+  },
+  "G1.10": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_10_fuzzing.py",
+    "sha256": "598dd3b9e36398b7f2e5145b6d91b8290d766023595c2026ff84c60f8bbf8ac3"
+  },
+  "G1.11": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_11_mutation.py",
+    "sha256": "0cfb29ce16558b376cbcb9d991b720690b1b0e445660221a0c4eff86b78aa247"
+  },
   "G1.12": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "frozen_at": "2026-09-03T07:37:08Z",
     "harness": "harness/g1/g1_12_cross_platform.py",
     "sha256": "48e5347e142d033abcbbcc2a37198d886c644f6bb7dce22e7ac382db2c2056e3"
   },
   "G1.13": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "frozen_at": "2026-09-03T07:37:08Z",
     "harness": "harness/g1/g1_13_licences.py",
     "sha256": "10b58d572da3a8e9e16c91a7d14df61a53419ca106f8895d4fe2c051bf9982af"
   },
   "G1.2": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "frozen_at": "2026-09-03T07:37:08Z",
     "harness": "harness/g1/g1_2_byte_fidelity.py",
     "sha256": "ddc946bc20d8382fd852d5fb0344518f5c415b9a78c0594bb95971d37ca56d90"
   },
   "G1.3": {
-    "frozen_at": "2026-09-03T06:15:29Z",
+    "frozen_at": "2026-09-03T07:37:08Z",
     "harness": "harness/g1/g1_3_universal_undo.py",
     "sha256": "8638b30297218eecf858d8fa6c286d66aabea65e3801f2c878999530b9547fdb"
+  },
+  "G1.4": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_4_concurrency.py",
+    "sha256": "0ac827abc60ee8b02a081c4243aff9946ef91b18a5b3b6a5ff3b7b3cc42a7d6d"
+  },
+  "G1.5": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_5_status_latency.py",
+    "sha256": "a45ca7bc4bcc95b408be748ee3ba8387aed741a68e28453d5fc3aab8b08ac471"
+  },
+  "G1.6": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_6_save_latency.py",
+    "sha256": "07480b0f779c3855c6c3e1cea966c723901c0196ff59151bfb50b3c764415f01"
+  },
+  "G1.7": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_7_switch_log_latency.py",
+    "sha256": "7f9b95f29e5741834c61babf5880f67218fc8da8a9f1b183ea72dab42c12f295"
+  },
+  "G1.8": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_8_chunking.py",
+    "sha256": "b2cb0c2ce481d9585ef2be0d5d2da1fb6d881b67b214f46dd1a0e4b879a512ad"
+  },
+  "G1.9": {
+    "frozen_at": "2026-09-03T07:37:08Z",
+    "harness": "harness/g1/g1_9_storage_honesty.py",
+    "sha256": "c25e2706be957dc00214d355c20300cc87b1fced22bb143156b204342f5c0bbc"
   }
 }
