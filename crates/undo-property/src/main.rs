@@ -97,11 +97,13 @@ fn ephemeral_base() -> Option<std::path::PathBuf> {
 
 /// Run one sequence; return true on a round-trip failure and record emissions.
 fn run_sequence(base: Option<&Path>, rng: &mut Rng, emitted: &mut BTreeMap<String, u64>) -> bool {
-    let dir = match base {
-        Some(b) => tempfile::tempdir_in(b),
-        None => tempfile::tempdir(),
-    }
-    .expect("tempdir");
+    // Prefer the ephemeral (tmpfs) base, but fall back to the default tempdir
+    // if it is present-but-unusable (e.g. a read-only /dev/shm), so the harness
+    // still runs and emits its JSON rather than aborting.
+    let dir = base
+        .and_then(|b| tempfile::tempdir_in(b).ok())
+        .or_else(|| tempfile::tempdir().ok())
+        .expect("tempdir");
     let root = dir.path();
     std::fs::write(root.join("seed.txt"), b"seed\n").expect("seed write");
 

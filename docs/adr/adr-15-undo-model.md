@@ -93,6 +93,17 @@ membership check.
   both must be fixed before the general command surface (start, switch, …, merge)
   lands, and the fan-out question may be a harness/spec decision.
 
+## Undo is monotonic; it is not itself undoable yet
+
+Undo walks toward the root and stops there, so undo-all converges to
+`nothing_to_undo` — which G1.3 requires. Reversing an undo would be a forward
+"redo"; under repeated `ltx undo` that oscillates and never reaches
+`nothing_to_undo`, so it cannot be what `ltx undo` does. `Operation::Undo` is
+therefore marked **not undoable** (`is_undoable` is false, and the command
+surface lists `undo` as `undoable: false`). This deliberately narrows §4.3's
+literal "undo itself is undoable via `ltx undo`" to keep G1.3 satisfiable; redo,
+if it lands, is a separate forward command, deferred.
+
 ## Consequences
 
 - This slice makes the machinery correct and the query surfaces invariant, and the
@@ -101,6 +112,16 @@ membership check.
   contains every one of the twelve `REQUIRED_OPERATIONS` and each is emitted ≥100
   times. G1.3 cannot fully pass until all twelve operations and their inverses
   exist. That is stated plainly rather than hidden.
+- Evidence for the "0 failures" claim — the `undo-property` harness at the gate's
+  seed, on the reference machine:
+
+  ```
+  $ ./target/release/undo-property --sequences 1000 --seed 20260903 --json
+  {"emitted":{"save":4403,"undo":2159},"failures":0,"seed":20260903,"sequences":1000}
+  ```
+
+  The full ≥100,000-sequence run is performed by the G1.3 harness on the
+  measurement machine (on tmpfs, where the throwaway repos cost no fsync).
 - The general undo surface (start, switch, assign, split, sync, redact, thin,
   lens, merge, workspace), redo-branch truncation, working-tree restoration for
   tree-mutating undo, and op-log compaction (ADR-13) are tracked follow-ups.

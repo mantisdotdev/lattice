@@ -80,7 +80,7 @@ enum Command {
         #[arg(long)]
         into: PathBuf,
     },
-    /// Reverse the most recent operation.
+    /// Return to the previous checkpoint.
     Undo,
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
@@ -186,12 +186,11 @@ fn run(cli: &Cli) -> Result<u8> {
             // History is the checkpoint graph reachable from the current head,
             // which undo moves — so this view is invariant under undo-all
             // (ADR-15). The raw op-log is not history; it lives at
-            // `ltx internals oplog`. The text rendering still lists operations.
-            let checkpoints = repo.reachable_checkpoints()?;
-            let mut entries = repo.log()?;
-            entries.reverse();
+            // `ltx internals oplog`. `--limit` keeps the most recent N, and
+            // applies to both renderings so they never disagree.
+            let mut checkpoints = repo.reachable_checkpoints()?;
             if let Some(n) = limit {
-                entries.truncate(*n);
+                checkpoints.truncate(*n);
             }
             emit(
                 cli,
@@ -204,13 +203,8 @@ fn run(cli: &Cli) -> Result<u8> {
                 },
                 || {
                     let mut out = String::new();
-                    for e in &entries {
-                        out.push_str(&format!(
-                            "{:>5}  {:<8} {}\n",
-                            e.seq,
-                            e.operation.name(),
-                            ltx_core::short_id(&e.id)
-                        ));
+                    for c in &checkpoints {
+                        out.push_str(&format!("{}  {}\n", ltx_core::short_id(&c.id), c.message));
                     }
                     out.trim_end().to_string()
                 },
@@ -333,7 +327,9 @@ fn run(cli: &Cli) -> Result<u8> {
                 "commands": [
                     { "name": "init", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "save", "state_changing": true, "undoable": true, "sample_args": ["probe"] },
-                    { "name": "undo", "state_changing": true, "undoable": true, "sample_args": [] },
+                    // undo is monotonic toward the root; it is not itself
+                    // undoable (redo is a separate deferred move — ADR-15).
+                    { "name": "undo", "state_changing": true, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "verify", "state_changing": false, "undoable": false, "sample_args": [] },

@@ -85,10 +85,19 @@ impl Operation {
     /// than silently doing nothing. `Init` is separate: it establishes the
     /// repository container below the undo floor (ADR-15), is not a
     /// state-changing command for undo purposes, and is not undoable.
+    ///
+    /// `Undo` is also not itself reversible via `ltx undo` in this model. Undo
+    /// is monotonic toward the root so that undo-all converges (G1.3 requires
+    /// it); reversing an undo would be a forward "redo", which would oscillate
+    /// under repeated `ltx undo` and never reach `nothing_to_undo`. Redo is a
+    /// separate forward mechanism, deferred (ADR-15).
     pub fn is_undoable(&self) -> bool {
         !matches!(
             self,
-            Operation::Init | Operation::Redact { .. } | Operation::Thin { .. }
+            Operation::Init
+                | Operation::Undo { .. }
+                | Operation::Redact { .. }
+                | Operation::Thin { .. }
         )
     }
 
@@ -605,8 +614,9 @@ mod tests {
         }
         .is_undoable());
         assert!(
-            Operation::Undo { undone_seq: 1 }.is_undoable(),
-            "undo of undo is redo, and must remain available"
+            !Operation::Undo { undone_seq: 1 }.is_undoable(),
+            "undo is monotonic toward the root; reversing it (redo) is a \
+             separate deferred forward move, so undo is not itself undoable"
         );
         assert!(
             !Operation::Init.is_undoable(),
