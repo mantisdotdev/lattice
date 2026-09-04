@@ -82,9 +82,28 @@ enum Command {
     },
     /// Return to the previous checkpoint.
     Undo,
+    /// Begin a new line here, and switch to it.
+    Start {
+        /// What to call the line.
+        name: String,
+    },
+    /// Continue on another line, preserving this one's working state.
+    Switch {
+        /// The line to continue on.
+        name: String,
+    },
+    /// Work with lines.
+    #[command(subcommand)]
+    Line(LineCmd),
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
     Internals(Internals),
+}
+
+#[derive(Subcommand)]
+enum LineCmd {
+    /// Show every line, and which one is current.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -189,7 +208,7 @@ fn run(cli: &Cli) -> Result<u8> {
             // `ltx internals oplog`. The default-and-limit policy is in
             // ltx-core (§8); the CLI only renders, and `--limit` applies to
             // both renderings so they never disagree.
-            let checkpoints = repo.history(*limit)?;
+            let checkpoints = repo.log_view(*forensic, *limit)?;
             emit(
                 cli,
                 || {
@@ -295,18 +314,114 @@ fn run(cli: &Cli) -> Result<u8> {
                         "undone_checkpoint": outcome.undone_checkpoint,
                         "now_at": outcome.now_at,
                         "undo_seq": outcome.undo_seq,
+                        "oplog_seq": outcome.undo_seq,
+                        "preserved_working_state": outcome.preserved_working_state,
+                        "rescued_working_state": outcome.rescued_working_state,
                         // Challenge 8 / §4.3: undo names any remote residue it
                         // could not reverse. Empty for a purely local undo.
                         "remote_effects_not_undone": outcome.remote_effects_not_undone,
                     })
                 },
-                || match (&outcome.undone_checkpoint, &outcome.now_at) {
-                    (Some(undone), Some(now)) => format!(
-                        "undid {}; now at {}",
-                        ltx_core::short_id(undone),
-                        ltx_core::short_id(now)
-                    ),
-                    _ => "nothing to undo".to_string(),
+                || {
+                    if outcome.nothing_to_undo {
+                        return "nothing to undo".to_string();
+                    }
+                    // Reversing a start or a switch undoes no checkpoint, so
+                    // keying the message on `undone_checkpoint` alone reported
+                    // "nothing to undo" for work that had in fact been undone.
+                    let mut out = match (&outcome.undone_checkpoint, &outcome.now_at) {
+                        (Some(undone), Some(now)) => format!(
+                            "undid {}; now at {}",
+                            ltx_core::short_id(undone),
+                            ltx_core::short_id(now)
+                        ),
+                        (Some(undone), None) => {
+                            format!("undid {}", ltx_core::short_id(undone))
+                        }
+                        (None, Some(now)) => {
+                            format!("undone; now at {}", ltx_core::short_id(now))
+                        }
+                        (None, None) => "undone".to_string(),
+                    };
+                    if let Some(tree) = &outcome.preserved_working_state {
+                        out.push_str(&format!(
+                            "\n  the working state from that line is kept as {}",
+                            ltx_core::short_id(tree)
+                        ));
+                    }
+                    out
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Start { name } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.start_line(name)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "line": out.line, "created": out.created,
+                        "now_at": out.now_at, "rescued_working_state": out.rescued_working_state,
+                        // Every state-changing command reports its position so
+                        // a concurrent history can be checked for linearizability.
+                        "oplog_seq": out.oplog_seq,
+                    })
+                },
+                || {
+                    if out.created {
+                        format!("started line {} — you are on it now", out.line)
+                    } else {
+                        format!("line {} already exists — you are on it now", out.line)
+                    }
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Switch { name } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.switch_line(name)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "line": out.line, "now_at": out.now_at,
+                        "oplog_seq": out.oplog_seq, "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || format!("now on line {}", out.line),
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Line(LineCmd::List) => {
+            let repo = Repo::discover(&cwd)?;
+            let state = repo.lines()?;
+            // Deliberately excludes preserved working state (the ephemeral tier
+            // the undo equality domain omits) and any timestamp or count, so
+            // this document is invariant under undo-all (ADR-16 §5).
+            let rows: Vec<_> = state
+                .lines
+                .iter()
+                .map(|(name, rec)| serde_json::json!({ "name": name, "checkpoint": rec.tip }))
+                .collect();
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "version": 1,
+                        "current": state.current, "lines": rows,
+                    })
+                },
+                || {
+                    let mut out = String::new();
+                    for name in state.lines.keys() {
+                        let mark = if *name == state.current { "*" } else { " " };
+                        out.push_str(&format!("{mark} {name}\n"));
+                    }
+                    out.trim_end().to_string()
                 },
             );
             Ok(EXIT_OK)
@@ -328,6 +443,13 @@ fn run(cli: &Cli) -> Result<u8> {
                     // undo is monotonic toward the root; it is not itself
                     // undoable (redo is a separate deferred move — ADR-15).
                     { "name": "undo", "state_changing": true, "undoable": false, "sample_args": [] },
+                    // start probe-line always succeeds and leaves the batch ON
+                    // probe-line, so a following `switch main` is a REAL switch
+                    // that exercises capture and materialisation rather than a
+                    // self-switch that counts coverage without testing anything.
+                    { "name": "start", "state_changing": true, "undoable": true, "sample_args": ["probe-line"] },
+                    { "name": "switch", "state_changing": true, "undoable": true, "sample_args": ["main"] },
+                    { "name": "line list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "verify", "state_changing": false, "undoable": false, "sample_args": [] },
