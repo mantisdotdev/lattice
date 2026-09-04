@@ -146,6 +146,12 @@ def main():
         raise SystemExit(f"shim not found: {shim}")
     if not LTX.is_file():
         raise SystemExit(f"ltx not built: {LTX} (cargo build --release)")
+    # Without the replayer EVERY trial becomes a skip, and the summary would
+    # read "0 failures" over zero completed trials — silence indistinguishable
+    # from success, which is the one result a crash-safety probe must never
+    # produce.
+    if not REPLAY.is_file():
+        raise SystemExit(f"replayer missing: {REPLAY}")
     trials = int(sys.argv[2])
     seed = int(sys.argv[3]) if len(sys.argv) > 3 else 20260904
     rng = random.Random(seed)
@@ -157,6 +163,11 @@ def main():
             (skipped if "skip" in r else results).append(r)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+    if not results:
+        raise SystemExit(
+            f"no trial completed ({len(skipped)} skipped): "
+            + "; ".join(sorted({r["skip"][:80] for r in skipped})))
 
     failures = [r for r in results if not r["ok"]]
     durable_zero = sum(1 for r in results if r.get("durable") == 0)

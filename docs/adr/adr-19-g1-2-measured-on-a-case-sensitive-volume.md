@@ -72,8 +72,25 @@ visible, is:
  "evidence": ["corpus/manifests/g1-2-adversarial.json"]}
 ```
 
-48 pinned files where there were 47: `names/upper.txt` now exists as a file of
-its own rather than being folded onto `names/UPPER.txt`.
+The prior figure it should be read against is not asserted here either. It is
+the manifest this PR replaced, `corpus/manifests/g1-2-adversarial.json` at
+`9c17d05^`, produced by the same builder on the case-folding volume:
+
+```json
+{"total_files": 47,
+ "filesystem_case_sensitive": false,
+ "folded_names": [{"requested": "names/upper.txt",
+                   "occupied_by": ["names/UPPER.txt"],
+                   "reason": "this filesystem does not distinguish these names
+                              (case folding or Unicode normalisation)"}],
+ "skipped_mandated_cases": []}
+```
+
+47 files to 48, and `folded_names` from one entry to none: `names/upper.txt`
+now exists as a file of its own rather than being folded onto
+`names/UPPER.txt`. That single entry is the whole difference between the gate's
+coverage contract being satisfied and being reported as un-exercised, which is
+why ADR-14 could not close it here.
 
 G1.2: **FAIL → PASS**, with the mandated case-collision requirement actually
 exercised rather than reported as un-exercised.

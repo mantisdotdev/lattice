@@ -291,6 +291,7 @@ int IOFAULT_NAME(fdatasync)(int fd) {
  * F_RDADVISE, F_LOG2PHYS, F_PUNCHHOLE, ...) take; a command outside these
  * lists that takes an integer would be mis-forwarded, so new ones belong in
  * FCNTL_INT_ARG rather than in the default. */
+#ifdef __APPLE__
 static int fcntl_takes_no_arg(int cmd) {
   switch (cmd) {
 #ifdef F_GETFD
@@ -364,18 +365,9 @@ static int fcntl_takes_int_arg(int cmd) {
 int IOFAULT_NAME(fcntl)(int fd, int cmd, ...) {
   init_once();
 
-#ifndef __APPLE__
-  /* Linux has no F_FULLFSYNC; sync_all() is a real fsync there and the fsync
-   * interposer already sees it. Forward with the correct arity and nothing
-   * else. */
-  static int (*real)(int, int, ...) = NULL;
-  if (!real) real = (int (*)(int, int, ...))dlsym(RTLD_NEXT, "fcntl");
-#define IOFAULT_REAL_FCNTL real
-#else
   /* dyld interposition rewrites references in OTHER images, so a direct call
    * from inside the shim reaches the real fcntl. */
 #define IOFAULT_REAL_FCNTL fcntl
-#endif
 
   if (fcntl_takes_no_arg(cmd)) {
     int rc = IOFAULT_REAL_FCNTL(fd, cmd);
@@ -464,7 +456,22 @@ int IOFAULT_NAME(unlink)(const char *path) {
 IOFAULT_INTERPOSE(iofault_write, write);
 IOFAULT_INTERPOSE(iofault_pwrite, pwrite);
 IOFAULT_INTERPOSE(iofault_fsync, fsync);
+#endif /* __APPLE__ */
+
+/* Apple only. On Linux the shim overrides symbols by plain LD_PRELOAD name, so
+ * defining `fcntl` at all would take over EVERY fcntl in the process — and the
+ * classification above is macOS's. Linux adds its own arities (F_SETPIPE_SZ,
+ * F_ADD_SEALS, F_SETLEASE and F_SETSIG take an int; F_GETPIPE_SZ, F_GET_SEALS,
+ * F_GETLEASE and F_GETSIG take none), which would fall to the pointer default
+ * and be mis-forwarded.
+ *
+ * Nothing is lost by staying out: Linux has no F_FULLFSYNC, `sync_all()` is a
+ * real fsync there, and the fsync interposer already records it. If a Linux
+ * barrier ever needs observing, its command classification has to be written
+ * first — not inherited from this one. */
+#ifdef __APPLE__
 IOFAULT_INTERPOSE(iofault_fcntl, fcntl);
+#endif
 IOFAULT_INTERPOSE(iofault_rename, rename);
 IOFAULT_INTERPOSE(iofault_ftruncate, ftruncate);
 IOFAULT_INTERPOSE(iofault_unlink, unlink);
