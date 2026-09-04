@@ -130,6 +130,42 @@ G1.1 still does not pass, and this ADR does not claim it should:
 - Any residual failure after this change is a real crash-safety finding and is
   to be treated as one.
 
+## Measured effect
+
+G1.1 itself could not be re-run to completion on this machine: it retains a
+repository and a ~1.7 MB journal for each of ~4,500 trials, needing roughly
+22–24 GB of scratch. Two attempts died with `ENOSPC` at power-loss trials 431
+and 512 of 1,000, with the work directory growing ~1.6 GB/min to 16 GB. The
+machine has 17 GB free, 26 GB of it held by `corpus/data`. Freeing that is a
+decision for the corpus's owner, not a step to be taken to make a measurement
+fit, so the gate remains unmeasured here and this is recorded rather than
+rounded off.
+
+`scripts/probe_powerloss.py` answers the narrower question the fix is about. It
+runs the same power-loss sequence with per-trial cleanup, so disk stays flat.
+It is a diagnostic and not a gate: it draws only the four implemented
+operations and omits the SIGKILL half, both of which make it weaker than G1.1.
+
+Identical seed, identical trials, the only variable being whether the injector
+can see `F_FULLFSYNC`:
+
+| | old shim | fixed shim |
+|---|---|---|
+| trials run | 60 | 60 |
+| failures | **37** | **0** |
+| checkpoints lost | 36 | 0 |
+| trials where the replayer saw no barrier at all | **60 / 60** | 1 / 60 |
+
+Two further seeds on the fixed shim, 80 trials each: 0 failures, 0 checkpoints
+lost. 220 trials in total.
+
+The "no barrier" row is the finding in one line. Under the old shim the
+replayer never once observed a durability barrier, so every write in every
+trial was volatile. Under the fixed shim that happens in a handful of trials —
+legitimately, when the crash point falls before the first sync — and those
+trials still pass, because redb recovers a torn uncommitted transaction when
+the state beneath it was durable.
+
 ## Evidence
 
 - `crates/ltx/tests/json_contract.rs` — pins the shape the frozen parser reads;
