@@ -1,0 +1,54 @@
+{
+  "iteration": 9,
+  "timestamp": "2026-09-04T08:55:24Z",
+  "stages_measured": [
+    "G1"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "8 gate(s) in G0 were not measured in this run",
+    "12 gate(s) in G1 were not measured in this run",
+    "8 gate(s) in G2 were not measured in this run",
+    "6 gate(s) in G3 were not measured in this run",
+    "7 gate(s) in G4 were not measured in this run",
+    "8 gate(s) in G5 were not measured in this run",
+    "5 gate(s) in G6 were not measured in this run"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G1": "CLEAR"
+  },
+  "results": [
+    {
+      "gate": "G1.2",
+      "stage": "G1",
+      "title": "Byte fidelity",
+      "metric": "save\u2192checkout round-trip mismatches on adversarial corpus",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 0.0,
+      "cmp": "==",
+      "unit": "mismatches",
+      "value": 0.0,
+      "status": "PASS",
+      "note": "0 mismatches over 135 checked entries",
+      "evidence": [
+        "corpus/manifests/g1-2-adversarial.json"
+      ],
+      "detail": {
+        "filesystem_case_sensitive": true,
+        "folded_names": [],
+        "checked_entries": 135,
+        "pinned_files": 48,
+        "special_entries": 5,
+        "source_paths": 82,
+        "checkout_paths": 82,
+        "mismatches": [],
+        "mismatches_truncated": 0
+      },
+      "duration_s": 19.109
+    }
+  ]
+}

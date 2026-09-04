@@ -39,12 +39,19 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${LTX_CASE_IMAGE:-${TMPDIR:-/tmp}/ltx-case-sensitive.sparseimage}"
 VOLNAME="ltxcase"
-MOUNT="/Volumes/${VOLNAME}"
+# Mounted over corpus/data, not over the corpus directory itself: the builder
+# does `rmtree(OUT); OUT.mkdir()`, which cannot remove a mount point or a
+# symlink. With the PARENT mounted, `adversarial` is an ordinary subdirectory
+# it can create and delete freely.
+#
+# The repository's other corpora (26 GB of mined repos) are hidden for the
+# duration and reappear on unmount. Nothing is deleted; if this script dies
+# without unmounting, `hdiutil detach` on the path below restores them.
+MOUNT="${REPO}/corpus/data"
 # 1.1 GB corpus, copied once into the repo and once into the checkout, plus
 # pack storage for the save. 16 GB is comfortable; a sparse image only occupies
 # what it actually uses.
 SIZE="${LTX_CASE_SIZE:-16g}"
-CORPUS_LINK="${REPO}/corpus/data/adversarial"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script is macOS-specific (hdiutil). On Linux the root filesystem" >&2
@@ -53,7 +60,6 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 cleanup() {
-  if [[ -L "${CORPUS_LINK}" ]]; then rm -f "${CORPUS_LINK}"; fi
   if [[ -z "${LTX_CASE_KEEP:-}" ]] && mount | grep -q " ${MOUNT} "; then
     hdiutil detach "${MOUNT}" -quiet || true
   fi
@@ -86,10 +92,7 @@ echo "==> verified: ${MOUNT} distinguishes A.txt from a.txt"
 
 # The corpus builder writes to a fixed path under the repo, so point that path
 # at the case-sensitive volume rather than teaching it a new flag.
-mkdir -p "${MOUNT}/adversarial" "${MOUNT}/tmp"
-rm -rf "${CORPUS_LINK}"
-mkdir -p "$(dirname "${CORPUS_LINK}")"
-ln -s "${MOUNT}/adversarial" "${CORPUS_LINK}"
+mkdir -p "${MOUNT}/tmp"
 
 echo "==> building the adversarial corpus on the case-sensitive volume"
 TMPDIR="${MOUNT}/tmp" python3 "${REPO}/scripts/corpus/build_adversarial_corpus.py" --force

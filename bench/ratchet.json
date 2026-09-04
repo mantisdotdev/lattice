@@ -61,5 +61,12 @@
     "unit": "violations",
     "value": 0.0,
     "waived": false
+  },
+  "G1.2": {
+    "recorded_at": "2026-09-04T08:55:24Z",
+    "status": "PASS",
+    "unit": "mismatches",
+    "value": 0.0,
+    "waived": false
   }
 }
