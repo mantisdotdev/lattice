@@ -1,0 +1,115 @@
+{
+  "iteration": 12,
+  "timestamp": "2026-09-04T09:49:56Z",
+  "stages_measured": [
+    "G1"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "8 gate(s) in G0 were not measured in this run",
+    "12 gate(s) in G1 were not measured in this run",
+    "8 gate(s) in G2 were not measured in this run",
+    "6 gate(s) in G3 were not measured in this run",
+    "7 gate(s) in G4 were not measured in this run",
+    "8 gate(s) in G5 were not measured in this run",
+    "5 gate(s) in G6 were not measured in this run"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G1": "IN PROGRESS"
+  },
+  "results": [
+    {
+      "gate": "G1.12",
+      "stage": "G1",
+      "title": "Cross-platform",
+      "metric": "platforms (Linux/macOS/Windows) with full suite green in CI",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 3.0,
+      "cmp": ">=",
+      "unit": "platforms",
+      "value": 3.0,
+      "status": "PASS",
+      "note": "3/3 platforms green with the suite actually run",
+      "evidence": [
+        ".github/workflows/rust.yml"
+      ],
+      "detail": {
+        "workflow": "rust",
+        "run_id": 33859960234,
+        "run_sha": "ddc9027f45f690b4ba8fc0e944efdb5c3e8570eb",
+        "run_created_at": "2026-09-04T09:46:02Z",
+        "repo_head": "ddc9027f45f690b4ba8fc0e944efdb5c3e8570eb",
+        "required_steps": [
+          "test"
+        ],
+        "platforms": {
+          "macos-latest": {
+            "job": "macos-latest",
+            "conclusion": "success",
+            "ran_required_steps": true,
+            "steps": {
+              "set up job": "success",
+              "run actions/checkout@v5": "success",
+              "skip if the workspace does not exist yet": "success",
+              "run dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772": "success",
+              "run swatinem/rust-cache@v2": "success",
+              "fmt": "success",
+              "clippy": "success",
+              "test": "success",
+              "doc tests": "success",
+              "post run swatinem/rust-cache@v2": "success",
+              "post run actions/checkout@v5": "success",
+              "complete job": "success"
+            },
+            "counts_as_pass": true
+          },
+          "windows-latest": {
+            "job": "windows-latest",
+            "conclusion": "success",
+            "ran_required_steps": true,
+            "steps": {
+              "set up job": "success",
+              "run actions/checkout@v5": "success",
+              "skip if the workspace does not exist yet": "success",
+              "run dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772": "success",
+              "run swatinem/rust-cache@v2": "success",
+              "fmt": "success",
+              "clippy": "success",
+              "test": "success",
+              "doc tests": "success",
+              "post run swatinem/rust-cache@v2": "success",
+              "post run actions/checkout@v5": "success",
+              "complete job": "success"
+            },
+            "counts_as_pass": true
+          },
+          "ubuntu-latest": {
+            "job": "ubuntu-latest",
+            "conclusion": "success",
+            "ran_required_steps": true,
+            "steps": {
+              "set up job": "success",
+              "run actions/checkout@v5": "success",
+              "skip if the workspace does not exist yet": "success",
+              "run dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772": "success",
+              "run swatinem/rust-cache@v2": "success",
+              "fmt": "success",
+              "clippy": "success",
+              "test": "success",
+              "doc tests": "success",
+              "post run swatinem/rust-cache@v2": "success",
+              "post run actions/checkout@v5": "success",
+              "complete job": "success"
+            },
+            "counts_as_pass": true
+          }
+        }
+      },
+      "duration_s": 4.548
+    }
+  ]
+}

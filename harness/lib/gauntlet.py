@@ -497,15 +497,27 @@ def waiver_cap_check(results: list[Result]) -> list[str]:
 
 
 def stage_state(results: list[Result], stage: str) -> str:
-    rs = [r for r in results if r.gate.stage == stage]
-    if not rs:
+    """§0.1. Computed over every gate in the stage, not just the ones measured.
+
+    The subset version reported `G1 CLEAR` from a run that measured a single
+    passing G1 gate, while G1.1, G1.3, G1.4 and G1.10 were not passing — the
+    same false claim `delivery_state` documents itself as existing to prevent,
+    one line up in the same scorecard. A gate that was not measured has not
+    passed, so it cannot contribute to CLEAR.
+    """
+    in_stage = [g for g in load_gates().values() if g.stage == stage]
+    if not in_stage:
         return "EMPTY"
-    if all(r.clears for r in rs):
-        return "CLEAR"
-    if any(r.status == NOT_YET for r in rs) and not any(
-            r.status in (FAIL, ERROR, STALE) for r in rs):
+    by_gid = {r.gate.gid: r for r in results}
+    measured = [by_gid[g.gid] for g in in_stage if g.gid in by_gid]
+    unmeasured = [g for g in in_stage if g.gid not in by_gid]
+
+    blocked = any(r.status in (FAIL, ERROR, STALE) for r in measured)
+    if blocked:
+        return "BLOCKED"
+    if unmeasured or any(r.status == NOT_YET for r in measured):
         return "IN PROGRESS"
-    return "BLOCKED"
+    return "CLEAR" if all(r.clears for r in measured) else "BLOCKED"
 
 
 def delivery_state(results: list[Result]) -> tuple[str, list[str]]:
