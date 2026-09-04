@@ -62,9 +62,10 @@ kind-specific inverse. The parent-chain walk survives verbatim as the `Save` arm
 ```
 undone(L)    = { e.undone_seq : e in L, e.operation = Undo{undone_seq} }
 live(L)      = { e in L : e.operation.is_undoable() and e.seq not in undone(L) }
-eligible(e)  = Save{checkpoint,..} => checkpoint.parent.is_some()   // the root floor
-               StartLine{..}       => true
-               Switch{..}          => true
+eligible(e)  = Save{checkpoint,..}        => checkpoint.parent.is_some()  // root floor
+               StartLine{created:true}   => tip(name) == tip(from)        // see (I3)
+               StartLine{created:false}  => true
+               Switch{..}                => true
 target(L)    = argmax_seq { e in live(L) : eligible(e) }
 ```
 
@@ -74,7 +75,7 @@ which is how §6 is mechanised):
 | Operation | Inverse |
 |---|---|
 | `Save{checkpoint, line}` | `lines[line].tip = checkpoint.parent`; working tree untouched (save never mutates it) |
-| `StartLine{name, from, created:true}` | remove `lines[name]`; `current = from`; materialise `lines[from].working`; consume it |
+| `StartLine{name, from, created:true}` | remove `lines[name]`; `current = from`; materialise `lines[from].working`; consume it. **Eligible only while the line has not diverged** — see below |
 | `StartLine{.., created:false}` | identical to the Switch inverse (it *was* a switch) |
 | `Switch{from, to}` | `lines[to].working = capture(now)`; `current = from`; materialise `lines[from].working`; consume it |
 
@@ -87,17 +88,23 @@ Three load-bearing invariants:
   repository state equals the state immediately after *s* was applied. This is
   what licenses local inverses with no conflict analysis — and it is exactly what
   would break if selective or out-of-order undo were added.
-- **(I3) Eligibility depends only on immutable data** — the candidate's own
-  operation fields and its own checkpoint's `parent` — never on the mutable
-  head. Today's code tests the *mutable* head's parent; this strengthens it.
+- **(I3) Undoing a `start` must not orphan checkpoints.** Removing a line drops
+  everything only that line could reach. So `StartLine{created:true}` is eligible
+  only while the line still points where its origin points — if it has diverged,
+  its saves must be reversed first, and if those are themselves at the root floor
+  then so is the start. Without this, `init; start L; save; undo` deletes `L` and
+  the checkpoint saved on it vanishes from every view, breaking "no checkpointed
+  data is ever lost".
 
-**Termination.** Let `mu(L) = |{ e in live(L) : eligible(e) }|`. A successful undo
-appends exactly one `Undo` (not a candidate, so the candidate set never grows) and
-adds exactly one seq to `undone(L)`, removing exactly one element from `live(L)`;
-by (I3) no member's eligibility can be restored. So `mu` strictly decreases by one
-per undo, undo-all terminates in exactly `mu` steps, and `nothing_to_undo` is an
-absorbing fixed point. Undo never appends a forward operation, so it cannot
-oscillate — preserving ADR-15's convergence guarantee.
+**Termination.** Eligibility therefore reads current line state, so the measure is
+not the eligible set but `live` itself: `|live(L)|`. A successful undo appends
+exactly one `Undo` (not a candidate, so the candidate set never grows) and adds
+exactly one seq to `undone(L)`, which is append-only — so that entry leaves `live`
+permanently. `|live|` is finite and strictly decreases by one per undo, so undo-all
+terminates in at most `|live|` steps and `nothing_to_undo` is absorbing. Undo never
+appends a forward operation, so it cannot oscillate — preserving ADR-15's
+convergence guarantee. (Eligibility changing over time moves only *where the floor
+is*, never whether the walk ends.)
 
 ### 5. `ltx line list --json` — the exact compared document
 
@@ -124,10 +131,25 @@ inside undo.
 `switch`: self-target short-circuits (append the entry, touch no file — G1.4 draws
 `switch main` while already on `main` thousands of times); unknown name refuses
 before appending; otherwise capture → publish (entry + `LineState` in **one**
-transaction) → materialise. Publish-before-materialise is deliberate: a crash
-leaves you unambiguously on the target with a re-runnable idempotent
-materialisation, and no work is lost because the capture is durable first. If the
-captured tree equals the target tree, materialisation is skipped entirely.
+transaction) → materialise → clear. Publish-before-materialise is deliberate: a
+crash leaves you unambiguously on the target with a re-runnable idempotent
+materialisation, and no work is lost because the capture is durable first.
+
+The target's preserved address is **retained across the publish** and cleared only
+once the files are written. It is the marker that materialisation is still
+pending: clearing it first would drop the only reference to that work if the write
+failed. Every state-changing command therefore begins by completing an interrupted
+switch — the current line holding preserved state is precisely that residue, since
+the invariant is that a current line holds none. This is what lets the self-target
+short-circuit stay cheap without stranding a half-applied switch.
+
+**The materialiser never follows a symlink.** Every branch decides on
+`symlink_metadata`. Descending through a link would delete the link *target's*
+contents — outside the working tree entirely (CWE-59) — and an ordinary
+`node_modules`-style link plus a same-named directory on another line is enough to
+trigger it. It also reconciles a path whose kind changes between lines (file on
+one, directory on the other), which would otherwise leave the switch failed
+half-applied.
 
 `start` of a **new** name captures, publishes, and does **not** materialise — the
 new line inherits both the tip and the on-disk bytes. Inheriting the tip is forced:

@@ -106,13 +106,14 @@ impl Repo {
         fs::create_dir_all(dir.join("packs"))?;
         let store = Store::open(&dir.join("packs"))?;
         let oplog = OpLog::open(&dir.join("meta.redb"))?;
+        // Format first: a crash after it leaves a repository that still opens
+        // (its line state is synthesised) rather than one that is refused.
         oplog.set_format_version(FORMAT_VERSION)?;
         // The default line is published by `init`, NOT by a StartLine entry:
         // such an entry would be an eligible undo target and undo-all would
         // delete `main` (ADR-16 §2). `Init` is not undoable, so `main` sits
-        // below the undo floor.
-        oplog.publish_lines(&LineState::initial())?;
-        oplog.append(Operation::Init)?;
+        // below the undo floor. Entry and line state land in one transaction.
+        oplog.commit(Operation::Init, Some(LineState::initial()))?;
         Ok(Repo {
             root: root.to_path_buf(),
             store,
@@ -148,7 +149,7 @@ impl Repo {
         match oplog.format_version()? {
             Some(v) if v == FORMAT_VERSION => {}
             other => {
-                return Err(Error::Invalid(format!(
+                return Err(Error::UnsupportedFormat(format!(
                     "this repository is on-disk format {} but this build reads format {}",
                     other
                         .map(|v| v.to_string())
@@ -184,6 +185,7 @@ impl Repo {
     /// pass through, and the partial-save capability the index existed to serve
     /// is a property of *changes*, not a gate every save must pass.
     pub fn save(&mut self, message: &str) -> Result<Checkpoint> {
+        self.complete_pending_switch()?;
         let mut packer = PackWriter::new();
         let tree_id = self.snapshot_dir(&self.root.clone(), &mut packer)?;
 
@@ -506,6 +508,7 @@ impl Repo {
     /// Each undo removes exactly one member of the eligible-live set and adds
     /// no candidate, so undo-all terminates and `nothing_to_undo` is absorbing.
     pub fn undo(&mut self) -> Result<UndoOutcome> {
+        self.complete_pending_switch()?;
         let Some(target) = self.next_undo_target()? else {
             return Ok(UndoOutcome::nothing());
         };
@@ -522,11 +525,12 @@ impl Repo {
                 _ => None,
             })
             .collect();
+        let lines = self.line_state()?;
         for entry in entries.iter().rev() {
             if !entry.operation.is_undoable() || undone.contains(&entry.seq) {
                 continue;
             }
-            if self.is_eligible(&entry.operation)? {
+            if self.is_eligible(&entry.operation, &lines)? {
                 return Ok(Some(entry.clone()));
             }
         }
@@ -538,12 +542,26 @@ impl Repo {
     /// Depends only on immutable data. A save at the root of its line has no
     /// parent to return to — that is the floor ADR-15 established, expressed
     /// per-candidate rather than against the mutable head.
-    fn is_eligible(&self, op: &Operation) -> Result<bool> {
+    fn is_eligible(&self, op: &Operation, lines: &LineState) -> Result<bool> {
         Ok(match op {
             Operation::Save { checkpoint, .. } => match self.checkpoint(checkpoint)? {
                 Some(cp) => cp.parent.is_some(),
                 None => false,
             },
+            // Removing a line must not orphan checkpoints only it can reach.
+            // If it still points somewhere its origin does not, the saves on it
+            // must be reversed first — and if those are themselves at the root
+            // floor, so is this. Otherwise `init; start L; save; undo` would
+            // drop that checkpoint out of every line and out of every view.
+            Operation::StartLine {
+                name,
+                from,
+                created: true,
+            } => {
+                let tip = lines.lines.get(name).and_then(|r| r.tip.clone());
+                let origin = lines.lines.get(from).and_then(|r| r.tip.clone());
+                tip == origin
+            }
             Operation::StartLine { .. } | Operation::Switch { .. } => true,
             // Adopt has no defined inverse yet and cannot occur (there is no
             // `adopt` command); giving it one is the adopt slice's decision.
@@ -646,11 +664,12 @@ impl Repo {
     /// switch. The postcondition is uniform — the line exists and is current —
     /// which is why `start <existing>` succeeds rather than erroring (ADR-16 §3).
     pub fn start_line(&mut self, name: &str) -> Result<LineOutcome> {
+        self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let mut lines = self.line_state()?;
         let from = lines.current.clone();
         if lines.lines.contains_key(&name) {
-            return self.switch_to(lines, &from, &name, false);
+            return self.switch_to(lines, &from, &name, true);
         }
         // A new line inherits the current tip AND the on-disk bytes, so there
         // is nothing to materialise. Inheriting the tip is forced: G1.1 asserts
@@ -690,6 +709,7 @@ impl Repo {
     /// restoring the target's. Refuses only an unknown or invalid name — §4.3
     /// forbids a dirty-tree refusal, and state is preserved per line.
     pub fn switch_line(&mut self, name: &str) -> Result<LineOutcome> {
+        self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let lines = self.line_state()?;
         let from = lines.current.clone();
@@ -704,7 +724,7 @@ impl Repo {
         mut lines: LineState,
         from: &str,
         to: &str,
-        created: bool,
+        as_start: bool,
     ) -> Result<LineOutcome> {
         // Self-switch short-circuits: the target state IS the current state, so
         // no capture and no file is touched. G1.4 draws `switch main` while
@@ -712,9 +732,17 @@ impl Repo {
         // there is O(repo) work for no benefit.
         if from == to {
             let entry = self.oplog.commit(
-                Operation::Switch {
-                    from: from.to_string(),
-                    to: to.to_string(),
+                if as_start {
+                    Operation::StartLine {
+                        name: to.to_string(),
+                        from: from.to_string(),
+                        created: false,
+                    }
+                } else {
+                    Operation::Switch {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    }
                 },
                 None,
             )?;
@@ -733,7 +761,12 @@ impl Repo {
             rec.working = Some(captured);
         }
         let target = lines.lines.entry(to.to_string()).or_default();
-        let restored = target.working.take();
+        // The preserved address is deliberately LEFT IN PLACE across the
+        // publish. It is the marker that materialisation is still pending: if
+        // we crash between publishing and writing the files, the next command
+        // sees the current line holding preserved state and finishes the job.
+        // Clearing it first would drop the only reference to that work.
+        let restored = target.working.clone();
         let tip = target.tip.clone();
         lines.current = to.to_string();
 
@@ -741,7 +774,7 @@ impl Repo {
         // the target with a re-runnable idempotent materialisation, rather than
         // on the source holding the target's files. No work is lost either way,
         // because the capture is durable content first.
-        let op = if created {
+        let op = if as_start {
             Operation::StartLine {
                 name: to.to_string(),
                 from: from.to_string(),
@@ -755,6 +788,13 @@ impl Repo {
         };
         let entry = self.oplog.commit(op, Some(lines.clone()))?;
         self.materialise_working_tree(restored.as_deref(), &lines)?;
+        // Materialisation done: the bytes on disk are now the truth for this
+        // line, so the preserved copy is consumed and the invariant that the
+        // current line holds no preserved state is restored.
+        if let Some(rec) = lines.lines.get_mut(to) {
+            rec.working = None;
+        }
+        self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
         Ok(LineOutcome {
             line: to.to_string(),
@@ -767,6 +807,30 @@ impl Repo {
     /// Every line and which one is current.
     pub fn lines(&self) -> Result<LineState> {
         self.line_state()
+    }
+
+    /// Finish a switch that was interrupted after publishing but before its
+    /// files were written.
+    ///
+    /// The current line holding preserved state is exactly that residue — the
+    /// invariant is that a current line holds none. Completing it here makes
+    /// the interrupted switch self-repairing, which is what lets the
+    /// self-target short-circuit stay cheap without stranding a half-applied
+    /// switch.
+    fn complete_pending_switch(&mut self) -> Result<()> {
+        let mut lines = self.line_state()?;
+        let current = lines.current.clone();
+        let pending = lines.lines.get(&current).and_then(|r| r.working.clone());
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        self.materialise_working_tree(Some(&pending), &lines)?;
+        if let Some(rec) = lines.lines.get_mut(&current) {
+            rec.working = None;
+        }
+        self.oplog.publish_lines(&lines)?;
+        self.sync_head_pointer(&lines)?;
+        Ok(())
     }
 
     /// Snapshot the working tree into the store and return its tree address.
@@ -823,23 +887,34 @@ impl Repo {
                 continue;
             }
             let path = entry.path();
+            // NEVER follow a symlink here. Every branch decides on
+            // `symlink_metadata`, which does not resolve the final component:
+            // descending through a link would delete the LINK TARGET's
+            // contents, outside the working tree entirely (CWE-59). A benign
+            // `node_modules`-style link plus a same-named directory on another
+            // line is enough to trigger it, so this is not a hostile-input
+            // case — it is an ordinary one.
+            let meta = fs::symlink_metadata(&path)?;
+            let real_dir = meta.is_dir() && !meta.file_type().is_symlink();
             match tree.entries.get(&raw) {
-                Some(Node::Directory { tree: child }) => {
-                    if path.is_dir() {
-                        self.prune_to_tree(child, &path)?;
-                    } else {
-                        fs::remove_file(&path)?;
-                    }
+                Some(Node::Directory { tree: child }) if real_dir => {
+                    self.prune_to_tree(child, &path)?;
+                }
+                Some(Node::Directory { .. }) => {
+                    // A file or a symlink stands where the target names a
+                    // directory: remove it and let restore_tree create the
+                    // real directory.
+                    fs::remove_file(&path)?;
+                }
+                Some(_) if real_dir => {
+                    // A directory stands where the target names a file or a
+                    // symlink. restore_tree cannot write over it, so it must go
+                    // here or the switch fails half-applied.
+                    fs::remove_dir_all(&path)?;
                 }
                 Some(_) => {}
-                None => {
-                    let meta = fs::symlink_metadata(&path)?;
-                    if meta.is_dir() && !meta.file_type().is_symlink() {
-                        fs::remove_dir_all(&path)?;
-                    } else {
-                        fs::remove_file(&path)?;
-                    }
-                }
+                None if real_dir => fs::remove_dir_all(&path)?,
+                None => fs::remove_file(&path)?,
             }
         }
         Ok(())
@@ -2036,6 +2111,68 @@ mod tests {
         assert_eq!(bad.concept(), crate::error::Concept::Line);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn switch_never_deletes_through_a_symlinked_directory() {
+        // A benign symlink (a shared assets dir, node_modules, a link to home)
+        // plus a same-named directory on another line must never let switch
+        // delete the LINK TARGET's contents, which are outside the repository.
+        let (dir, mut repo) = repo();
+        fs::create_dir(dir.path().join("data")).unwrap();
+        fs::write(dir.path().join("data/keep.txt"), b"keep").unwrap();
+        repo.save("seed").unwrap();
+
+        repo.start_line("other").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("precious.txt"), b"precious").unwrap();
+        fs::create_dir(outside.path().join("nested")).unwrap();
+        fs::write(outside.path().join("nested/deep.txt"), b"deep").unwrap();
+        fs::remove_dir_all(dir.path().join("data")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("data")).unwrap();
+        repo.save("linked").unwrap();
+
+        repo.switch_line(DEFAULT_LINE).unwrap();
+
+        assert!(
+            outside.path().join("precious.txt").exists(),
+            "switch deleted through a symlink, outside the working tree"
+        );
+        assert!(
+            outside.path().join("nested/deep.txt").exists(),
+            "switch deleted a subtree through a symlink"
+        );
+        // And the switch still did its job on this side of the link.
+        assert!(dir.path().join("data/keep.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn switch_reconciles_a_path_that_changes_between_file_and_directory() {
+        // `thing` is a file on main and a directory on the other line. Both
+        // directions must materialise cleanly rather than failing half-applied.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("thing"), b"a file").unwrap();
+        repo.save("seed").unwrap();
+
+        repo.start_line("other").unwrap();
+        fs::remove_file(dir.path().join("thing")).unwrap();
+        fs::create_dir(dir.path().join("thing")).unwrap();
+        fs::write(dir.path().join("thing/inner.txt"), b"inner").unwrap();
+        repo.save("now a directory").unwrap();
+
+        repo.switch_line(DEFAULT_LINE).unwrap();
+        assert!(
+            dir.path().join("thing").is_file(),
+            "must become a file again"
+        );
+
+        repo.switch_line("other").unwrap();
+        assert!(
+            dir.path().join("thing/inner.txt").exists(),
+            "must become a directory again"
+        );
+    }
+
     #[test]
     fn undo_of_start_removes_the_line_and_returns_to_the_previous_one() {
         let (dir, mut repo) = repo();
@@ -2051,6 +2188,34 @@ mod tests {
         assert!(
             !state.lines.contains_key("feature"),
             "undoing a start removes the line it created"
+        );
+    }
+
+    #[test]
+    fn undo_of_start_does_not_orphan_a_checkpoint_only_that_line_holds() {
+        // With no seed, a save on a new line is a ROOT checkpoint that undo
+        // cannot reverse. Undoing the start would delete the line and drop that
+        // checkpoint out of every view, so the start is not undoable yet — the
+        // floor is where it must be, not one step past it.
+        let (dir, mut repo) = repo();
+        repo.start_line("solo").unwrap();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        let cp = repo.save("only on solo").unwrap();
+
+        let out = repo.undo().unwrap();
+        assert!(
+            out.nothing_to_undo,
+            "a start still holding an unreversible save is at the floor"
+        );
+        let graph: Vec<String> = repo
+            .log_view(true, None)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            graph.contains(&cp.id),
+            "the checkpoint must stay reachable, not be orphaned"
         );
     }
 

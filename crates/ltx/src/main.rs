@@ -321,13 +321,34 @@ fn run(cli: &Cli) -> Result<u8> {
                         "remote_effects_not_undone": outcome.remote_effects_not_undone,
                     })
                 },
-                || match (&outcome.undone_checkpoint, &outcome.now_at) {
-                    (Some(undone), Some(now)) => format!(
-                        "undid {}; now at {}",
-                        ltx_core::short_id(undone),
-                        ltx_core::short_id(now)
-                    ),
-                    _ => "nothing to undo".to_string(),
+                || {
+                    if outcome.nothing_to_undo {
+                        return "nothing to undo".to_string();
+                    }
+                    // Reversing a start or a switch undoes no checkpoint, so
+                    // keying the message on `undone_checkpoint` alone reported
+                    // "nothing to undo" for work that had in fact been undone.
+                    let mut out = match (&outcome.undone_checkpoint, &outcome.now_at) {
+                        (Some(undone), Some(now)) => format!(
+                            "undid {}; now at {}",
+                            ltx_core::short_id(undone),
+                            ltx_core::short_id(now)
+                        ),
+                        (Some(undone), None) => {
+                            format!("undid {}", ltx_core::short_id(undone))
+                        }
+                        (None, Some(now)) => {
+                            format!("undone; now at {}", ltx_core::short_id(now))
+                        }
+                        (None, None) => "undone".to_string(),
+                    };
+                    if let Some(tree) = &outcome.preserved_tree {
+                        out.push_str(&format!(
+                            "\n  the working state from that line is kept as {}",
+                            ltx_core::short_id(tree)
+                        ));
+                    }
+                    out
                 },
             );
             Ok(EXIT_OK)

@@ -64,6 +64,10 @@ pub enum Error {
     #[error("{0}")]
     InvalidLine(String),
 
+    /// The repository was written in an on-disk format this build cannot read.
+    #[error("{0}")]
+    UnsupportedFormat(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -80,7 +84,9 @@ impl Error {
             Error::NotARepository(_) => Category::NotARepository,
             Error::NotFound(_) => Category::NotFound,
             Error::Corrupt(_) => Category::Corrupt,
-            Error::Invalid(_) | Error::InvalidLine(_) => Category::Invalid,
+            Error::Invalid(_) | Error::InvalidLine(_) | Error::UnsupportedFormat(_) => {
+                Category::Invalid
+            }
             Error::NoSuchLine(_) => Category::NotFound,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Category::Io,
         }
@@ -93,6 +99,7 @@ impl Error {
             Error::Corrupt(_) => Concept::Checkpoint,
             Error::Invalid(_) => Concept::WorkingState,
             Error::NoSuchLine(_) | Error::InvalidLine(_) => Concept::Line,
+            Error::UnsupportedFormat(_) => Concept::Workspace,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
         }
     }
@@ -115,6 +122,10 @@ impl Error {
                  with a valid argument"
             }
             Error::NoSuchLine(_) => "run `ltx line list` to see which lines exist",
+            Error::UnsupportedFormat(_) => {
+                "this repository predates the current on-disk format; start a fresh \
+                 one with `ltx init` and re-save your work into it"
+            }
             Error::InvalidLine(_) => {
                 "choose a name of letters, digits, dot, underscore, dash or slash; \
                  run `ltx line list` to see the lines that exist"
@@ -198,6 +209,7 @@ mod tests {
             Error::Io(std::io::Error::other("x")),
             Error::NoSuchLine("x".into()),
             Error::InvalidLine("x".into()),
+            Error::UnsupportedFormat("x".into()),
             Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
         ];
         for e in cases {
