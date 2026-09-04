@@ -25,6 +25,7 @@ python3 -m compileall -q harness scripts
 python3 harness/lib/validate_registry.py
 python3 harness/lib/check_no_harness_leak.py
 python3 harness/lib/check_scorecard_integrity.py
+python3 harness/lib/check_adr_evidence.py
 
 echo
 echo "all CI checks passed locally"

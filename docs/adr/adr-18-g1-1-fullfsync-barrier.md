@@ -114,6 +114,35 @@ No threshold moved. The target is still 0 failures over ≥2,000 SIGKILL and
 changed is the fidelity of the fault model: it no longer simulates a fault the
 platform prevents.
 
+### The test that settles it, rather than the argument
+
+Everything above is reasoning, and a lenient amendment to a HARD gate should not
+rest on reasoning alone. The property that actually matters is narrower and is
+measurable:
+
+> **Does the amended gate still fail an engine that does not make its writes
+> durable?**
+
+If yes, the change moved exactly one population — engines that sync correctly —
+and left the defect the gate exists to catch fully detectable. If no, it is a
+weakening whatever the rationale.
+
+It is yes, and the evidence is already committed. The pre-fix arm in
+`bench/probes/g1-1-powerloss-ab-prefix-60.json` **is** that experiment: a shim
+that records no barrier is indistinguishable, to the replayer, from an engine
+that issues none. Every write is volatile, every write is eligible for
+dropping, reordering and tearing, and the result is **34 failures and 34
+checkpoints lost out of 60 trials**.
+
+So an engine that stopped syncing would still be shredded by this gate exactly
+as before. What the amendment removed is not the gate's teeth; it is the gate's
+inability to tell that a correct engine had teeth of its own.
+
+This is the argument to check first if the amendment is ever revisited: not
+whether the numbers improved, but whether an engine with no durability barrier
+still fails. Should a future change make that stop being true, the amendment is
+wrong and this section is how to find out.
+
 Per §0.3, G1.1 reverts to `FAIL(stale)` and is re-measured; its ratchet baseline
 is re-earned from the new run.
 

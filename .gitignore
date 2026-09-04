@@ -3,7 +3,22 @@
 Cargo.lock.bak
 /corpus/data/
 /corpus/cache/
-/bench/results/raw/
+# bench/results/raw/ was ignored wholesale. That silently un-published the
+# measured evidence for three ACCEPTED ADRs, so a reader who cloned the
+# repository could not check any of them:
+#
+#   adr2-git-baseline-django.json, adr2-source-sweep.json -> ADR-2 (chunking)
+#   adr3-store-bench.json                                 -> ADR-3, ADR-4
+#   adr3-fsync-bench.json                                 -> ADR-4
+#
+# The names carry the ADR the measurement was PRODUCED for; the arrows say who
+# cites it. adr3-fsync-bench.json is the F_FULLFSYNC-versus-fsync(2) benchmark
+# run during ADR-3's storage work and cited by ADR-4 for the daemon's group
+# commit — and it is what establishes that fsync(2) is not crash-safe on macOS,
+# which ADR-18 in turn rests on.
+#
+# The four files total 24 KB and are now committed; genuinely large raw output
+# can be ignored by name when it appears.
 /harness/.venv/
 /prototypes/*/target
 .DS_Store

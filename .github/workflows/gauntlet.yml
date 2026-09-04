@@ -33,6 +33,9 @@ jobs:
       - name: Scorecard is generated, not hand-written
         run: python3 harness/lib/check_scorecard_integrity.py
 
+      - name: ADRs cite evidence that exists and agrees with them
+        run: python3 harness/lib/check_adr_evidence.py
+
   measure:
     # CI measures ONLY the gates whose inputs live in the repository. The
     # corpus-dependent gates (G0.3, G0.4, G0.5, G0.7) read multi-gigabyte

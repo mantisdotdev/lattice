@@ -1,0 +1,77 @@
+{
+  "note": "Rust's sync_data() maps to F_FULLFSYNC on macOS (a true media flush); plain fsync(2) on macOS returns once the write reaches the drive cache and is NOT crash-safe against power loss.",
+  "record_bytes": 256,
+  "records": 200,
+  "rows": [
+    {
+      "batch": 1,
+      "mean_us": 4688.3,
+      "p50_us": 4078.2,
+      "p95_us": 7037.2,
+      "p99_us": 17306.4,
+      "prealloc": false,
+      "sync": "fullfsync",
+      "variant": "append+F_FULLFSYNC"
+    },
+    {
+      "batch": 1,
+      "mean_us": 5198.3,
+      "p50_us": 5044.6,
+      "p95_us": 7020.6,
+      "p99_us": 8160.5,
+      "prealloc": true,
+      "sync": "fullfsync",
+      "variant": "prealloc+F_FULLFSYNC"
+    },
+    {
+      "batch": 1,
+      "mean_us": 63.6,
+      "p50_us": 33.4,
+      "p95_us": 181.8,
+      "p99_us": 526.3,
+      "prealloc": false,
+      "sync": "fsync",
+      "variant": "append+fsync(2)"
+    },
+    {
+      "batch": 1,
+      "mean_us": 59.9,
+      "p50_us": 30.3,
+      "p95_us": 132.0,
+      "p99_us": 887.0,
+      "prealloc": true,
+      "sync": "fsync",
+      "variant": "prealloc+fsync(2)"
+    },
+    {
+      "batch": 8,
+      "mean_us": 675.2,
+      "p50_us": 7.5,
+      "p95_us": 4836.6,
+      "p99_us": 6296.8,
+      "prealloc": true,
+      "sync": "fullfsync",
+      "variant": "prealloc+F_FULLFSYNC+group8"
+    },
+    {
+      "batch": 32,
+      "mean_us": 190.7,
+      "p50_us": 4.1,
+      "p95_us": 110.0,
+      "p99_us": 5964.3,
+      "prealloc": true,
+      "sync": "fullfsync",
+      "variant": "prealloc+F_FULLFSYNC+group32"
+    },
+    {
+      "batch": 1,
+      "mean_us": 9.2,
+      "p50_us": 1.6,
+      "p95_us": 8.8,
+      "p99_us": 65.8,
+      "prealloc": true,
+      "sync": "none",
+      "variant": "no-durability(control)"
+    }
+  ]
+}

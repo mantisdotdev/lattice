@@ -111,6 +111,7 @@ is*, never whether the walk ends.)
 G1.3 compares the whole parsed document with `!=`, so every field must be
 invariant under (apply-batch + undo-all):
 
+<!-- evidence: none — an illustrative shape, not a measurement -->
 ```json
 {"ok": true, "version": 1, "current": "main",
  "lines": [{"name": "main", "checkpoint": "<64-hex or null>"}]}
