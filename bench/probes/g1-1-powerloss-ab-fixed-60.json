@@ -1,0 +1,15 @@
+{
+ "_command": "python3 scripts/probe_powerloss.py harness/lib/iofault/libiofault.dylib 60 20260904",
+ "_note": "NOT a gate result. The A/B arm for ADR-18: identical probe, identical seed, identical trial count; the only variable is whether the shim interposes fcntl(F_FULLFSYNC). The pre-fix shim is built from harness/lib/iofault/iofault.c at 0f1f6c8^ (verified to contain no F_FULLFSYNC handling). NOT bit-reproducible: op-log entries embed SystemTime::now(), so the same seed does not fix the bytes the replayer tears, and the failure count varies run to run.",
+ "checkpoints_lost_total": 0,
+ "failure_kinds": {},
+ "failure_sample": [],
+ "failures": 0,
+ "failures_by_operation": {},
+ "pool": "implemented only",
+ "shim": "/Users/deva/rust-git/harness/lib/iofault/libiofault.dylib",
+ "skip_reasons": [],
+ "skipped": 0,
+ "trials_run": 60,
+ "trials_where_replayer_saw_no_barrier": 1
+}

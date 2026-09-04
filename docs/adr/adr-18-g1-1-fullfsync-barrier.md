@@ -254,12 +254,24 @@ operations and omits the SIGKILL half, both of which make it weaker than G1.1.
 Identical seed, identical trials, the only variable being whether the injector
 can see `F_FULLFSYNC`:
 
-| | old shim | fixed shim |
+| | pre-fix shim | fixed shim |
 |---|---|---|
 | trials run | 60 | 60 |
-| failures | **37** | **0** |
-| checkpoints lost | 36 | 0 |
+| failures | **34** | **0** |
+| checkpoints lost | 34 | 0 |
 | trials where the replayer saw no barrier at all | **60 / 60** | 1 / 60 |
+
+Output committed at `bench/probes/g1-1-powerloss-ab-prefix-60.json` and
+`bench/probes/g1-1-powerloss-ab-fixed-60.json`. The pre-fix arm is built from
+`harness/lib/iofault/iofault.c` at `0f1f6c8^`, verified to contain no
+`F_FULLFSYNC` handling.
+
+**These trials are not bit-reproducible, and this record should say so rather
+than present one run as fixed.** Op-log entries embed `SystemTime::now()`, so
+the same RNG seed does not fix the bytes the replayer tears, and the pre-fix
+failure count varies between runs: an earlier execution of this same comparison
+gave 37 failures and 36 checkpoints lost. The fixed arm has been 0 on every
+run.
 
 Two further seeds on the fixed shim, so the comparison does not rest on one,
 80 trials each over the implemented operations only:
@@ -271,8 +283,10 @@ Two further seeds on the fixed shim, so the comparison does not rest on one,
 
 Output committed at `bench/probes/g1-1-powerloss-implemented-80-seed777.json`
 and `bench/probes/g1-1-powerloss-implemented-80-seed31337.json`, each with the
-command that produced it. 220 trials in
-total across the three seeds.
+command that produced it.
+
+**220 fixed-shim trials** across the three seeds (60 + 80 + 80). Counting the
+pre-fix arm as well, 280 trial executions are reported in this section.
 
 The "no barrier" row is the finding in one line. Under the old shim the
 replayer never once observed a durability barrier — 60 trials out of 60 — so

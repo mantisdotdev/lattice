@@ -1,0 +1,50 @@
+{
+ "_command": "python3 scripts/probe_powerloss.py <pre-fix shim built from 0f1f6c8^> 60 20260904",
+ "_note": "NOT a gate result. The A/B arm for ADR-18: identical probe, identical seed, identical trial count; the only variable is whether the shim interposes fcntl(F_FULLFSYNC). The pre-fix shim is built from harness/lib/iofault/iofault.c at 0f1f6c8^ (verified to contain no F_FULLFSYNC handling). NOT bit-reproducible: op-log entries embed SystemTime::now(), so the same seed does not fix the bytes the replayer tears, and the failure count varies run to run.",
+ "checkpoints_lost_total": 34,
+ "failure_kinds": {
+  "checkpoint lost": 34
+ },
+ "failure_sample": [
+  {
+   "durable": 0,
+   "kind": "checkpoint lost",
+   "lost": 1,
+   "ok": false,
+   "op": "save trial checkpoint",
+   "volatile": 23,
+   "why": "thread 'main' (2141244) panicked at /Users/deva/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/redb-2.6.3/src/tree_store/page_store/page_manager.rs:554:18:\ncalled `Option::unwrap()` on a `None` "
+  },
+  {
+   "durable": 0,
+   "kind": "checkpoint lost",
+   "lost": 1,
+   "ok": false,
+   "op": "save trial checkpoint",
+   "volatile": 13,
+   "why": "thread 'main' (2141260) panicked at /Users/deva/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/redb-2.6.3/src/tree_store/page_store/page_manager.rs:85:47:\nindex out of bounds: the len is 1 but t"
+  },
+  {
+   "durable": 0,
+   "kind": "checkpoint lost",
+   "lost": 1,
+   "ok": false,
+   "op": "switch main",
+   "volatile": 9,
+   "why": ""
+  }
+ ],
+ "failures": 34,
+ "failures_by_operation": {
+  "save trial checkpoint": 11,
+  "start crash-line": 7,
+  "switch main": 11,
+  "undo": 5
+ },
+ "pool": "implemented only",
+ "shim": "/private/tmp/claude-501/-Users-deva-rust-git/409e4f9f-0dac-47b6-8574-111b85d550ff/scratchpad/libiofault_prefix.dylib",
+ "skip_reasons": [],
+ "skipped": 0,
+ "trials_run": 60,
+ "trials_where_replayer_saw_no_barrier": 60
+}
