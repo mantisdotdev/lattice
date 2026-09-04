@@ -142,6 +142,19 @@ def main() -> int:
             preamble = text[max(0, m.start() - 400):m.start()]
             markers = list(EVIDENCE_MARKER.finditer(preamble))
             if markers and not preamble[markers[-1].end():].strip():
+                # The body must actually say something. `.+?` under re.S
+                # matches a lone space, so `<!-- evidence:  -->` satisfied the
+                # pattern while attributing nothing — an exemption granted for
+                # an empty promise. Reported rather than falling through to
+                # artifact matching, whose message would describe the wrong
+                # problem.
+                source = markers[-1].group(1).strip()
+                if not source:
+                    problems.append(
+                        f"{rel} has an empty <!-- evidence: --> marker before a "
+                        f"JSON block quoting {', '.join(k for k, _ in pairs)} — "
+                        f"a marker must name where the figures come from")
+                    continue
                 attributed += 1
                 continue
             # The block describes the artifact it has the MOST keys in common
