@@ -477,6 +477,23 @@ impl Repo {
                 .map(|c| (c.id.clone(), c))
                 .collect()
         };
+        // `checkpoints()` admits a blob only if some Save entry references it.
+        // The lazy path resolves through `checkpoint()`, which authenticates the
+        // body but does NOT require that reference — so without this the two
+        // paths would trust different things, and the cheaper one would trust
+        // more. The op-log is the authority on what history contains.
+        let saved: std::collections::BTreeSet<String> = if lazy {
+            self.oplog
+                .entries()?
+                .into_iter()
+                .filter_map(|e| match e.operation {
+                    Operation::Save { checkpoint, .. } => Some(checkpoint),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
 
         // An ordered frontier over every live line tip, expanded newest-first
         // ACROSS all lines. Walking one line to the limit and then stopping
@@ -487,7 +504,7 @@ impl Repo {
             std::collections::BTreeMap::new();
         for rec in state.lines.values() {
             if let Some(tip) = rec.tip.clone() {
-                let cp = self.resolve_cached(&tip, lazy, &mut by_id)?;
+                let cp = self.resolve_cached(&tip, lazy, &saved, &mut by_id)?;
                 frontier.insert((cp.oplog_seq, cp.id.clone()), cp);
             }
         }
@@ -505,7 +522,7 @@ impl Repo {
                 break;
             }
             if let Some(pid) = parent {
-                let p = self.resolve_cached(&pid, lazy, &mut by_id)?;
+                let p = self.resolve_cached(&pid, lazy, &saved, &mut by_id)?;
                 frontier.insert((p.oplog_seq, p.id.clone()), p);
             }
         }
@@ -521,11 +538,17 @@ impl Repo {
         &self,
         id: &str,
         lazy: bool,
+        saved: &std::collections::BTreeSet<String>,
         by_id: &mut std::collections::BTreeMap<String, Checkpoint>,
     ) -> Result<Checkpoint> {
         if lazy && !by_id.contains_key(id) {
-            if let Some(cp) = self.checkpoint(id)? {
-                by_id.insert(id.to_string(), cp);
+            // Require the same Save reference `checkpoints()` requires, so the
+            // lazy path cannot admit a self-consistent blob that history never
+            // recorded.
+            if saved.contains(id) {
+                if let Some(cp) = self.checkpoint(id)? {
+                    by_id.insert(id.to_string(), cp);
+                }
             }
         }
         by_id.get(id).cloned().ok_or_else(|| {
