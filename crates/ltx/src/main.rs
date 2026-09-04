@@ -235,7 +235,22 @@ fn run(cli: &Cli) -> Result<u8> {
             let healthy = report.structure_verified && report.errors.is_empty();
             emit(
                 cli,
-                || serde_json::json!({ "ok": healthy, "report": report }),
+                // FLAT, not nested under "report". G1.1's frozen harness reads
+                // `complete` and `errors` from the top level of this document
+                // (harness/g1/g1_1_crash_safety.py:124), and `log --forensic`
+                // already answers at the top level with `checkpoints`. Nesting
+                // made every one of G1.1's 1,683 trials fail identically:
+                // `doc.get("complete")` was None, so no crash trial could ever
+                // pass, and `doc.get("errors", [])` returned the default `[]`,
+                // which is why the failures carried an empty reason.
+                || {
+                    let mut doc =
+                        serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
+                    if let Some(map) = doc.as_object_mut() {
+                        map.insert("ok".into(), serde_json::json!(healthy));
+                    }
+                    doc
+                },
                 || {
                     // An unhealthy report must never render as a success
                     // sentence: the words the user reads have to match the
