@@ -98,10 +98,19 @@ impl Repo {
     pub fn init(root: &Path) -> Result<Self> {
         let dir = Self::repo_dir(root);
         if dir.exists() {
-            return Err(Error::Invalid(format!(
-                "{} already contains a Lattice repository",
-                root.display()
-            )));
+            // An existing `.lattice` that records NO operation is an init that
+            // was interrupted before it could commit — not a repository. Left
+            // alone it is a directory with no way forward, since `open` refuses
+            // it for having no format and `init` refuses it for existing. So
+            // init RESUMES it; only a directory with real history is refused.
+            let probe = OpLog::open(&dir.join("meta.redb"))?;
+            if !probe.is_empty()? {
+                return Err(Error::Invalid(format!(
+                    "{} already contains a Lattice repository",
+                    root.display()
+                )));
+            }
+            drop(probe);
         }
         fs::create_dir_all(dir.join("packs"))?;
         let store = Store::open(&dir.join("packs"))?;
@@ -449,20 +458,32 @@ impl Repo {
             return self.history(limit);
         }
         let state = self.line_state()?;
-        // Resolve every checkpoint ONCE. `checkpoint()` scans the whole store
-        // per call, so walking ancestries with it is O(history x store) — the
-        // cost G1.7 would pay on every `log`.
-        let by_id: std::collections::BTreeMap<String, Checkpoint> = self
-            .checkpoints()?
-            .into_iter()
-            .map(|c| (c.id.clone(), c))
-            .collect();
+        // With a limit, resolve lazily and memoised: the caller asked for a
+        // handful, so materialising every checkpoint in the repository first
+        // would be unbounded work for a bounded request. Without one we are
+        // returning everything anyway, and a single indexing pass beats
+        // re-scanning the store per ancestry step (which is O(history x store),
+        // the cost the `log` path would otherwise pay).
+        let mut by_id: std::collections::BTreeMap<String, Checkpoint> = match limit {
+            Some(_) => std::collections::BTreeMap::new(),
+            None => self
+                .checkpoints()?
+                .into_iter()
+                .map(|c| (c.id.clone(), c))
+                .collect(),
+        };
+        let lazy = limit.is_some();
         let mut seen: std::collections::BTreeMap<String, Checkpoint> =
             std::collections::BTreeMap::new();
         for rec in state.lines.values() {
             let Some(tip) = rec.tip.clone() else { continue };
             let mut cursor = Some(tip);
             while let Some(id) = cursor {
+                if lazy && !by_id.contains_key(&id) {
+                    if let Some(cp) = self.checkpoint(&id)? {
+                        by_id.insert(id.clone(), cp);
+                    }
+                }
                 let Some(cp) = by_id.get(&id) else {
                     // A named checkpoint that does not resolve is a hole in the
                     // spine, not the end of the walk — returning a silently
@@ -472,8 +493,13 @@ impl Repo {
                         crate::short_id(&id)
                     )));
                 };
+                let cp = cp.clone();
                 if seen.insert(cp.id.clone(), cp.clone()).is_some() {
                     // Already walked this ancestry through another line.
+                    break;
+                }
+                // Enough for the request: stop before walking more history.
+                if limit.is_some_and(|n| seen.len() >= n) {
                     break;
                 }
                 cursor = cp.parent.clone();
@@ -534,11 +560,11 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let Some(target) = self.next_undo_target()? else {
             let mut out = UndoOutcome::nothing();
-            out.rescued_tree = rescued;
+            out.rescued_working_state = rescued;
             return Ok(out);
         };
         let mut out = self.reverse(&target)?;
-        out.rescued_tree = rescued;
+        out.rescued_working_state = rescued;
         Ok(out)
     }
 
@@ -608,8 +634,8 @@ impl Repo {
             undone_checkpoint: None,
             now_at: None,
             undo_seq: None,
-            rescued_tree: None,
-            preserved_tree: None,
+            rescued_working_state: None,
+            preserved_working_state: None,
             remote_effects_not_undone: Vec::new(),
         };
         // What the working tree must look like afterwards, if it must change.
@@ -645,7 +671,7 @@ impl Repo {
                     // work is never destroyed — retrieval belongs to the
                     // ephemeral tier (ADR-16, open conflict 3).
                     lines.lines.remove(name);
-                    outcome.preserved_tree = Some(captured);
+                    outcome.preserved_working_state = Some(captured);
                 } else {
                     lines.lines.entry(name.clone()).or_default().working = Some(captured);
                 }
@@ -709,7 +735,7 @@ impl Repo {
         let from = lines.current.clone();
         if lines.lines.contains_key(&name) {
             let mut out = self.switch_to(lines, &from, &name, true)?;
-            out.rescued_tree = rescued;
+            out.rescued_working_state = rescued;
             return Ok(out);
         }
         // A new line inherits the current tip AND the on-disk bytes, so there
@@ -743,7 +769,7 @@ impl Repo {
             created: true,
             now_at: tip,
             oplog_seq: entry.seq,
-            rescued_tree: rescued,
+            rescued_working_state: rescued,
         })
     }
 
@@ -759,7 +785,7 @@ impl Repo {
             return Err(Error::NoSuchLine(format!("there is no line named {name}")));
         }
         let mut out = self.switch_to(lines, &from, &name, false)?;
-        out.rescued_tree = rescued;
+        out.rescued_working_state = rescued;
         Ok(out)
     }
 
@@ -795,7 +821,7 @@ impl Repo {
                 created: false,
                 now_at: lines.lines.get(to).and_then(|r| r.tip.clone()),
                 oplog_seq: entry.seq,
-                rescued_tree: None,
+                rescued_working_state: None,
             });
         }
 
@@ -846,7 +872,7 @@ impl Repo {
             created: false,
             now_at: tip,
             oplog_seq: entry.seq,
-            rescued_tree: None,
+            rescued_working_state: None,
         })
     }
 
@@ -1334,14 +1360,17 @@ impl Repo {
         let state = self.line_state()?;
         for (name, rec) in &state.lines {
             if let Some(tip) = &rec.tip {
-                // A malformed tip must be REPORTED; erroring out would leave
-                // verify with no report at all, which is the opposite of what
-                // this block is for.
-                let resolved = match self.checkpoint(tip) {
-                    Ok(found) => found.is_some(),
-                    Err(_) => false,
-                };
-                if !resolved {
+                // A malformed tip is a structural finding to REPORT — erroring
+                // out would leave verify with no report at all. A genuine
+                // storage failure is a different thing and must propagate, not
+                // be flattened into "absent".
+                if ChunkId::from_hex(tip).is_none() {
+                    report.structure_verified = false;
+                    report.errors.push(format!(
+                        "line {name} points at {}, which is not a checkpoint address",
+                        crate::short_id(tip)
+                    ));
+                } else if self.checkpoint(tip)?.is_none() {
                     report.structure_verified = false;
                     report.errors.push(format!(
                         "line {name} points at checkpoint {} which is not present",
@@ -1477,14 +1506,14 @@ pub struct UndoOutcome {
     /// Work set aside while completing a switch an earlier command left
     /// unfinished. Distinct from `preserved_tree`, which is the working state
     /// captured because undoing a line creation had nowhere to park it.
-    pub rescued_tree: Option<String>,
+    pub rescued_working_state: Option<String>,
     /// Tree address of working state captured while reversing a line creation.
     ///
     /// Undoing `start` deletes the line, so there is nowhere in the line state
     /// to park the capture — it is written to the store as durable content and
     /// named here instead, so the work is never destroyed even though no
     /// command yet retrieves it (that is the ephemeral tier's job).
-    pub preserved_tree: Option<String>,
+    pub preserved_working_state: Option<String>,
     /// Remote effects an undo could not reverse (Challenge 8 / SPEC §4.3).
     /// Always empty for a purely local undo; present so a future sync-undo can
     /// name its residue rather than silently leaving it.
@@ -1498,8 +1527,8 @@ impl UndoOutcome {
             undone_checkpoint: None,
             now_at: None,
             undo_seq: None,
-            rescued_tree: None,
-            preserved_tree: None,
+            rescued_working_state: None,
+            preserved_working_state: None,
             remote_effects_not_undone: Vec::new(),
         }
     }
@@ -1520,7 +1549,7 @@ pub struct LineOutcome {
     /// Work set aside while completing a switch that an earlier command left
     /// unfinished. Durable, content-addressed, and named here so it is never
     /// captured-but-unmentioned.
-    pub rescued_tree: Option<String>,
+    pub rescued_working_state: Option<String>,
 }
 
 /// A line name, parsed once at the boundary.
@@ -2108,6 +2137,29 @@ mod tests {
             repo.head_checkpoint().unwrap().unwrap().id,
             a.id,
             "the durable redb line state must win over a staler HEAD file"
+        );
+    }
+
+    #[test]
+    fn init_resumes_an_interrupted_init_instead_of_bricking() {
+        // A crash after `.lattice` was created but before anything was
+        // committed leaves a directory `open` refuses (no format recorded) and
+        // that `init` would also refuse (it exists) — no way forward at all.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".lattice/packs")).unwrap();
+
+        let mut repo = Repo::init(dir.path()).expect("init must resume an empty .lattice");
+        fs::write(dir.path().join("f.txt"), b"x").unwrap();
+        repo.save("after resume").unwrap();
+        // redb holds one writer at a time, so release this handle before
+        // asking for another — the constraint `discover` already documents.
+        drop(repo);
+
+        // But a directory with real history is still refused.
+        let err = Repo::init(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("already contains"),
+            "a repository with history must still be refused, got: {err}"
         );
     }
 

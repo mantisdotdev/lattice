@@ -315,8 +315,8 @@ fn run(cli: &Cli) -> Result<u8> {
                         "now_at": outcome.now_at,
                         "undo_seq": outcome.undo_seq,
                         "oplog_seq": outcome.undo_seq,
-                        "preserved_tree": outcome.preserved_tree,
-                        "rescued_tree": outcome.rescued_tree,
+                        "preserved_working_state": outcome.preserved_working_state,
+                        "rescued_working_state": outcome.rescued_working_state,
                         // Challenge 8 / §4.3: undo names any remote residue it
                         // could not reverse. Empty for a purely local undo.
                         "remote_effects_not_undone": outcome.remote_effects_not_undone,
@@ -343,7 +343,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         }
                         (None, None) => "undone".to_string(),
                     };
-                    if let Some(tree) = &outcome.preserved_tree {
+                    if let Some(tree) = &outcome.preserved_working_state {
                         out.push_str(&format!(
                             "\n  the working state from that line is kept as {}",
                             ltx_core::short_id(tree)
@@ -363,7 +363,7 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     serde_json::json!({
                         "ok": true, "line": out.line, "created": out.created,
-                        "now_at": out.now_at, "rescued_tree": out.rescued_tree,
+                        "now_at": out.now_at, "rescued_working_state": out.rescued_working_state,
                         // Every state-changing command reports its position so
                         // a concurrent history can be checked for linearizability.
                         "oplog_seq": out.oplog_seq,
@@ -388,7 +388,7 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     serde_json::json!({
                         "ok": true, "line": out.line, "now_at": out.now_at,
-                        "oplog_seq": out.oplog_seq, "rescued_tree": out.rescued_tree,
+                        "oplog_seq": out.oplog_seq, "rescued_working_state": out.rescued_working_state,
                     })
                 },
                 || format!("now on line {}", out.line),
