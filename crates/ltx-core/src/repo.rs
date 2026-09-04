@@ -1621,25 +1621,38 @@ pub struct LineOutcome {
 /// on macOS `/tmp` is itself a symlink — so the containment check needs the
 /// resolved form of whatever prefix is real.
 fn resolve_as_far_as_it_exists(path: &Path) -> Result<PathBuf> {
-    let mut head = std::path::absolute(path)?;
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        match fs::canonicalize(&head) {
-            Ok(mut resolved) => {
-                resolved.extend(tail.iter().rev());
-                return Ok(resolved);
+    use std::path::Component;
+
+    // Left to right, resolving each prefix as soon as it is real. Walking
+    // right to left instead would step over a `..`: for a repository at
+    // `/r`, the destination `/r/../missing/../r/out` would compare as
+    // "outside" while the filesystem puts it back inside. `..` cannot be
+    // folded away lexically up front either, because `link/..` goes to the
+    // link TARGET's parent, not to `link`'s — so a prefix must be resolved
+    // before its `..` is applied, which is exactly the order below.
+    let mut resolved = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => continue,
+            // Beyond what exists, nothing can be a symlink, so popping is
+            // the same answer the filesystem gives.
+            Component::ParentDir => {
+                resolved.pop();
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let Some(name) = head.file_name().map(|n| n.to_os_string()) else {
-                    // Reached the root without finding anything that exists.
-                    return Err(e.into());
-                };
-                tail.push(name);
-                head.pop();
-            }
+            other => resolved.push(other.as_os_str()),
+        }
+        match fs::canonicalize(&resolved) {
+            Ok(real) => resolved = real,
+            // Not there yet: keep building the path literally.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
             Err(e) => return Err(e.into()),
         }
     }
+    Ok(resolved)
 }
 
 /// A line name, parsed once at the boundary.
@@ -2028,6 +2041,29 @@ mod tests {
         // root — so it is refused on the same grounds, not just the root.
         let err = repo.checkout(&cp.id, &dir.path().join("sub")).unwrap_err();
         assert_eq!(err.category(), crate::error::Category::Invalid);
+
+        // A `..` that walks back INTO the repository must be refused too. The
+        // first shape hides the return behind a component that does not exist
+        // yet, so nothing on the way can be canonicalised in one step; the
+        // second is a plain round trip. Both must resolve as "inside", and
+        // must say so rather than failing with an unrelated I/O error.
+        for sneaky in [
+            dir.path().join("missing/../a.txt"),
+            dir.path().join("../").join(dir.path().file_name().unwrap()),
+        ] {
+            let err = repo.checkout(&cp.id, &sneaky).unwrap_err();
+            assert_eq!(
+                err.category(),
+                crate::error::Category::Invalid,
+                "{} must be refused as inside the repository, not fail obscurely",
+                sneaky.display()
+            );
+        }
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            b"UNSAVED WORK",
+            "no traversal shape may reach the working state"
+        );
 
         // Outside the repository it still works, which is what it is for.
         let (_hold, out) = outside("out");
