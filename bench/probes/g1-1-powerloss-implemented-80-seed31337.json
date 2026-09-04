@@ -1,0 +1,15 @@
+{
+ "_command": "python3 scripts/probe_powerloss.py harness/lib/iofault/libiofault.dylib 80 31337",
+ "_note": "NOT a gate result. scripts/probe_powerloss.py, implemented operations only (save, start, switch, undo), per-trial cleanup. A second and third seed for the fixed shim, so the 60-trial comparison is not resting on one seed. See docs/adr/adr-18-g1-1-fullfsync-barrier.md.",
+ "checkpoints_lost_total": 0,
+ "failure_kinds": {},
+ "failure_sample": [],
+ "failures": 0,
+ "failures_by_operation": {},
+ "pool": "implemented only",
+ "shim": "/Users/deva/rust-git/harness/lib/iofault/libiofault.dylib",
+ "skip_reasons": [],
+ "skipped": 0,
+ "trials_run": 80,
+ "trials_where_replayer_saw_no_barrier": 3
+}

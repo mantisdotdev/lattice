@@ -134,9 +134,16 @@ run confirms both points rather than leaving them as assertions:
   failure reason an unimplemented command.
 
 What this run does establish is narrower than "the engine is crash-safe", and
-the difference matters: 2,000 SIGKILL injections and 1,000 power-loss
-injections across `save`, `start`, `switch` and `undo` lost nothing. The
-operations that do not exist have never been fault-injected, and the four
+the difference matters. The validated scope is **2,000 SIGKILL injections and
+573 power-loss injections**, not 1,000 of the latter: the other 427 power-loss
+trials drew a command that does not exist and exited before any fault was
+injected, so they measured nothing about crash safety. On the SIGKILL side the
+same operations are excluded by a different route — an unrecognised subcommand
+exits before reaching its byte milestone, so the trial is not counted as
+injected and is retried, which is why 3,532 attempts were needed to land 2,000.
+Across that scope, over `save`, `start`, `switch` and `undo`, nothing was lost.
+
+The operations that do not exist have never been fault-injected, and the four
 critical sections in the coverage note have never been entered.
 
 `merge` among those four is a different case from `compaction`, `thinning` and
@@ -193,15 +200,25 @@ unimplemented operations included, over 300 power-loss trials:
 {"pool": "full (G1.1 verbatim)", "trials_run": 300,
  "failures": 130,
  "failure_kinds": {"unimplemented command": 130},
- "failures_by_operation": {"sync": 44, "internals": 86},
+ "failures_by_operation": {"sync --dry-run": 44,
+                           "internals compact": 42,
+                           "internals thin": 44},
  "checkpoints_lost_total": 0,
  "trials_where_replayer_saw_no_barrier": 7}
 ```
 
 130 of 300 against 300 × 3/7 = 128.6 expected, and **every one of the 130
 classified**, not sampled: no verify failure and no checkpoint loss in any
-trial. The seven trials where the replayer saw no barrier are the legitimate
-case — the crash point fell before the first sync — and they passed too.
+trial.
+
+`trials_where_replayer_saw_no_barrier: 7` counts trials in which no write in
+the replayed prefix was covered by a barrier, so all of them were eligible for
+dropping, reordering and tearing. What the artifact supports is that those
+seven passed: a trial only reaches the replay step if its operation succeeded,
+every recorded failure is an unimplemented command that returns before replay,
+and `checkpoints_lost_total` is 0. It does not record where the crash point
+fell relative to the first sync, and an earlier draft asserted that; the claim
+is withdrawn rather than supported by inference.
 
 The full output is committed at
 `bench/probes/g1-1-powerloss-full-pool-300.json`, with the command that
@@ -244,15 +261,25 @@ can see `F_FULLFSYNC`:
 | checkpoints lost | 36 | 0 |
 | trials where the replayer saw no barrier at all | **60 / 60** | 1 / 60 |
 
-Two further seeds on the fixed shim, 80 trials each: 0 failures, 0 checkpoints
-lost. 220 trials in total.
+Two further seeds on the fixed shim, so the comparison does not rest on one,
+80 trials each over the implemented operations only:
+
+| seed | trials | failures | checkpoints lost | no barrier seen |
+|---|---|---|---|---|
+| 777 | 80 | 0 | 0 | 6 |
+| 31337 | 80 | 0 | 0 | 3 |
+
+Output committed at `bench/probes/g1-1-powerloss-implemented-80-seed777.json`
+and `bench/probes/g1-1-powerloss-implemented-80-seed31337.json`, each with the
+command that produced it. 220 trials in
+total across the three seeds.
 
 The "no barrier" row is the finding in one line. Under the old shim the
-replayer never once observed a durability barrier, so every write in every
-trial was volatile. Under the fixed shim that happens in a handful of trials —
-legitimately, when the crash point falls before the first sync — and those
-trials still pass, because redb recovers a torn uncommitted transaction when
-the state beneath it was durable.
+replayer never once observed a durability barrier — 60 trials out of 60 — so
+every write in every trial was volatile and eligible for dropping, reordering
+and tearing. Under the fixed shim it falls to a handful, and those trials still
+pass. Why the residue exists at all is not established by this data and is not
+asserted here.
 
 ## Evidence
 

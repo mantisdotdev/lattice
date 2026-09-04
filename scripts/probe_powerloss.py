@@ -128,8 +128,8 @@ def trial(work, rng, i, shim, pool):
             why = op.stderr.strip()[:200]
             kind = ("unimplemented command"
                     if "unrecognized subcommand" in why else "operation failed")
-            return {"op": argv[0], "ok": False, "why": why, "kind": kind,
-                    "lost": 0}
+            return {"op": " ".join(argv), "ok": False, "why": why,
+                    "kind": kind, "lost": 0}
 
         shutil.rmtree(repo / ".lattice", ignore_errors=True)
         shutil.copytree(snap, repo / ".lattice", symlinks=True)
@@ -146,7 +146,9 @@ def trial(work, rng, i, shim, pool):
         ok, why = verify(repo)
         after = checkpoints(repo)
         lost = len(before) if after is None else len([c for c in before if c not in after])
-        return {"op": argv[0], "ok": bool(ok) and lost == 0, "why": why,
+        # The full verb, not argv[0]: `internals compact` and `internals thin`
+        # are different operations and must not merge into one "internals" row.
+        return {"op": " ".join(argv), "ok": bool(ok) and lost == 0, "why": why,
                 "kind": "clean" if (bool(ok) and lost == 0) else
                         ("checkpoint lost" if lost else "verify failed"),
                 "lost": lost, "durable": info.get("durable"),

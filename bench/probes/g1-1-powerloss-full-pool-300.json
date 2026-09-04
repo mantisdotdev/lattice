@@ -1,6 +1,6 @@
 {
  "_command": "PROBE_FULL_POOL=1 python3 scripts/probe_powerloss.py harness/lib/iofault/libiofault.dylib 300 20260904",
- "_note": "NOT a gate result. scripts/probe_powerloss.py, G1.1's operation pool verbatim (unimplemented commands included), per-trial cleanup so disk stays flat. Retained because G1.1 stores failures[:25] and so cannot show what its other 402 failure reasons were; this classifies every failure. See docs/adr/adr-18-g1-1-fullfsync-barrier.md.",
+ "_note": "NOT a gate result. scripts/probe_powerloss.py with G1.1's operation pool verbatim (unimplemented commands included) and per-trial cleanup. Retained because G1.1 stores failures[:25] and cannot show what its other 402 failure reasons were; this classifies every failure. See docs/adr/adr-18-g1-1-fullfsync-barrier.md.",
  "checkpoints_lost_total": 0,
  "failure_kinds": {
   "unimplemented command": 130
@@ -10,28 +10,29 @@
    "kind": "unimplemented command",
    "lost": 0,
    "ok": false,
-   "op": "sync",
+   "op": "sync --dry-run",
    "why": "error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'."
   },
   {
    "kind": "unimplemented command",
    "lost": 0,
    "ok": false,
-   "op": "internals",
+   "op": "internals compact",
    "why": "error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'."
   },
   {
    "kind": "unimplemented command",
    "lost": 0,
    "ok": false,
-   "op": "sync",
+   "op": "sync --dry-run",
    "why": "error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'."
   }
  ],
  "failures": 130,
  "failures_by_operation": {
-  "internals": 86,
-  "sync": 44
+  "internals compact": 42,
+  "internals thin": 44,
+  "sync --dry-run": 44
  },
  "pool": "full (G1.1 verbatim)",
  "shim": "/Users/deva/rust-git/harness/lib/iofault/libiofault.dylib",
