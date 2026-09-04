@@ -14,8 +14,15 @@ None of those was caught by a test, because nothing mechanically connected the
 prose to the output. This is that connection:
 
   1. Every `bench/**.json` path an ADR names must exist.
-  2. Every `"key": value` pair quoted inside a fenced JSON block in an ADR must
-     match the artifact that ADR cites, when the key is present in it.
+  2. Every `"key": value` pair quoted inside a fenced JSON block must match the
+     artifact that block describes — ALL of its numeric keys, not merely the
+     ones the artifact happens to share. A block quoting one real figure beside
+     one invented figure passed the earlier version.
+  3. A block whose numbers are not a committed measurement — an illustrative
+     shape, or a figure quoted from git history — must carry an
+     `<!-- evidence: ... -->` marker saying where they come from. That is not
+     an escape hatch: it converts "silently unchecked" into "attributed", which
+     is the discipline this file exists to impose.
 
 Rule 2 is deliberately narrow. It checks quoted JSON against committed output;
 it cannot check prose, and a document can still overstate in sentences. It
@@ -34,6 +41,10 @@ ADR_DIR = REPO / "docs" / "adr"
 
 ARTIFACT = re.compile(r"`?(bench/[\w./-]+\.json)`?")
 JSON_BLOCK = re.compile(r"```json\n(.*?)```", re.S)
+# A block whose numbers are not a committed measurement must say where they DO
+# come from. Silently skipping such a block is how an unverifiable figure hides
+# next to verified ones.
+EVIDENCE_MARKER = re.compile(r"<!--\s*evidence:\s*(.+?)\s*-->", re.S)
 # "key": number — strings are excluded, because prose quotes a note verbatim
 # with the line wrapped and a wrapped string is not a mismatch. The value
 # pattern accepts every JSON number form, exponents included: omitting `1e3`
@@ -73,7 +84,7 @@ def main() -> int:
         return 0
 
     problems: list[str] = []
-    checked_paths = checked_pairs = 0
+    checked_paths = checked_pairs = attributed = 0
 
     for adr in sorted(ADR_DIR.glob("*.md")):
         text = adr.read_text()
@@ -98,9 +109,6 @@ def main() -> int:
             else:
                 cited.append(path)
 
-        if not cited:
-            continue
-
         artifacts: dict[str, dict] = {}
         for path in cited:
             try:
@@ -118,9 +126,17 @@ def main() -> int:
         # compare a 300-trial block against whichever file happened to be last.
         # A block is satisfied if some cited artifact agrees on every numeric
         # key the two share.
-        for block in JSON_BLOCK.findall(text):
+        for m in JSON_BLOCK.finditer(text):
+            block = m.group(1)
             pairs = [(k, exact(v)) for k, v in PAIR.findall(block)]
             if not pairs:
+                continue
+            # An explicit attribution immediately before the fence exempts the
+            # block from artifact matching, and only that.
+            preamble = text[max(0, m.start() - 400):m.start()]
+            marker = EVIDENCE_MARKER.search(preamble)
+            if marker:
+                attributed += 1
                 continue
             # The block describes the artifact it has the MOST keys in common
             # with, and that artifact must then agree on all of them. Accepting
@@ -129,6 +145,7 @@ def main() -> int:
             # appears in almost every run — would satisfy a block whose other
             # figures were wrong, which is exactly the error this check exists
             # to catch.
+            keys = [k for k, _ in pairs]
             candidates = []
             for name, doc in artifacts.items():
                 shared = [(k, v) for k, v in pairs
@@ -138,6 +155,11 @@ def main() -> int:
                     miss = [(k, v, doc[k]) for k, v in shared if exact(doc[k]) != v]
                     candidates.append((len(shared), -len(miss), name, shared, miss))
             if not candidates:
+                problems.append(
+                    f"{rel} has a JSON block quoting {', '.join(keys)}, none of "
+                    f"which appears in any artifact it cites — add an "
+                    f"<!-- evidence: ... --> marker saying where the figures "
+                    f"come from, or cite the artifact that measured them")
                 continue
             _, _, name, shared, miss = max(candidates)
             checked_pairs += len(shared)
@@ -145,6 +167,15 @@ def main() -> int:
                 problems.append(
                     f'{rel} quotes "{k}": {quoted}, but {name} — the artifact '
                     f'it most closely describes — records {actual}')
+            # Keys the chosen artifact does not measure at all. Previously these
+            # were skipped, so a block could carry one verified figure and one
+            # unverifiable one and still pass.
+            for k in keys:
+                if k not in artifacts[name]:
+                    problems.append(
+                        f'{rel} quotes "{k}" in a block describing {name}, '
+                        f"which does not record that key — an ADR may not "
+                        f"present an unmeasured number as measured")
 
     if problems:
         print("ADR evidence check FAILED:", file=sys.stderr)
@@ -153,7 +184,8 @@ def main() -> int:
         return 1
 
     print(f"ADR evidence OK: {checked_paths} artifact reference(s) resolve, "
-          f"{checked_pairs} quoted value(s) match their artifact")
+          f"{checked_pairs} quoted value(s) match their artifact, "
+          f"{attributed} block(s) attributed to a non-artifact source")
     return 0
 
 

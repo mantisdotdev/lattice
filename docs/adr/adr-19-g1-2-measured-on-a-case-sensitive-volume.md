@@ -76,6 +76,8 @@ The prior figure it should be read against is not asserted here either. It is
 the manifest this PR replaced, `corpus/manifests/g1-2-adversarial.json` at
 `9c17d05^`, produced by the same builder on the case-folding volume:
 
+<!-- evidence: git 9c17d05^:corpus/manifests/g1-2-adversarial.json — the
+     manifest this PR replaced, not a bench artifact -->
 ```json
 {"total_files": 47,
  "filesystem_case_sensitive": false,
