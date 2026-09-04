@@ -50,12 +50,28 @@ const LINES_KEY: &str = "state";
 /// the Save itself so the two can never disagree.
 const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 
-/// On-disk format version. Bumped to 2 when lines were added: `Save` and
-/// `StartLine` gained fields, which changes what `Entry::compute_id`
-/// re-serialises, so an older log would report every entry as "altered"
-/// (ADR-16 §9). `Repo::open` refuses an older database with a recovery action
-/// rather than reporting phantom tampering.
-pub const FORMAT_VERSION: u64 = 2;
+/// On-disk format version, and the format new entries are written at.
+///
+/// 2 added lines: `Save` and `StartLine` gained fields, which changes what
+/// `Entry::compute_id` re-serialises, so an older log reported every entry as
+/// "altered" (ADR-16 §9). 3 adds changes and assignment (ADR-17 §9), and with
+/// them the per-entry `format` tag that makes this the LAST break requiring a
+/// repository to be recreated: from here, `compute_id` dispatches on the
+/// format an entry was WRITTEN at, so entries written by an older build keep
+/// hashing the way that build hashed them and the Merkle chain stays
+/// continuous across a format change.
+///
+/// An in-place migration is impossible by construction — rewriting entries to
+/// a new shape changes their ids, which is what the chain exists to detect —
+/// so the tag is the only mechanism that can work, and it can only be
+/// introduced AT a break.
+pub const FORMAT_VERSION: u64 = 3;
+
+/// The oldest format this build can read. Below this the per-entry tag does
+/// not exist, so an entry's original serialisation cannot be reproduced and
+/// `verify_chain` could only report phantom tampering.
+pub const MIN_READABLE_FORMAT: u64 = 3;
+
 const FORMAT_KEY: &str = "format";
 
 /// One line of work: where it points, and the working state held for it while
@@ -210,13 +226,38 @@ pub struct Entry {
     pub id: String,
     pub at_unix_ms: u64,
     pub operation: Operation,
+    /// The on-disk format this entry was WRITTEN at, which fixes how its id is
+    /// computed for the rest of the entry's life (ADR-17 §9).
+    ///
+    /// Without this, a build that changed an `Operation` variant could not
+    /// re-derive the ids of entries an older build wrote, so every one of them
+    /// would verify as tampered — which is why formats 1 and 2 could only be
+    /// refused outright rather than migrated.
+    pub format: u64,
 }
 
 impl Entry {
     /// Content hash over everything but `id`, so `id` can be recomputed and
     /// checked without a separate canonical form to keep in sync.
-    fn compute_id(seq: u64, prev: &str, at: u64, op: &Operation) -> Result<String> {
-        let payload = serde_json::to_vec(&(seq, prev, at, op))?;
+    ///
+    /// Dispatches on `format`, so an entry written by an older build hashes
+    /// the way that build hashed it. When a future version changes an
+    /// `Operation` variant it adds an arm here and leaves the existing ones
+    /// untouched; existing entries keep verifying.
+    ///
+    /// `format` is itself inside the payload. It has to be: if it were not
+    /// authenticated, editing the tag on a stored entry would change the rule
+    /// used to check that entry, which is a downgrade attack against the chain
+    /// rather than a version field.
+    fn compute_id(seq: u64, prev: &str, at: u64, op: &Operation, format: u64) -> Result<String> {
+        let payload = match format {
+            3 => serde_json::to_vec(&(seq, prev, at, op, format))?,
+            other => {
+                return Err(Error::UnsupportedFormat(format!(
+                    "entry {seq} records on-disk format {other}, which this build cannot hash"
+                )))
+            }
+        };
         Ok(ChunkId::of(&payload).to_hex())
     }
 }
@@ -414,13 +455,16 @@ impl OpLog {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let id = Entry::compute_id(seq, &prev, at, &operation)?;
+            // New entries are always written at the current format; the tag
+            // records that so a future build can still reproduce this hash.
+            let id = Entry::compute_id(seq, &prev, at, &operation, FORMAT_VERSION)?;
             let entry = Entry {
                 seq,
                 prev,
                 id: id.clone(),
                 at_unix_ms: at,
                 operation,
+                format: FORMAT_VERSION,
             };
             state.last_id = Some(id);
             state.pending.push((entry.clone(), lines, format));
@@ -634,8 +678,15 @@ impl OpLog {
                     short(&expected_prev)
                 )));
             }
-            let recomputed =
-                Entry::compute_id(entry.seq, &entry.prev, entry.at_unix_ms, &entry.operation)?;
+            // Hashed by the rule of the format the entry was written at, not
+            // by this build's, so a chain that spans a format change verifies.
+            let recomputed = Entry::compute_id(
+                entry.seq,
+                &entry.prev,
+                entry.at_unix_ms,
+                &entry.operation,
+                entry.format,
+            )?;
             if recomputed != entry.id {
                 return Ok(Some(format!(
                     "operation {} has been altered: its content hashes to {} \
@@ -934,6 +985,57 @@ mod tests {
         assert!(
             broken.is_some(),
             "a tampered entry must be reported, not panicked on"
+        );
+    }
+
+    #[test]
+    fn new_entries_record_the_format_they_were_written_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = OpLog::open(&dir.path().join("oplog.redb")).unwrap();
+        log.append(Operation::Init).unwrap();
+        let entries = log.entries().unwrap();
+        assert_eq!(entries[0].format, FORMAT_VERSION);
+        assert!(
+            log.verify_chain().unwrap().is_none(),
+            "an entry must verify under the format it recorded"
+        );
+    }
+
+    #[test]
+    fn retagging_an_entry_to_another_format_is_refused_not_accepted() {
+        // The tag decides which rule authenticates the entry, so it must not
+        // be editable into a rule that would accept different content — that
+        // is a downgrade attack against the chain, not a version field. It is
+        // inside the hashed payload for exactly this reason, which is also why
+        // it had to be introduced AT a break rather than added later.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oplog.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+            assert!(log.verify_chain().unwrap().is_none());
+        }
+        let db = Database::create(&path).unwrap();
+        {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(ENTRIES).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut e: Entry = serde_json::from_slice(&raw).unwrap();
+                e.format = FORMAT_VERSION + 1;
+                let bytes = serde_json::to_vec(&e).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        drop(db);
+
+        let log = OpLog::open(&path).unwrap();
+        // Reported as altered, or refused as unhashable — either is a refusal.
+        // What must NOT happen is a clean pass.
+        assert!(
+            !matches!(log.verify_chain(), Ok(None)),
+            "a re-tagged entry must never verify clean"
         );
     }
 

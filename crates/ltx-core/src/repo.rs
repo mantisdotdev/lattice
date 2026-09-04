@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::ChunkId;
 use crate::error::{Error, Result};
-use crate::oplog::{Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE, FORMAT_VERSION};
+use crate::oplog::{
+    Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE, FORMAT_VERSION,
+    MIN_READABLE_FORMAT,
+};
 use crate::platform;
 use crate::store::{PackWriter, Store};
 use crate::tree::{self, Node, Tree};
@@ -159,17 +162,25 @@ impl Repo {
         }
         let store = Store::open(&dir.join("packs"))?;
         let oplog = OpLog::open(&dir.join("meta.redb"))?;
-        // An older log predates the Save/StartLine fields, so re-serialising
-        // its entries would change every id and `verify_chain` would report
-        // phantom tampering. Refuse with a way forward instead (ADR-16 §9).
+        // A RANGE, not an exact match. Formats 1 and 2 predate the per-entry
+        // format tag, so their entries' original serialisation cannot be
+        // reproduced and `verify_chain` could only report phantom tampering —
+        // those are refused with a way forward (ADR-16 §9, ADR-17 §9). From 3
+        // on, `Entry::compute_id` dispatches on the tag, so a log written by an
+        // older build inside that range still verifies and is opened normally.
+        //
+        // A format NEWER than this build is refused too: its entries may use
+        // variants this build cannot parse, and guessing at them is how a
+        // reader corrupts a repository it did not understand.
         match oplog.format_version()? {
-            Some(v) if v == FORMAT_VERSION => {}
+            Some(v) if (MIN_READABLE_FORMAT..=FORMAT_VERSION).contains(&v) => {}
             other => {
                 return Err(Error::UnsupportedFormat(format!(
-                    "this repository is on-disk format {} but this build reads format {}",
+                    "this repository is on-disk format {} but this build reads formats {}–{}",
                     other
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "1 (unversioned)".into()),
+                    MIN_READABLE_FORMAT,
                     FORMAT_VERSION
                 )))
             }
@@ -2016,6 +2027,30 @@ mod tests {
             "entries_written must equal the files actually present, so a folded \
              sibling is never counted as written when it overwrote another"
         );
+    }
+
+    #[test]
+    fn a_repository_outside_the_readable_format_range_is_refused_with_a_way_forward() {
+        for (written, why) in [
+            (MIN_READABLE_FORMAT - 1, "predates the per-entry format tag"),
+            (FORMAT_VERSION + 1, "was written by a newer build"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let repo = Repo::init(dir.path()).unwrap();
+                repo.oplog.set_format_version(written).unwrap();
+            }
+            let err = Repo::open(dir.path()).unwrap_err();
+            assert_eq!(
+                err.category(),
+                crate::error::Category::Invalid,
+                "format {written} ({why}) must be refused"
+            );
+            assert!(
+                !err.recovery().is_empty(),
+                "a refusal must carry a way back to safety"
+            );
+        }
     }
 
     #[test]
