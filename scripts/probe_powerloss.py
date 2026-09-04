@@ -41,6 +41,7 @@ import os
 import random
 import shutil
 import subprocess
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -51,13 +52,38 @@ REPO = Path(__file__).resolve().parents[1]
 LTX = Path(os.environ.get("LTX_BIN", REPO / "target" / "release" / "ltx"))
 REPLAY = REPO / "harness" / "lib" / "iofault" / "replay.py"
 
-# G1.1's pool, minus operations the CLI does not implement yet.
-OPERATIONS = [
+# G1.1's operation pool, verbatim. Three of these do not exist yet; they are
+# INCLUDED so the failure-reason distribution can be measured rather than
+# assumed, because G1.1 itself retains only `failures[:25]` and cannot show
+# what the other 402 were.
+FULL_POOL = [
     ["save", "trial checkpoint"],
     ["start", "crash-line"],
     ["switch", "main"],
     ["undo"],
+    ["sync", "--dry-run"],
+    ["internals", "compact"],
+    ["internals", "thin"],
 ]
+
+# The implemented subset, for isolating crash-safety behaviour from
+# "this command does not exist".
+IMPLEMENTED_ONLY = FULL_POOL[:4]
+
+
+def scrub(text):
+    """Remove host-specific absolute paths from anything that gets committed.
+
+    Probe output is checked in as evidence, so it must not carry the machine it
+    was produced on: the repository root, the home directory and the Cargo
+    registry path all appear in captured stderr and in the shim argument.
+    """
+    if not text:
+        return text
+    out = str(text)
+    for prefix, token in ((str(REPO), "<repo>"), (str(Path.home()), "~")):
+        out = out.replace(prefix, token)
+    return re.sub(r"~/\.cargo/registry/src/[^/]+/", "~/.cargo/registry/src/<index>/", out)
 
 
 def run(argv, cwd, env=None, timeout=120):
@@ -90,7 +116,7 @@ def verify(repo):
         json.dumps(d.get("errors", []))[:200]
 
 
-def trial(work, rng, i, shim):
+def trial(work, rng, i, shim, pool):
     repo = work / f"pl-{i}"
     snap = work / f"snap-{i}"
     journal = work / f"j-{i}.bin"
@@ -110,10 +136,16 @@ def trial(work, rng, i, shim):
         shutil.copytree(repo / ".lattice", snap, symlinks=True)
         journal.unlink(missing_ok=True)
         (repo / f"edit-{i}.bin").write_bytes(rng.randbytes(rng.randrange(1024, 1 << 19)))
-        argv = rng.choice(OPERATIONS)
+        argv = rng.choice(pool)
         op = run(argv, cwd=repo, env=env)
         if op.returncode != 0:
-            return {"skip": f"op {argv[0]} failed: {op.stderr[:80]}"}
+            # G1.1 counts this as a FAILURE, not a skip, so mirror it — the
+            # whole point is to reproduce its accounting.
+            why = op.stderr.strip()[:200]
+            kind = ("unimplemented command"
+                    if "unrecognized subcommand" in why else "operation failed")
+            return {"op": " ".join(argv), "ok": False, "why": scrub(why),
+                    "kind": kind, "lost": 0}
 
         shutil.rmtree(repo / ".lattice", ignore_errors=True)
         shutil.copytree(snap, repo / ".lattice", symlinks=True)
@@ -130,7 +162,12 @@ def trial(work, rng, i, shim):
         ok, why = verify(repo)
         after = checkpoints(repo)
         lost = len(before) if after is None else len([c for c in before if c not in after])
-        return {"op": argv[0], "ok": bool(ok) and lost == 0, "why": why,
+        # The full verb, not argv[0]: `internals compact` and `internals thin`
+        # are different operations and must not merge into one "internals" row.
+        return {"op": " ".join(argv), "ok": bool(ok) and lost == 0,
+                "why": scrub(why),
+                "kind": "clean" if (bool(ok) and lost == 0) else
+                        ("checkpoint lost" if lost else "verify failed"),
                 "lost": lost, "durable": info.get("durable"),
                 "volatile": info.get("volatile")}
     finally:
@@ -154,12 +191,13 @@ def main():
         raise SystemExit(f"replayer missing: {REPLAY}")
     trials = int(sys.argv[2])
     seed = int(sys.argv[3]) if len(sys.argv) > 3 else 20260904
+    pool = FULL_POOL if os.environ.get("PROBE_FULL_POOL") else IMPLEMENTED_ONLY
     rng = random.Random(seed)
     work = Path(tempfile.mkdtemp(prefix="plprobe-"))
     results, skipped = [], []
     try:
         for i in range(trials):
-            r = trial(work, rng, i, shim)
+            r = trial(work, rng, i, shim, pool)
             (skipped if "skip" in r else results).append(r)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -169,17 +207,23 @@ def main():
             f"no trial completed ({len(skipped)} skipped): "
             + "; ".join(sorted({r["skip"][:80] for r in skipped})))
 
+    from collections import Counter
     failures = [r for r in results if not r["ok"]]
     durable_zero = sum(1 for r in results if r.get("durable") == 0)
     print(json.dumps({
-        "shim": str(shim),
+        "shim": scrub(str(shim)),
+        "pool": "full (G1.1 verbatim)" if pool is FULL_POOL else "implemented only",
         "trials_run": len(results),
         "skipped": len(skipped),
-        "skip_reasons": __import__("collections").Counter(r["skip"][:60] for r in skipped).most_common(5),
+        "skip_reasons": Counter(r["skip"][:60] for r in skipped).most_common(5),
         "failures": len(failures),
+        # EVERY failure classified, not a sample — this is the field G1.1
+        # cannot provide, since it stores failures[:25].
+        "failure_kinds": dict(Counter(r["kind"] for r in failures)),
+        "failures_by_operation": dict(Counter(r["op"] for r in failures)),
         "checkpoints_lost_total": sum(r["lost"] for r in results),
         "trials_where_replayer_saw_no_barrier": durable_zero,
-        "failure_sample": failures[:5],
+        "failure_sample": failures[:3],
     }, indent=1))
 
 
