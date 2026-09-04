@@ -41,6 +41,15 @@ const HEADS: TableDefinition<&str, u64> = TableDefinition::new("heads");
 const LINES: TableDefinition<&str, &[u8]> = TableDefinition::new("lines");
 const LINES_KEY: &str = "state";
 
+/// Checkpoint id -> the sequence of the `Save` that recorded it.
+///
+/// The op-log is the authority on what history contains, but answering "does a
+/// Save reference this checkpoint?" by scanning it means loading every entry —
+/// unbounded work for a bounded question, and on the read path of `log`. This
+/// index answers it in one lookup, and is written in the same transaction as
+/// the Save itself so the two can never disagree.
+const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
+
 /// On-disk format version. Bumped to 2 when lines were added: `Save` and
 /// `StartLine` gained fields, which changes what `Entry::compute_id`
 /// re-serialises, so an older log would report every entry as "altered"
@@ -277,6 +286,7 @@ impl OpLog {
             tx.open_table(ENTRIES)?;
             tx.open_table(HEADS)?;
             tx.open_table(LINES)?;
+            tx.open_table(SAVED)?;
             tx.commit()?;
         }
         let last = {
@@ -527,9 +537,29 @@ impl OpLog {
                 }
             }
         }
+        {
+            // Index each Save by the checkpoint it recorded, in the entry's own
+            // transaction, so a lookup can never see one without the other.
+            let mut table = tx.open_table(SAVED)?;
+            for (entry, _, _) in batch {
+                if let Operation::Save { checkpoint, .. } = &entry.operation {
+                    table.insert(checkpoint.as_str(), entry.seq)?;
+                }
+            }
+        }
         // redb's commit is the durability barrier; it fsyncs.
         tx.commit()?;
         Ok(batch.last().map(|(e, _, _)| e.seq).unwrap_or(0))
+    }
+
+    /// The sequence of the `Save` that recorded this checkpoint, if any.
+    ///
+    /// One indexed lookup — the question "is this checkpoint part of history?"
+    /// must not cost a scan of the whole log.
+    pub fn save_seq(&self, checkpoint: &str) -> Result<Option<u64>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(SAVED)?;
+        Ok(table.get(checkpoint)?.map(|v| v.value()))
     }
 
     /// The published line state, or `None` for a repository that has none.
