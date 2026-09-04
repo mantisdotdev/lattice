@@ -1,0 +1,210 @@
+{
+  "iteration": 13,
+  "timestamp": "2026-09-04T10:28:14Z",
+  "stages_measured": [
+    "G1"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "8 gate(s) in G0 were not measured in this run",
+    "12 gate(s) in G1 were not measured in this run",
+    "8 gate(s) in G2 were not measured in this run",
+    "6 gate(s) in G3 were not measured in this run",
+    "7 gate(s) in G4 were not measured in this run",
+    "8 gate(s) in G5 were not measured in this run",
+    "5 gate(s) in G6 were not measured in this run"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G1": "BLOCKED"
+  },
+  "results": [
+    {
+      "gate": "G1.1",
+      "stage": "G1",
+      "title": "Crash & power-loss safety",
+      "metric": "failures across \u22652000 SIGKILL + \u22651000 torn/reordered-write injections (0 required); coverage-gated",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 0.0,
+      "cmp": "==",
+      "unit": "failures",
+      "value": 427.0,
+      "status": "FAIL",
+      "note": "coverage contract not satisfied: fault injector never hit critical section(s): compaction, thinning, merge, sync",
+      "evidence": [
+        "harness/lib/iofault/"
+      ],
+      "detail": {
+        "seed": 20260903,
+        "sigkill_trials_attempted": 3532,
+        "sigkill_trials_injected": 2000,
+        "powerloss_trials": 1000,
+        "critical_section_hits": {
+          "store_write": 563,
+          "compaction": 0,
+          "thinning": 0,
+          "merge": 0,
+          "sync": 0
+        },
+        "checkpoints_lost_total": 0,
+        "failures": [
+          {
+            "trial": 0,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 2,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 4,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 6,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 7,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 11,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 14,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 15,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 17,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 18,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 21,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 22,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 23,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 24,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 25,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 28,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 31,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 32,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 33,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 35,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'thin'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 38,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 40,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 42,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 45,
+            "ok": false,
+            "operation": "internals",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'compact'\n\nUsage: ltx internals [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          },
+          {
+            "trial": 47,
+            "ok": false,
+            "operation": "sync",
+            "why": "operation failed under shim (2): error: unrecognized subcommand 'sync'\n\nUsage: ltx [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+          }
+        ],
+        "failures_truncated": 402
+      },
+      "duration_s": 985.405
+    }
+  ]
+}

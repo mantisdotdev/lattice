@@ -119,31 +119,73 @@ is re-earned from the new run.
 
 ## What this does NOT excuse
 
-G1.1 still does not pass, and this ADR does not claim it should:
+G1.1 still does not pass, and this ADR does not claim it should. The measured
+run confirms both points rather than leaving them as assertions:
 
 - `sync`, `internals compact` and `internals thin` are three of the seven
   operations in the pool and do not exist, so those trials fail on
-  "unrecognized subcommand" and the coverage contract records
-  `compaction`, `thinning`, `merge` and `sync` as critical sections the
-  injector never reached. G1.1 cannot pass until that surface is built. That is
-  the harness-first discipline working as intended, not a defect.
+  "unrecognized subcommand" and the coverage contract records `compaction`,
+  `thinning`, `merge` and `sync` as critical sections the injector never
+  reached. G1.1 cannot pass until that surface is built. That is the
+  harness-first discipline working as intended, not a defect.
 - Any residual failure after this change is a real crash-safety finding and is
-  to be treated as one.
+  to be treated as one. On this run there were none to treat: 427 observed
+  against 428.6 predicted by the unimplemented commands alone, and zero
+  checkpoints lost.
+
+What this run does establish is narrower than "the engine is crash-safe", and
+the difference matters: 2,000 SIGKILL injections and 1,000 power-loss
+injections across `save`, `start`, `switch` and `undo` lost nothing. The
+operations that do not exist have never been fault-injected, and the four
+critical sections named above have never been entered.
 
 ## Measured effect
 
-G1.1 itself could not be re-run to completion on this machine: it retains a
-repository and a ~1.7 MB journal for each of ~4,500 trials, needing roughly
-22–24 GB of scratch. Two attempts died with `ENOSPC` at power-loss trials 431
-and 512 of 1,000, with the work directory growing ~1.6 GB/min to 16 GB. The
-machine has 17 GB free, 26 GB of it held by `corpus/data`. Freeing that is a
-decision for the corpus's owner, not a step to be taken to make a measurement
-fit, so the gate remains unmeasured here and this is recorded rather than
-rounded off.
+### The full gate, once there was disk for it
 
-`scripts/probe_powerloss.py` answers the narrower question the fix is about. It
-runs the same power-loss sequence with per-trial cleanup, so disk stays flat.
-It is a diagnostic and not a gate: it draws only the four implemented
+`bench/results/iteration-13.json`. The estimate above proved right: the work
+directory peaked at 23 GB, which is why two earlier attempts died with `ENOSPC`
+at power-loss trials 431 and 512 against 16–17 GB free.
+
+```
+value:  427 failures            status: FAIL
+note:   coverage contract not satisfied: fault injector never hit critical
+        section(s): compaction, thinning, merge, sync
+sigkill_trials_attempted: 3532     sigkill_trials_injected: 2000
+powerloss_trials: 1000             checkpoints_lost_total: 0
+critical_section_hits: {store_write: 563, compaction: 0, thinning: 0,
+                        merge: 0, sync: 0}
+```
+
+**Zero checkpoints lost across 3,000 fault injections**, and no panic in the
+recorded sample — where the previous run's sample carried two redb panics and
+`DB corrupted: All roots are corrupted`.
+
+Every one of the 427 is a command that does not exist. Three of the seven pool
+operations are unimplemented (`sync`, `internals compact`, `internals thin`),
+so the expected count from that cause alone is 1000 × 3/7 = **428.6** against
+**427** observed. There is no room left for a real failure, and the independent
+`checkpoints_lost_total: 0` says the same thing a second way.
+
+The SIGKILL half is silent for the same reason it needed 3,532 attempts to land
+2,000 injections: an unrecognised subcommand exits before reaching its byte
+milestone, so the trial is not counted as injected and is retried. All 2,000
+injected SIGKILL trials and all 573 power-loss trials that drew an implemented
+operation passed.
+
+**The gate still FAILs, and correctly.** Not on its value but on §6's coverage
+contract: the injector never reached compaction, thinning, merge or sync,
+because none of them exists. G1.1 cannot pass until that surface is built. That
+is the harness-first discipline doing its job — the gate refuses to certify
+crash safety for code that has not been written.
+
+### The controlled comparison that isolated the cause
+
+The full run above shows the outcome; it does not by itself prove the cause,
+because it changed alongside the JSON fix. `scripts/probe_powerloss.py` isolates
+the variable. It runs the same power-loss sequence with per-trial cleanup, so
+disk stays flat, and was run against both shims with everything else held
+fixed. It is a diagnostic and not a gate: it draws only the four implemented
 operations and omits the SIGKILL half, both of which make it weaker than G1.1.
 
 Identical seed, identical trials, the only variable being whether the injector
