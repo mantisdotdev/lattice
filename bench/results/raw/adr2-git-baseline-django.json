@@ -1,0 +1,179 @@
+{
+  "repo": "django__django.git",
+  "commits": 400,
+  "range": {
+    "tip": "5180f82f48b589f93cddc7be7896f654a9aec1ad",
+    "oldest": "fa2a3de6ede10b005fc2c1d23f4cffb53eaec425"
+  },
+  "unique_blobs": 146344,
+  "raw_blob_bytes": 3066352305,
+  "git_gc_aggressive_objects_bytes": 113799241,
+  "git_version": "git version 2.50.1 (Apple Git-155)",
+  "wholefile_zstd_bytes": 826532090,
+  "wholefile_ratio_vs_git": 7.2631,
+  "sweep": [
+    {
+      "params": [
+        1024,
+        2048,
+        8192
+      ],
+      "chunk_store_bytes": 322590150,
+      "ratio_vs_git_gc_aggressive": 2.8347,
+      "pack_long_store_bytes": 62276000,
+      "pack_long_ratio_vs_git": 0.5472,
+      "seg_1mib_ratio_vs_git": 0.7117,
+      "seg_4mib_ratio_vs_git": 0.629,
+      "seg_16mib_ratio_vs_git": 0.5938,
+      "dedup_ratio": 0.2597372903633133,
+      "chunks_unique": 311241
+    },
+    {
+      "params": [
+        2048,
+        4096,
+        16384
+      ],
+      "chunk_store_bytes": 389444345,
+      "ratio_vs_git_gc_aggressive": 3.4222,
+      "pack_long_store_bytes": 59799710,
+      "pack_long_ratio_vs_git": 0.5255,
+      "seg_1mib_ratio_vs_git": 0.7504,
+      "seg_4mib_ratio_vs_git": 0.6285,
+      "seg_16mib_ratio_vs_git": 0.5821,
+      "dedup_ratio": 0.3551938044509859,
+      "chunks_unique": 237662
+    },
+    {
+      "params": [
+        2048,
+        8192,
+        32768
+      ],
+      "chunk_store_bytes": 467713405,
+      "ratio_vs_git_gc_aggressive": 4.11,
+      "pack_long_store_bytes": 58791593,
+      "pack_long_ratio_vs_git": 0.5166,
+      "seg_1mib_ratio_vs_git": 0.8152,
+      "seg_4mib_ratio_vs_git": 0.6402,
+      "seg_16mib_ratio_vs_git": 0.5785,
+      "dedup_ratio": 0.4633273781630908,
+      "chunks_unique": 198240
+    },
+    {
+      "params": [
+        4096,
+        8192,
+        32768
+      ],
+      "chunk_store_bytes": 479557987,
+      "ratio_vs_git_gc_aggressive": 4.2141,
+      "pack_long_store_bytes": 58699196,
+      "pack_long_ratio_vs_git": 0.5158,
+      "seg_1mib_ratio_vs_git": 0.8225,
+      "seg_4mib_ratio_vs_git": 0.6432,
+      "seg_16mib_ratio_vs_git": 0.5803,
+      "dedup_ratio": 0.47652052558259445,
+      "chunks_unique": 193563
+    },
+    {
+      "params": [
+        4096,
+        16384,
+        65536
+      ],
+      "chunk_store_bytes": 578611771,
+      "ratio_vs_git_gc_aggressive": 5.0845,
+      "pack_long_store_bytes": 58518453,
+      "pack_long_ratio_vs_git": 0.5142,
+      "seg_1mib_ratio_vs_git": 0.9276,
+      "seg_4mib_ratio_vs_git": 0.6678,
+      "seg_16mib_ratio_vs_git": 0.5858,
+      "dedup_ratio": 0.6167580385059505,
+      "chunks_unique": 170564
+    },
+    {
+      "params": [
+        8192,
+        16384,
+        65536
+      ],
+      "chunk_store_bytes": 592051055,
+      "ratio_vs_git_gc_aggressive": 5.2026,
+      "pack_long_store_bytes": 58447112,
+      "pack_long_ratio_vs_git": 0.5136,
+      "seg_1mib_ratio_vs_git": 0.9377,
+      "seg_4mib_ratio_vs_git": 0.67,
+      "seg_16mib_ratio_vs_git": 0.5843,
+      "dedup_ratio": 0.6308008025842288,
+      "chunks_unique": 167112
+    },
+    {
+      "params": [
+        8192,
+        32768,
+        131072
+      ],
+      "chunk_store_bytes": 679143594,
+      "ratio_vs_git_gc_aggressive": 5.9679,
+      "pack_long_store_bytes": 58829780,
+      "pack_long_ratio_vs_git": 0.517,
+      "seg_1mib_ratio_vs_git": 1.0543,
+      "seg_4mib_ratio_vs_git": 0.7038,
+      "seg_16mib_ratio_vs_git": 0.5948,
+      "dedup_ratio": 0.7612467354758181,
+      "chunks_unique": 155952
+    },
+    {
+      "params": [
+        16384,
+        65536,
+        262144
+      ],
+      "chunk_store_bytes": 767762042,
+      "ratio_vs_git_gc_aggressive": 6.7466,
+      "pack_long_store_bytes": 59285470,
+      "pack_long_ratio_vs_git": 0.521,
+      "seg_1mib_ratio_vs_git": 1.2001,
+      "seg_4mib_ratio_vs_git": 0.7507,
+      "seg_16mib_ratio_vs_git": 0.613,
+      "dedup_ratio": 0.892922724676935,
+      "chunks_unique": 149555
+    }
+  ],
+  "best": {
+    "params": [
+      1024,
+      2048,
+      8192
+    ],
+    "chunk_store_bytes": 322590150,
+    "ratio_vs_git_gc_aggressive": 2.8347,
+    "pack_long_store_bytes": 62276000,
+    "pack_long_ratio_vs_git": 0.5472,
+    "seg_1mib_ratio_vs_git": 0.7117,
+    "seg_4mib_ratio_vs_git": 0.629,
+    "seg_16mib_ratio_vs_git": 0.5938,
+    "dedup_ratio": 0.2597372903633133,
+    "chunks_unique": 311241
+  },
+  "best_pack_long": {
+    "params": [
+      8192,
+      16384,
+      65536
+    ],
+    "chunk_store_bytes": 592051055,
+    "ratio_vs_git_gc_aggressive": 5.2026,
+    "pack_long_store_bytes": 58447112,
+    "pack_long_ratio_vs_git": 0.5136,
+    "seg_1mib_ratio_vs_git": 0.9377,
+    "seg_4mib_ratio_vs_git": 0.67,
+    "seg_16mib_ratio_vs_git": 0.5843,
+    "dedup_ratio": 0.6308008025842288,
+    "chunks_unique": 167112
+  },
+  "g1_9b_target_ratio": 1.5,
+  "g1_9b_status_perchunk": "would FAIL",
+  "g1_9b_status_packlong": "would PASS"
+}

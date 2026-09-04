@@ -1,0 +1,74 @@
+{
+  "chunk_count": 40000,
+  "chunk_size": 8192,
+  "oplog_appends": 400,
+  "reads": 5000,
+  "rows": [
+    {
+      "backend": "redb",
+      "bytes_on_disk": 1078472704,
+      "n": 40000,
+      "op": "bulk_chunk_write",
+      "p50_us": 0.0,
+      "p95_us": 0.0,
+      "p99_us": 0.0,
+      "per_op_us": 133.725385425,
+      "total_ms": 5349.0154170000005
+    },
+    {
+      "backend": "redb",
+      "bytes_on_disk": 0,
+      "n": 5000,
+      "op": "random_chunk_read",
+      "p50_us": 5.084,
+      "p95_us": 9.25,
+      "p99_us": 23.375,
+      "per_op_us": 6.0389334,
+      "total_ms": 30.194667000000003
+    },
+    {
+      "backend": "redb",
+      "bytes_on_disk": 1589248,
+      "n": 400,
+      "op": "durable_oplog_append",
+      "p50_us": 3124.416,
+      "p95_us": 4824.125,
+      "p99_us": 7848.75,
+      "per_op_us": 3311.9375,
+      "total_ms": 1324.775
+    },
+    {
+      "backend": "append_only_packs",
+      "bytes_on_disk": 329440000,
+      "n": 40000,
+      "op": "bulk_chunk_write",
+      "p50_us": 0.0,
+      "p95_us": 0.0,
+      "p99_us": 0.0,
+      "per_op_us": 58.748073950000006,
+      "total_ms": 2349.922958
+    },
+    {
+      "backend": "append_only_packs",
+      "bytes_on_disk": 0,
+      "n": 5000,
+      "op": "random_chunk_read",
+      "p50_us": 2.458,
+      "p95_us": 3.833,
+      "p99_us": 5.209,
+      "per_op_us": 3.006025,
+      "total_ms": 15.030125
+    },
+    {
+      "backend": "append_only_packs",
+      "bytes_on_disk": 104000,
+      "n": 400,
+      "op": "durable_oplog_append",
+      "p50_us": 9592.125,
+      "p95_us": 19185.917,
+      "p99_us": 26283.209,
+      "per_op_us": 9412.717395,
+      "total_ms": 3765.086958
+    }
+  ]
+}
