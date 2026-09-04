@@ -27,6 +27,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -255,6 +256,154 @@ int IOFAULT_NAME(fdatasync)(int fd) {
   return rc;
 }
 
+/* macOS issues its real durability barrier through fcntl, not fsync.
+ *
+ * `fsync(2)` on macOS returns once the data reaches the drive's volatile write
+ * cache; ADR-4 measured the difference (63 us versus 4,688 us) and the platform
+ * documents that it "reorders and tears un-fsynced writes". The barrier that
+ * actually flushes the media is `fcntl(fd, F_FULLFSYNC)`, which is what Rust's
+ * `File::sync_all` and `File::sync_data` compile to on this platform -- so an
+ * engine doing exactly the right thing issued NO fsync syscall at all.
+ *
+ * Interposing only fsync therefore recorded no barrier for any Rust program on
+ * macOS. Every write became volatile, the replayer dropped, reordered and tore
+ * all of them, and the resulting corruption was attributed to the engine. That
+ * is precisely the failure replay.py's own contract forbids: "a replayer that
+ * violated it would fail the engine for a promise the platform never made --
+ * producing 'bugs' nobody could fix."
+ *
+ * Declared variadic, and it must be: fcntl's third argument is passed as a
+ * variadic argument, which on arm64 arrives on the STACK rather than in a
+ * register. A fixed three-parameter signature would read a register the caller
+ * never set and forward garbage for commands like F_SETFD. */
+/* fcntl's third argument depends ENTIRELY on cmd, so the command must be
+ * selected before any variadic argument is consumed.
+ *
+ * `va_arg(ap, void *)` up front is undefined behaviour twice over: F_FULLFSYNC
+ * takes no third argument at all, so there is nothing to read, and F_SETFD
+ * takes an `int`, which on Apple arm64 occupies a 4-byte stack slot -- reading
+ * it as an 8-byte pointer takes four bytes the caller never pushed. Forwarding
+ * that value would then hand the kernel a corrupted argument on a call the
+ * shim is only supposed to observe.
+ *
+ * The three arities are therefore separated. The default is the pointer form,
+ * which is what the remaining macOS commands (F_GETLK, F_PREALLOCATE,
+ * F_RDADVISE, F_LOG2PHYS, F_PUNCHHOLE, ...) take; a command outside these
+ * lists that takes an integer would be mis-forwarded, so new ones belong in
+ * FCNTL_INT_ARG rather than in the default. */
+#ifdef __APPLE__
+static int fcntl_takes_no_arg(int cmd) {
+  switch (cmd) {
+#ifdef F_GETFD
+    case F_GETFD:
+#endif
+#ifdef F_GETFL
+    case F_GETFL:
+#endif
+#ifdef F_GETOWN
+    case F_GETOWN:
+#endif
+#ifdef F_GETNOSIGPIPE
+    case F_GETNOSIGPIPE:
+#endif
+#ifdef F_GETPROTECTIONCLASS
+    case F_GETPROTECTIONCLASS:
+#endif
+#ifdef F_FULLFSYNC
+    case F_FULLFSYNC:
+#endif
+#ifdef F_BARRIERFSYNC
+    case F_BARRIERFSYNC:
+#endif
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int fcntl_takes_int_arg(int cmd) {
+  switch (cmd) {
+#ifdef F_DUPFD
+    case F_DUPFD:
+#endif
+#ifdef F_DUPFD_CLOEXEC
+    case F_DUPFD_CLOEXEC:
+#endif
+#ifdef F_SETFD
+    case F_SETFD:
+#endif
+#ifdef F_SETFL
+    case F_SETFL:
+#endif
+#ifdef F_SETOWN
+    case F_SETOWN:
+#endif
+#ifdef F_NOCACHE
+    case F_NOCACHE:
+#endif
+#ifdef F_RDAHEAD
+    case F_RDAHEAD:
+#endif
+#ifdef F_GLOBAL_NOCACHE
+    case F_GLOBAL_NOCACHE:
+#endif
+#ifdef F_SETNOSIGPIPE
+    case F_SETNOSIGPIPE:
+#endif
+#ifdef F_SETPROTECTIONCLASS
+    case F_SETPROTECTIONCLASS:
+#endif
+#ifdef F_SINGLE_WRITER
+    case F_SINGLE_WRITER:
+#endif
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+int IOFAULT_NAME(fcntl)(int fd, int cmd, ...) {
+  init_once();
+
+  /* dyld interposition rewrites references in OTHER images, so a direct call
+   * from inside the shim reaches the real fcntl. */
+#define IOFAULT_REAL_FCNTL fcntl
+
+  if (fcntl_takes_no_arg(cmd)) {
+    int rc = IOFAULT_REAL_FCNTL(fd, cmd);
+#ifdef __APPLE__
+    int is_barrier = (cmd == F_FULLFSYNC)
+#ifdef F_BARRIERFSYNC
+                     || (cmd == F_BARRIERFSYNC)
+#endif
+        ;
+    char path[PATH_MAX];
+    /* Same rule as fsync: only a SUCCESSFUL barrier counts, and a directory
+     * sync is a different guarantee from a file sync. */
+    if (is_barrier && rc != -1 && fd_path(fd, path, sizeof(path))) {
+      struct stat st;
+      int is_dir = (fstat(fd, &st) == 0) && S_ISDIR(st.st_mode);
+      journal(is_dir ? OP_DIRSYNC : OP_FSYNC, path, 0, NULL, 0);
+    }
+#endif
+    return rc;
+  }
+
+  va_list ap;
+  va_start(ap, cmd);
+  int rc;
+  if (fcntl_takes_int_arg(cmd)) {
+    int arg = va_arg(ap, int);
+    rc = IOFAULT_REAL_FCNTL(fd, cmd, arg);
+  } else {
+    void *arg = va_arg(ap, void *);
+    rc = IOFAULT_REAL_FCNTL(fd, cmd, arg);
+  }
+  va_end(ap);
+  return rc;
+#undef IOFAULT_REAL_FCNTL
+}
+
 int IOFAULT_NAME(rename)(const char *from, const char *to) {
   init_once();
 #ifdef __APPLE__
@@ -307,6 +456,22 @@ int IOFAULT_NAME(unlink)(const char *path) {
 IOFAULT_INTERPOSE(iofault_write, write);
 IOFAULT_INTERPOSE(iofault_pwrite, pwrite);
 IOFAULT_INTERPOSE(iofault_fsync, fsync);
+#endif /* __APPLE__ */
+
+/* Apple only. On Linux the shim overrides symbols by plain LD_PRELOAD name, so
+ * defining `fcntl` at all would take over EVERY fcntl in the process — and the
+ * classification above is macOS's. Linux adds its own arities (F_SETPIPE_SZ,
+ * F_ADD_SEALS, F_SETLEASE and F_SETSIG take an int; F_GETPIPE_SZ, F_GET_SEALS,
+ * F_GETLEASE and F_GETSIG take none), which would fall to the pointer default
+ * and be mis-forwarded.
+ *
+ * Nothing is lost by staying out: Linux has no F_FULLFSYNC, `sync_all()` is a
+ * real fsync there, and the fsync interposer already records it. If a Linux
+ * barrier ever needs observing, its command classification has to be written
+ * first — not inherited from this one. */
+#ifdef __APPLE__
+IOFAULT_INTERPOSE(iofault_fcntl, fcntl);
+#endif
 IOFAULT_INTERPOSE(iofault_rename, rename);
 IOFAULT_INTERPOSE(iofault_ftruncate, ftruncate);
 IOFAULT_INTERPOSE(iofault_unlink, unlink);

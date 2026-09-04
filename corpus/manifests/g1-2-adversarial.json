@@ -98,6 +98,12 @@
       "sha256": "5c9f9cd83cd20bc6b154521d6c687594713c5621fca27706b428aff14f97909d"
     },
     {
+      "path": "names/UPPER.txt",
+      "bytes": 6,
+      "note": "case-colliding pair, member 1",
+      "sha256": "e83189db38554920ea572093f9ad32facf682f28ccecdac085c1511735a2b492"
+    },
+    {
       "path": "names/d00/d01/d02/d03/d04/d05/d06/d07/d08/d09/d10/d11/d12/d13/d14/d15/d16/d17/d18/d19/d20/d21/d22/d23/deep.txt",
       "bytes": 10,
       "note": "24 levels deep -- approaches Windows MAX_PATH",
@@ -316,17 +322,9 @@
       "note": "relative symlink; target must not be followed on save"
     }
   ],
-  "total_files": 47,
-  "total_bytes": 1102340186,
+  "total_files": 48,
+  "total_bytes": 1102340192,
   "skipped_mandated_cases": [],
-  "folded_names": [
-    {
-      "requested": "names/upper.txt",
-      "occupied_by": [
-        "names/UPPER.txt"
-      ],
-      "reason": "this filesystem does not distinguish these names (case folding or Unicode normalisation)"
-    }
-  ],
-  "filesystem_case_sensitive": false
+  "folded_names": [],
+  "filesystem_case_sensitive": true
 }
