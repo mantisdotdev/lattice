@@ -34,7 +34,7 @@ It deliberately omits the three operations that do not exist yet (sync,
 internals compact, internals thin), because those fail on "unrecognized
 subcommand" and say nothing about crash safety.
 
-Usage: powerloss_probe.py <shim.dylib> <trials> [seed]
+Usage: probe_powerloss.py <shim.dylib> <trials> [seed]
 """
 import json
 import os
@@ -45,8 +45,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO = Path("/Users/deva/rust-git")
-LTX = REPO / "target" / "release" / "ltx"
+# Derived, never hardcoded: a recorded diagnostic that only runs from one
+# person's checkout is not a recorded diagnostic. LTX_BIN overrides the binary.
+REPO = Path(__file__).resolve().parents[1]
+LTX = Path(os.environ.get("LTX_BIN", REPO / "target" / "release" / "ltx"))
 REPLAY = REPO / "harness" / "lib" / "iofault" / "replay.py"
 
 # G1.1's pool, minus operations the CLI does not implement yet.
@@ -139,7 +141,11 @@ def trial(work, rng, i, shim):
 
 
 def main():
-    shim = Path(sys.argv[1])
+    shim = Path(sys.argv[1]).resolve()
+    if not shim.is_file():
+        raise SystemExit(f"shim not found: {shim}")
+    if not LTX.is_file():
+        raise SystemExit(f"ltx not built: {LTX} (cargo build --release)")
     trials = int(sys.argv[2])
     seed = int(sys.argv[3]) if len(sys.argv) > 3 else 20260904
     rng = random.Random(seed)

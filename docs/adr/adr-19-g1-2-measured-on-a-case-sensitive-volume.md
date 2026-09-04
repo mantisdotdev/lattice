@@ -51,13 +51,29 @@ result:
 
 ## Result
 
+Recorded by the runner, not by hand: **`bench/results/iteration-9.json`**, gate
+`G1.2` — `"status": "PASS"`, `"value": 0.0`, `"unit": "mismatches"`, note
+`"0 mismatches over 135 checked entries"` — together with the entry it produced
+in `bench/ratchet.json`.
+
+The iteration file stores the runner's verdict and the harness's `detail`
+block; it does not persist the `coverage` block, which the runner evaluates and
+folds into the status. The harness's own output, which is where `coverage` is
+visible, is:
+
+```json
+{"gate": "G1.2", "value": 0, "unit": "mismatches",
+ "note": "0 mismatches over 135 checked entries",
+ "coverage": {"ok": true, "note": ""},
+ "detail": {"filesystem_case_sensitive": true, "folded_names": [],
+            "checked_entries": 135, "pinned_files": 48, "special_entries": 5,
+            "source_paths": 82, "checkout_paths": 82,
+            "mismatches": [], "mismatches_truncated": 0},
+ "evidence": ["corpus/manifests/g1-2-adversarial.json"]}
 ```
-filesystem_case_sensitive: true
-folded_names: []
-total_files: 48          (47 before — names/upper.txt now exists as its own file)
-0 mismatches over 135 checked entries
-coverage: { ok: true }
-```
+
+48 pinned files where there were 47: `names/upper.txt` now exists as a file of
+its own rather than being folded onto `names/UPPER.txt`.
 
 G1.2: **FAIL → PASS**, with the mandated case-collision requirement actually
 exercised rather than reported as un-exercised.

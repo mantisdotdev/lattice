@@ -276,41 +276,140 @@ int IOFAULT_NAME(fdatasync)(int fd) {
  * variadic argument, which on arm64 arrives on the STACK rather than in a
  * register. A fixed three-parameter signature would read a register the caller
  * never set and forward garbage for commands like F_SETFD. */
+/* fcntl's third argument depends ENTIRELY on cmd, so the command must be
+ * selected before any variadic argument is consumed.
+ *
+ * `va_arg(ap, void *)` up front is undefined behaviour twice over: F_FULLFSYNC
+ * takes no third argument at all, so there is nothing to read, and F_SETFD
+ * takes an `int`, which on Apple arm64 occupies a 4-byte stack slot -- reading
+ * it as an 8-byte pointer takes four bytes the caller never pushed. Forwarding
+ * that value would then hand the kernel a corrupted argument on a call the
+ * shim is only supposed to observe.
+ *
+ * The three arities are therefore separated. The default is the pointer form,
+ * which is what the remaining macOS commands (F_GETLK, F_PREALLOCATE,
+ * F_RDADVISE, F_LOG2PHYS, F_PUNCHHOLE, ...) take; a command outside these
+ * lists that takes an integer would be mis-forwarded, so new ones belong in
+ * FCNTL_INT_ARG rather than in the default. */
+static int fcntl_takes_no_arg(int cmd) {
+  switch (cmd) {
+#ifdef F_GETFD
+    case F_GETFD:
+#endif
+#ifdef F_GETFL
+    case F_GETFL:
+#endif
+#ifdef F_GETOWN
+    case F_GETOWN:
+#endif
+#ifdef F_GETNOSIGPIPE
+    case F_GETNOSIGPIPE:
+#endif
+#ifdef F_GETPROTECTIONCLASS
+    case F_GETPROTECTIONCLASS:
+#endif
+#ifdef F_FULLFSYNC
+    case F_FULLFSYNC:
+#endif
+#ifdef F_BARRIERFSYNC
+    case F_BARRIERFSYNC:
+#endif
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int fcntl_takes_int_arg(int cmd) {
+  switch (cmd) {
+#ifdef F_DUPFD
+    case F_DUPFD:
+#endif
+#ifdef F_DUPFD_CLOEXEC
+    case F_DUPFD_CLOEXEC:
+#endif
+#ifdef F_SETFD
+    case F_SETFD:
+#endif
+#ifdef F_SETFL
+    case F_SETFL:
+#endif
+#ifdef F_SETOWN
+    case F_SETOWN:
+#endif
+#ifdef F_NOCACHE
+    case F_NOCACHE:
+#endif
+#ifdef F_RDAHEAD
+    case F_RDAHEAD:
+#endif
+#ifdef F_GLOBAL_NOCACHE
+    case F_GLOBAL_NOCACHE:
+#endif
+#ifdef F_SETNOSIGPIPE
+    case F_SETNOSIGPIPE:
+#endif
+#ifdef F_SETPROTECTIONCLASS
+    case F_SETPROTECTIONCLASS:
+#endif
+#ifdef F_SINGLE_WRITER
+    case F_SINGLE_WRITER:
+#endif
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 int IOFAULT_NAME(fcntl)(int fd, int cmd, ...) {
   init_once();
-  va_list ap;
-  va_start(ap, cmd);
-  void *arg = va_arg(ap, void *);
-  va_end(ap);
 
-#ifdef __APPLE__
-  int is_barrier = (cmd == F_FULLFSYNC)
-#ifdef F_BARRIERFSYNC
-                   || (cmd == F_BARRIERFSYNC)
+#ifndef __APPLE__
+  /* Linux has no F_FULLFSYNC; sync_all() is a real fsync there and the fsync
+   * interposer already sees it. Forward with the correct arity and nothing
+   * else. */
+  static int (*real)(int, int, ...) = NULL;
+  if (!real) real = (int (*)(int, int, ...))dlsym(RTLD_NEXT, "fcntl");
+#define IOFAULT_REAL_FCNTL real
+#else
+  /* dyld interposition rewrites references in OTHER images, so a direct call
+   * from inside the shim reaches the real fcntl. */
+#define IOFAULT_REAL_FCNTL fcntl
 #endif
-      ;
-  if (is_barrier) {
-    /* Two arguments: these commands ignore the third, and passing one we
-     * invented would be a lie to the kernel. */
-    int rc = fcntl(fd, cmd);
+
+  if (fcntl_takes_no_arg(cmd)) {
+    int rc = IOFAULT_REAL_FCNTL(fd, cmd);
+#ifdef __APPLE__
+    int is_barrier = (cmd == F_FULLFSYNC)
+#ifdef F_BARRIERFSYNC
+                     || (cmd == F_BARRIERFSYNC)
+#endif
+        ;
     char path[PATH_MAX];
     /* Same rule as fsync: only a SUCCESSFUL barrier counts, and a directory
      * sync is a different guarantee from a file sync. */
-    if (rc != -1 && fd_path(fd, path, sizeof(path))) {
+    if (is_barrier && rc != -1 && fd_path(fd, path, sizeof(path))) {
       struct stat st;
       int is_dir = (fstat(fd, &st) == 0) && S_ISDIR(st.st_mode);
       journal(is_dir ? OP_DIRSYNC : OP_FSYNC, path, 0, NULL, 0);
     }
+#endif
     return rc;
   }
-  return fcntl(fd, cmd, arg);
-#else
-  /* Linux has no F_FULLFSYNC; sync_all() is a real fsync there and the fsync
-   * interposer already sees it. Forward untouched. */
-  static int (*real)(int, int, ...) = NULL;
-  if (!real) real = (int (*)(int, int, ...))dlsym(RTLD_NEXT, "fcntl");
-  return real(fd, cmd, arg);
-#endif
+
+  va_list ap;
+  va_start(ap, cmd);
+  int rc;
+  if (fcntl_takes_int_arg(cmd)) {
+    int arg = va_arg(ap, int);
+    rc = IOFAULT_REAL_FCNTL(fd, cmd, arg);
+  } else {
+    void *arg = va_arg(ap, void *);
+    rc = IOFAULT_REAL_FCNTL(fd, cmd, arg);
+  }
+  va_end(ap);
+  return rc;
+#undef IOFAULT_REAL_FCNTL
 }
 
 int IOFAULT_NAME(rename)(const char *from, const char *to) {
