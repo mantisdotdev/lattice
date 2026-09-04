@@ -138,6 +138,33 @@ deferred with the user's explicit sign-off, and are tracked here:
   is a harness amendment, not an engine change. ADR-14 records the current
   manifest-driven approach.
 
+## Found by the `assign` design review (2026-09-04)
+
+Designing the `assign` slice meant auditing every path that assumes *the tip
+checkpoint's tree equals the working state* — an invariant partial save
+removes. Two of the findings turned out to be live defects in merged code
+rather than hazards of the planned feature. One is fixed here; one is tracked.
+
+**Fixed: `checkout` could write inside the repository.** `ltx checkout --into .`
+overwrote uncheckpointed work and exited 0 reporting success. `restore_tree`
+overwrites by deliberate policy, and `checkout` holds `&self`, so it can never
+capture the working state first the way switch, start and undo do — ADR-16 §6's
+capture-before-materialise rule was unsatisfiable on this path. It now refuses
+any destination under the root, subdirectories included, since `snapshot_dir`
+walks the whole root and a file under `./scratch/` is working state exactly as
+much as `./a.txt` is.
+
+- **`save` discards the rescued working state** (`repo.rs`, High): `undo`,
+  `start_line` and `switch_line` all bind the address `complete_pending_switch`
+  returns and surface it; `save` alone drops it. After a repair on the save
+  path the rescued bytes are durable in the store but referenced by nothing and
+  reported nowhere, which breaks ADR-16 §6's "the rescued tree is durable,
+  content-addressed, and **named in the result**". Byte loss does not follow —
+  the content is packed — but the only handle to it is gone. The fix is a
+  `SaveOutcome` mirroring the other three commands; it is deferred to the
+  `assign` slice, where `save`'s signature is already changing, rather than
+  churning 51 call sites twice. **Follow-up: `SaveOutcome` in the assign PR.**
+
 ## What the exercise confirmed
 
 The most serious finding — the un-fsynced HEAD — was reproduced empirically, and
