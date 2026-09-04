@@ -27,6 +27,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -255,6 +256,63 @@ int IOFAULT_NAME(fdatasync)(int fd) {
   return rc;
 }
 
+/* macOS issues its real durability barrier through fcntl, not fsync.
+ *
+ * `fsync(2)` on macOS returns once the data reaches the drive's volatile write
+ * cache; ADR-4 measured the difference (63 us versus 4,688 us) and the platform
+ * documents that it "reorders and tears un-fsynced writes". The barrier that
+ * actually flushes the media is `fcntl(fd, F_FULLFSYNC)`, which is what Rust's
+ * `File::sync_all` and `File::sync_data` compile to on this platform -- so an
+ * engine doing exactly the right thing issued NO fsync syscall at all.
+ *
+ * Interposing only fsync therefore recorded no barrier for any Rust program on
+ * macOS. Every write became volatile, the replayer dropped, reordered and tore
+ * all of them, and the resulting corruption was attributed to the engine. That
+ * is precisely the failure replay.py's own contract forbids: "a replayer that
+ * violated it would fail the engine for a promise the platform never made --
+ * producing 'bugs' nobody could fix."
+ *
+ * Declared variadic, and it must be: fcntl's third argument is passed as a
+ * variadic argument, which on arm64 arrives on the STACK rather than in a
+ * register. A fixed three-parameter signature would read a register the caller
+ * never set and forward garbage for commands like F_SETFD. */
+int IOFAULT_NAME(fcntl)(int fd, int cmd, ...) {
+  init_once();
+  va_list ap;
+  va_start(ap, cmd);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
+
+#ifdef __APPLE__
+  int is_barrier = (cmd == F_FULLFSYNC)
+#ifdef F_BARRIERFSYNC
+                   || (cmd == F_BARRIERFSYNC)
+#endif
+      ;
+  if (is_barrier) {
+    /* Two arguments: these commands ignore the third, and passing one we
+     * invented would be a lie to the kernel. */
+    int rc = fcntl(fd, cmd);
+    char path[PATH_MAX];
+    /* Same rule as fsync: only a SUCCESSFUL barrier counts, and a directory
+     * sync is a different guarantee from a file sync. */
+    if (rc != -1 && fd_path(fd, path, sizeof(path))) {
+      struct stat st;
+      int is_dir = (fstat(fd, &st) == 0) && S_ISDIR(st.st_mode);
+      journal(is_dir ? OP_DIRSYNC : OP_FSYNC, path, 0, NULL, 0);
+    }
+    return rc;
+  }
+  return fcntl(fd, cmd, arg);
+#else
+  /* Linux has no F_FULLFSYNC; sync_all() is a real fsync there and the fsync
+   * interposer already sees it. Forward untouched. */
+  static int (*real)(int, int, ...) = NULL;
+  if (!real) real = (int (*)(int, int, ...))dlsym(RTLD_NEXT, "fcntl");
+  return real(fd, cmd, arg);
+#endif
+}
+
 int IOFAULT_NAME(rename)(const char *from, const char *to) {
   init_once();
 #ifdef __APPLE__
@@ -307,6 +365,7 @@ int IOFAULT_NAME(unlink)(const char *path) {
 IOFAULT_INTERPOSE(iofault_write, write);
 IOFAULT_INTERPOSE(iofault_pwrite, pwrite);
 IOFAULT_INTERPOSE(iofault_fsync, fsync);
+IOFAULT_INTERPOSE(iofault_fcntl, fcntl);
 IOFAULT_INTERPOSE(iofault_rename, rename);
 IOFAULT_INTERPOSE(iofault_ftruncate, ftruncate);
 IOFAULT_INTERPOSE(iofault_unlink, unlink);
