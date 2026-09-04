@@ -501,18 +501,25 @@ impl Repo {
     ///   entry above the target is already reversed, so the state equals the
     ///   state just after the target was applied — which is what licenses these
     ///   local inverses with no conflict analysis.
-    /// * **Eligibility reads only immutable data** (the entry's own fields and
-    ///   its own checkpoint's parent), never the mutable head — so a later undo
-    ///   can never re-enable a target, and the termination measure holds.
+    /// * **Undoing a `start` must not orphan checkpoints**, so it is eligible
+    ///   only while its line still points where its origin points. Eligibility
+    ///   therefore reads current line state.
     ///
-    /// Each undo removes exactly one member of the eligible-live set and adds
-    /// no candidate, so undo-all terminates and `nothing_to_undo` is absorbing.
+    /// Termination does not rest on eligibility: each undo appends an `Undo`
+    /// naming its target, and `undone` is append-only, so that entry leaves the
+    /// live set permanently. `|live|` is finite and strictly decreases by one
+    /// per undo, so undo-all ends and `nothing_to_undo` is absorbing. Changing
+    /// eligibility moves only WHERE the floor is, never whether the walk ends.
     pub fn undo(&mut self) -> Result<UndoOutcome> {
-        self.complete_pending_switch()?;
+        let rescued = self.complete_pending_switch()?;
         let Some(target) = self.next_undo_target()? else {
-            return Ok(UndoOutcome::nothing());
+            let mut out = UndoOutcome::nothing();
+            out.preserved_tree = rescued;
+            return Ok(out);
         };
-        self.reverse(&target)
+        let mut out = self.reverse(&target)?;
+        out.preserved_tree = out.preserved_tree.or(rescued);
+        Ok(out)
     }
 
     /// The highest-seq live, eligible entry, or None at the floor.
@@ -619,7 +626,7 @@ impl Repo {
                 } else {
                     lines.lines.entry(name.clone()).or_default().working = Some(captured);
                 }
-                let restored = lines.lines.entry(from.clone()).or_default().working.take();
+                let restored = lines.lines.entry(from.clone()).or_default().working.clone();
                 lines.current = from.clone();
                 materialise = Some(restored);
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
@@ -628,7 +635,7 @@ impl Repo {
                 if from != to {
                     let captured = self.capture_working_tree()?;
                     lines.lines.entry(to.clone()).or_default().working = Some(captured);
-                    let restored = lines.lines.entry(from.clone()).or_default().working.take();
+                    let restored = lines.lines.entry(from.clone()).or_default().working.clone();
                     lines.current = from.clone();
                     materialise = Some(restored);
                 }
@@ -652,7 +659,16 @@ impl Repo {
         outcome.undo_seq = Some(undo_entry.seq);
 
         if let Some(target) = materialise {
+            // Same discipline as switch_to: the restored address stays in the
+            // published state until the files are actually written, so a failed
+            // materialisation cannot drop the only reference to that work. It
+            // then reads as a pending switch, which the next command completes.
             self.materialise_working_tree(target.as_deref(), &lines)?;
+            let current = lines.current.clone();
+            if let Some(rec) = lines.lines.get_mut(&current) {
+                rec.working = None;
+            }
+            self.oplog.publish_lines(&lines)?;
         }
         self.sync_head_pointer(&lines)?;
         Ok(outcome)
@@ -664,12 +680,14 @@ impl Repo {
     /// switch. The postcondition is uniform — the line exists and is current —
     /// which is why `start <existing>` succeeds rather than erroring (ADR-16 §3).
     pub fn start_line(&mut self, name: &str) -> Result<LineOutcome> {
-        self.complete_pending_switch()?;
+        let rescued = self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let mut lines = self.line_state()?;
         let from = lines.current.clone();
         if lines.lines.contains_key(&name) {
-            return self.switch_to(lines, &from, &name, true);
+            let mut out = self.switch_to(lines, &from, &name, true)?;
+            out.rescued_tree = rescued;
+            return Ok(out);
         }
         // A new line inherits the current tip AND the on-disk bytes, so there
         // is nothing to materialise. Inheriting the tip is forced: G1.1 asserts
@@ -702,6 +720,7 @@ impl Repo {
             created: true,
             now_at: tip,
             oplog_seq: entry.seq,
+            rescued_tree: rescued,
         })
     }
 
@@ -709,14 +728,16 @@ impl Repo {
     /// restoring the target's. Refuses only an unknown or invalid name — §4.3
     /// forbids a dirty-tree refusal, and state is preserved per line.
     pub fn switch_line(&mut self, name: &str) -> Result<LineOutcome> {
-        self.complete_pending_switch()?;
+        let rescued = self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let lines = self.line_state()?;
         let from = lines.current.clone();
         if !lines.lines.contains_key(&name) {
             return Err(Error::NoSuchLine(format!("there is no line named {name}")));
         }
-        self.switch_to(lines, &from, &name, false)
+        let mut out = self.switch_to(lines, &from, &name, false)?;
+        out.rescued_tree = rescued;
+        Ok(out)
     }
 
     fn switch_to(
@@ -751,6 +772,7 @@ impl Repo {
                 created: false,
                 now_at: lines.lines.get(to).and_then(|r| r.tip.clone()),
                 oplog_seq: entry.seq,
+                rescued_tree: None,
             });
         }
 
@@ -801,6 +823,7 @@ impl Repo {
             created: false,
             now_at: tip,
             oplog_seq: entry.seq,
+            rescued_tree: None,
         })
     }
 
@@ -817,20 +840,40 @@ impl Repo {
     /// the interrupted switch self-repairing, which is what lets the
     /// self-target short-circuit stay cheap without stranding a half-applied
     /// switch.
-    fn complete_pending_switch(&mut self) -> Result<()> {
-        let mut lines = self.line_state()?;
+    fn complete_pending_switch(&mut self) -> Result<Option<String>> {
+        let lines = self.line_state()?;
         let current = lines.current.clone();
         let pending = lines.lines.get(&current).and_then(|r| r.working.clone());
         let Some(pending) = pending else {
-            return Ok(());
+            return Ok(None);
         };
+        // Capture what is on disk BEFORE pruning to the pending tree. The
+        // interrupted switch captured only what existed BEFORE it failed, so
+        // anything written since — by a user who fixed the permission error the
+        // switch reported and carried on working — has no durable copy at all,
+        // and this materialiser would delete it with no way back. ADR-16 §6's
+        // rule holds on the repair path too: nothing is materialised over an
+        // uncaptured working tree.
+        let rescued = self.capture_working_tree()?;
+        let mut lines = self.line_state()?;
+        if rescued == pending {
+            // Nothing was written since the interruption; just consume the
+            // marker without touching a single file.
+            if let Some(rec) = lines.lines.get_mut(&current) {
+                rec.working = None;
+            }
+            self.oplog.publish_lines(&lines)?;
+            return Ok(None);
+        }
         self.materialise_working_tree(Some(&pending), &lines)?;
         if let Some(rec) = lines.lines.get_mut(&current) {
             rec.working = None;
         }
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
-        Ok(())
+        // Durable, content-addressed, and named to the caller — the same
+        // contract undo-of-start already gives for work it must set aside.
+        Ok(Some(rescued))
     }
 
     /// Snapshot the working tree into the store and return its tree address.
@@ -1439,6 +1482,10 @@ pub struct LineOutcome {
     /// Position of the recorded operation. Every state-changing command reports
     /// one so a concurrent history can be checked for linearizability.
     pub oplog_seq: u64,
+    /// Work set aside while completing a switch that an earlier command left
+    /// unfinished. Durable, content-addressed, and named here so it is never
+    /// captured-but-unmentioned.
+    pub rescued_tree: Option<String>,
 }
 
 /// A line name, parsed once at the boundary.
@@ -2109,6 +2156,50 @@ mod tests {
         assert_eq!(err.concept(), crate::error::Concept::Line);
         let bad = repo.start_line("has space").unwrap_err();
         assert_eq!(bad.concept(), crate::error::Concept::Line);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_written_after_an_interrupted_switch_is_captured_not_destroyed() {
+        // A switch that publishes and then fails mid-materialise (here: an
+        // unwritable directory) leaves a pending marker. The user fixes the
+        // cause and keeps working. The next command completes the switch — and
+        // must capture what is on disk BEFORE replacing it, or that work is
+        // gone with no durable copy anywhere.
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed").unwrap();
+
+        repo.start_line("other").unwrap();
+        fs::create_dir(dir.path().join("blocked")).unwrap();
+        fs::write(dir.path().join("blocked/b.txt"), b"b").unwrap();
+        repo.save("other work").unwrap();
+
+        fs::set_permissions(
+            dir.path().join("blocked"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        let failed = repo.switch_line(DEFAULT_LINE);
+        fs::set_permissions(
+            dir.path().join("blocked"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(
+            failed.is_err(),
+            "the switch must fail while the directory cannot be pruned"
+        );
+
+        fs::write(dir.path().join("URGENT.txt"), b"urgent").unwrap();
+        repo.save("later").unwrap();
+
+        assert!(
+            repo.store().contains(ChunkId::of(b"urgent")),
+            "work written after an interrupted switch must be captured before \
+             the switch is completed over it"
+        );
     }
 
     #[cfg(unix)]

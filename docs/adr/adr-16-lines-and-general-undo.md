@@ -143,6 +143,15 @@ switch — the current line holding preserved state is precisely that residue, s
 the invariant is that a current line holds none. This is what lets the self-target
 short-circuit stay cheap without stranding a half-applied switch.
 
+**The repair path obeys the same rule.** It captures the working tree before it
+materialises, because the interrupted switch captured only what existed *before* it
+failed — anything written since (by a user who fixed the permission error the switch
+reported and carried on) has no durable copy at all, and completing the switch would
+delete it. When the disk already matches the pending tree it consumes the marker and
+touches no file; otherwise the rescued tree is durable, content-addressed, and named
+in the result, the same contract undo-of-`start` gives for work it must set aside.
+Undo's inverses hold the restored address across their publish for the same reason.
+
 **The materialiser never follows a symlink.** Every branch decides on
 `symlink_metadata`. Descending through a link would delete the link *target's*
 contents — outside the working tree entirely (CWE-59) — and an ordinary

@@ -362,7 +362,7 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     serde_json::json!({
                         "ok": true, "line": out.line, "created": out.created,
-                        "now_at": out.now_at,
+                        "now_at": out.now_at, "rescued_tree": out.rescued_tree,
                         // Every state-changing command reports its position so
                         // a concurrent history can be checked for linearizability.
                         "oplog_seq": out.oplog_seq,
@@ -387,7 +387,7 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     serde_json::json!({
                         "ok": true, "line": out.line, "now_at": out.now_at,
-                        "oplog_seq": out.oplog_seq,
+                        "oplog_seq": out.oplog_seq, "rescued_tree": out.rescued_tree,
                     })
                 },
                 || format!("now on line {}", out.line),
