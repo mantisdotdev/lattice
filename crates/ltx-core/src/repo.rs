@@ -646,7 +646,18 @@ impl Repo {
             // non-undoable at the source so a core caller cannot append one and
             // have undo skip it in silence; defining its inverse belongs to the
             // adopt slice.
-            _ => false,
+            //
+            // Listed rather than caught by `_`, so that the compile-time
+            // guarantee `reverse` documents holds for BOTH halves of undo. A
+            // catch-all here would let a new undoable variant arrive with a
+            // `reverse` arm and no eligibility arm: it would compile, become
+            // permanently ineligible, and `ltx undo` would report
+            // `nothing_to_undo` while its effect still stood.
+            Operation::Init
+            | Operation::Undo { .. }
+            | Operation::Adopt { .. }
+            | Operation::Redact { .. }
+            | Operation::Thin { .. } => false,
         })
     }
 
