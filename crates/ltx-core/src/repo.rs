@@ -125,6 +125,11 @@ impl Repo {
         // `main` (ADR-16 §2). `Init` is not undoable, so `main` sits below the
         // undo floor.
         oplog.commit_initial(Operation::Init, LineState::initial(), FORMAT_VERSION)?;
+        // redb's create syncs `.lattice` itself, but the entry FOR `.lattice`
+        // lives in `root` and is only committed once `root` is fsynced —
+        // otherwise a crash can lose the whole repository directory after init
+        // reported success.
+        platform::sync_dir(root)?;
         Ok(Repo {
             root: root.to_path_buf(),
             store,
@@ -462,57 +467,73 @@ impl Repo {
         // handful, so materialising every checkpoint in the repository first
         // would be unbounded work for a bounded request. Without one we are
         // returning everything anyway, and a single indexing pass beats
-        // re-scanning the store per ancestry step (which is O(history x store),
-        // the cost the `log` path would otherwise pay).
-        let mut by_id: std::collections::BTreeMap<String, Checkpoint> = match limit {
-            Some(_) => std::collections::BTreeMap::new(),
-            None => self
-                .checkpoints()?
+        // re-scanning the store per ancestry step.
+        let lazy = limit.is_some();
+        let mut by_id: std::collections::BTreeMap<String, Checkpoint> = if lazy {
+            std::collections::BTreeMap::new()
+        } else {
+            self.checkpoints()?
                 .into_iter()
                 .map(|c| (c.id.clone(), c))
-                .collect(),
+                .collect()
         };
-        let lazy = limit.is_some();
-        let mut seen: std::collections::BTreeMap<String, Checkpoint> =
+
+        // An ordered frontier over every live line tip, expanded newest-first
+        // ACROSS all lines. Walking one line to the limit and then stopping
+        // would return that line's N while omitting newer checkpoints on
+        // another — the limited view has to be the newest N of the whole
+        // history, not of whichever line was visited first.
+        let mut frontier: std::collections::BTreeMap<(u64, String), Checkpoint> =
             std::collections::BTreeMap::new();
         for rec in state.lines.values() {
-            let Some(tip) = rec.tip.clone() else { continue };
-            let mut cursor = Some(tip);
-            while let Some(id) = cursor {
-                if lazy && !by_id.contains_key(&id) {
-                    if let Some(cp) = self.checkpoint(&id)? {
-                        by_id.insert(id.clone(), cp);
-                    }
-                }
-                let Some(cp) = by_id.get(&id) else {
-                    // A named checkpoint that does not resolve is a hole in the
-                    // spine, not the end of the walk — returning a silently
-                    // shorter history is exactly what the gate must not see.
-                    return Err(Error::Corrupt(format!(
-                        "checkpoint {} is referenced but not present",
-                        crate::short_id(&id)
-                    )));
-                };
-                let cp = cp.clone();
-                if seen.insert(cp.id.clone(), cp.clone()).is_some() {
-                    // Already walked this ancestry through another line.
-                    break;
-                }
-                // Enough for the request: stop before walking more history.
-                if limit.is_some_and(|n| seen.len() >= n) {
-                    break;
-                }
-                cursor = cp.parent.clone();
+            if let Some(tip) = rec.tip.clone() {
+                let cp = self.resolve_cached(&tip, lazy, &mut by_id)?;
+                frontier.insert((cp.oplog_seq, cp.id.clone()), cp);
             }
         }
-        let mut out: Vec<Checkpoint> = seen.into_values().collect();
-        // Newest first, with the id as a deterministic tiebreak so two runs
-        // over the same state produce byte-identical output.
-        out.sort_by(|a, b| b.oplog_seq.cmp(&a.oplog_seq).then(a.id.cmp(&b.id)));
-        if let Some(n) = limit {
-            out.truncate(n);
+
+        let mut out: Vec<Checkpoint> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        while let Some(key) = frontier.keys().next_back().cloned() {
+            let cp = frontier.remove(&key).expect("key came from this map");
+            if !seen.insert(cp.id.clone()) {
+                continue;
+            }
+            let parent = cp.parent.clone();
+            out.push(cp);
+            if limit.is_some_and(|n| out.len() >= n) {
+                break;
+            }
+            if let Some(pid) = parent {
+                let p = self.resolve_cached(&pid, lazy, &mut by_id)?;
+                frontier.insert((p.oplog_seq, p.id.clone()), p);
+            }
         }
         Ok(out)
+    }
+
+    /// Resolve a checkpoint id, memoising into `by_id`.
+    ///
+    /// A referenced id that does not resolve is a hole in the spine, not the
+    /// end of a walk — returning a silently shorter history is exactly what the
+    /// gate reading this array must never see.
+    fn resolve_cached(
+        &self,
+        id: &str,
+        lazy: bool,
+        by_id: &mut std::collections::BTreeMap<String, Checkpoint>,
+    ) -> Result<Checkpoint> {
+        if lazy && !by_id.contains_key(id) {
+            if let Some(cp) = self.checkpoint(id)? {
+                by_id.insert(id.to_string(), cp);
+            }
+        }
+        by_id.get(id).cloned().ok_or_else(|| {
+            Error::Corrupt(format!(
+                "checkpoint {} is referenced but not present",
+                crate::short_id(id)
+            ))
+        })
     }
 
     /// The history the user sees: reachable checkpoints, newest first,
@@ -2412,6 +2433,44 @@ mod tests {
             repo.lines().unwrap().current,
             "feature",
             "undoing a switch returns to the line it left"
+        );
+    }
+
+    #[test]
+    fn a_limited_forensic_view_returns_the_newest_across_all_lines() {
+        // Walking one line to the limit and stopping would return that line's
+        // newest N while omitting NEWER checkpoints on another line. The limit
+        // has to select over the whole history, not the first line visited.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"0").unwrap();
+        repo.save("seed").unwrap();
+
+        // An older line, then a newer one; `zzz` sorts last by name but holds
+        // the newest checkpoints, so name order and recency disagree.
+        repo.start_line("aaa").unwrap();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        let a1 = repo.save("older line").unwrap();
+        repo.switch_line(DEFAULT_LINE).unwrap();
+        repo.start_line("zzz").unwrap();
+        fs::write(dir.path().join("f"), b"2").unwrap();
+        let z1 = repo.save("newer line").unwrap();
+        fs::write(dir.path().join("f"), b"3").unwrap();
+        let z2 = repo.save("newest").unwrap();
+
+        let ids: Vec<String> = repo
+            .log_view(true, Some(2))
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![z2.id.clone(), z1.id.clone()],
+            "a limited forensic view must be the newest across every line"
+        );
+        assert!(
+            !ids.contains(&a1.id),
+            "an older line must not displace newer work"
         );
     }
 
