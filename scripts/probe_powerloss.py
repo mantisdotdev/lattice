@@ -41,6 +41,7 @@ import os
 import random
 import shutil
 import subprocess
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -68,6 +69,21 @@ FULL_POOL = [
 # The implemented subset, for isolating crash-safety behaviour from
 # "this command does not exist".
 IMPLEMENTED_ONLY = FULL_POOL[:4]
+
+
+def scrub(text):
+    """Remove host-specific absolute paths from anything that gets committed.
+
+    Probe output is checked in as evidence, so it must not carry the machine it
+    was produced on: the repository root, the home directory and the Cargo
+    registry path all appear in captured stderr and in the shim argument.
+    """
+    if not text:
+        return text
+    out = str(text)
+    for prefix, token in ((str(REPO), "<repo>"), (str(Path.home()), "~")):
+        out = out.replace(prefix, token)
+    return re.sub(r"~/\.cargo/registry/src/[^/]+/", "~/.cargo/registry/src/<index>/", out)
 
 
 def run(argv, cwd, env=None, timeout=120):
@@ -128,7 +144,7 @@ def trial(work, rng, i, shim, pool):
             why = op.stderr.strip()[:200]
             kind = ("unimplemented command"
                     if "unrecognized subcommand" in why else "operation failed")
-            return {"op": " ".join(argv), "ok": False, "why": why,
+            return {"op": " ".join(argv), "ok": False, "why": scrub(why),
                     "kind": kind, "lost": 0}
 
         shutil.rmtree(repo / ".lattice", ignore_errors=True)
@@ -148,7 +164,8 @@ def trial(work, rng, i, shim, pool):
         lost = len(before) if after is None else len([c for c in before if c not in after])
         # The full verb, not argv[0]: `internals compact` and `internals thin`
         # are different operations and must not merge into one "internals" row.
-        return {"op": " ".join(argv), "ok": bool(ok) and lost == 0, "why": why,
+        return {"op": " ".join(argv), "ok": bool(ok) and lost == 0,
+                "why": scrub(why),
                 "kind": "clean" if (bool(ok) and lost == 0) else
                         ("checkpoint lost" if lost else "verify failed"),
                 "lost": lost, "durable": info.get("durable"),
@@ -194,7 +211,7 @@ def main():
     failures = [r for r in results if not r["ok"]]
     durable_zero = sum(1 for r in results if r.get("durable") == 0)
     print(json.dumps({
-        "shim": str(shim),
+        "shim": scrub(str(shim)),
         "pool": "full (G1.1 verbatim)" if pool is FULL_POOL else "implemented only",
         "trials_run": len(results),
         "skipped": len(skipped),
