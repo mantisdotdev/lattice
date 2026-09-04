@@ -646,7 +646,18 @@ impl Repo {
             // non-undoable at the source so a core caller cannot append one and
             // have undo skip it in silence; defining its inverse belongs to the
             // adopt slice.
-            _ => false,
+            //
+            // Listed rather than caught by `_`, so that the compile-time
+            // guarantee `reverse` documents holds for BOTH halves of undo. A
+            // catch-all here would let a new undoable variant arrive with a
+            // `reverse` arm and no eligibility arm: it would compile, become
+            // permanently ineligible, and `ltx undo` would report
+            // `nothing_to_undo` while its effect still stood.
+            Operation::Init
+            | Operation::Undo { .. }
+            | Operation::Adopt { .. }
+            | Operation::Redact { .. }
+            | Operation::Thin { .. } => false,
         })
     }
 
@@ -1117,6 +1128,29 @@ impl Repo {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
+        // Refuse a destination inside the repository.
+        //
+        // `restore_tree` overwrites whatever it finds, by the deliberate policy
+        // stated there — correct for a directory the caller named, lethal for
+        // the working state. And unlike switch, start and undo, checkout holds
+        // `&self`: it CANNOT capture the working tree first, so ADR-16 §6's
+        // "nothing is materialised over an uncaptured working tree" cannot be
+        // satisfied here at all. `ltx checkout --into .` therefore destroyed
+        // uncheckpointed work and exited 0 reporting success.
+        //
+        // Writing a checkpoint OUT is what this command is for. Restoring the
+        // working state IN PLACE is a different operation, with the capture
+        // obligation that implies, and it does not exist yet — refusing keeps
+        // that door open instead of silently doing it wrong.
+        let root = resolve_as_far_as_it_exists(&self.root)?;
+        if resolve_as_far_as_it_exists(dest)?.starts_with(&root) {
+            return Err(Error::Invalid(format!(
+                "{} is inside the repository; checkout writes over what it finds \
+                 and cannot preserve uncheckpointed work, so it writes only \
+                 outside the repository",
+                dest.display()
+            )));
+        }
         fs::create_dir_all(dest)?;
         let mut report = CheckoutReport {
             checkpoint: cp.id.clone(),
@@ -1578,6 +1612,49 @@ pub struct LineOutcome {
     pub rescued_working_state: Option<String>,
 }
 
+/// Resolve `path` through symlinks as far as it exists, appending the part
+/// that does not exist yet verbatim.
+///
+/// `fs::canonicalize` fails outright on a path whose tail is absent, but a
+/// checkout destination is usually a directory about to be created. Comparing
+/// unresolved paths would be defeated by `.`, `..`, or a symlinked ancestor —
+/// on macOS `/tmp` is itself a symlink — so the containment check needs the
+/// resolved form of whatever prefix is real.
+fn resolve_as_far_as_it_exists(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+
+    // Left to right, resolving each prefix as soon as it is real. Walking
+    // right to left instead would step over a `..`: for a repository at
+    // `/r`, the destination `/r/../missing/../r/out` would compare as
+    // "outside" while the filesystem puts it back inside. `..` cannot be
+    // folded away lexically up front either, because `link/..` goes to the
+    // link TARGET's parent, not to `link`'s — so a prefix must be resolved
+    // before its `..` is applied, which is exactly the order below.
+    let mut resolved = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => continue,
+            // Beyond what exists, nothing can be a symlink, so popping is
+            // the same answer the filesystem gives.
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+        match fs::canonicalize(&resolved) {
+            Ok(real) => resolved = real,
+            // Not there yet: keep building the path literally.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(resolved)
+}
+
 /// A line name, parsed once at the boundary.
 ///
 /// Kept to a conservative set so a name is never mistaken for a path segment
@@ -1663,6 +1740,17 @@ mod tests {
         (dir, repo)
     }
 
+    /// A checkout destination outside the repository.
+    ///
+    /// `checkout` refuses to write anywhere under the root — it holds `&self`
+    /// and so can never capture the working state first. Callers bind the
+    /// returned `TempDir`, which must outlive the path.
+    fn outside(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(name);
+        (dir, dest)
+    }
+
     #[test]
     fn init_records_an_operation_and_creates_the_store() {
         let (dir, repo) = repo();
@@ -1691,7 +1779,7 @@ mod tests {
         fs::write(dir.path().join("empty.txt"), b"").unwrap();
 
         let cp = repo.save("first").unwrap();
-        let out = dir.path().join("restored");
+        let (_hold, out) = outside("restored");
         repo.checkout(&cp.id, &out).unwrap();
 
         assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"hello\r\nworld\r\n");
@@ -1709,7 +1797,7 @@ mod tests {
         fs::write(dir.path().join("crlf.txt"), b"a\r\nb\r").unwrap();
         fs::write(dir.path().join("bad.bin"), [0x41, 0xC3, 0x28, 0xA0]).unwrap();
         let cp = repo.save("adversarial").unwrap();
-        let out = dir.path().join("out");
+        let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         assert_eq!(fs::read(out.join("crlf.txt")).unwrap(), b"a\r\nb\r");
         assert_eq!(
@@ -1729,7 +1817,7 @@ mod tests {
         fs::write(dir.path().join("target.txt"), b"x").unwrap();
         std::os::unix::fs::symlink("target.txt", dir.path().join("link")).unwrap();
         let cp = repo.save("with a link").unwrap();
-        let out = dir.path().join("out");
+        let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         let meta = fs::symlink_metadata(out.join("link")).unwrap();
         assert!(
@@ -1752,7 +1840,7 @@ mod tests {
         let (dir, mut repo) = repo();
         std::os::unix::fs::symlink("/nowhere/at/all", dir.path().join("dangling")).unwrap();
         let cp = repo.save("dangling").unwrap();
-        let out = dir.path().join("out");
+        let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         assert!(fs::symlink_metadata(out.join("dangling"))
             .unwrap()
@@ -1770,7 +1858,7 @@ mod tests {
         fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
         crate::platform::set_file_mode(&script, 0o755).unwrap();
         let cp = repo.save("executable").unwrap();
-        let out = dir.path().join("out");
+        let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         let mode = crate::platform::file_mode(&fs::metadata(out.join("run.sh")).unwrap());
         assert_eq!(mode, 0o755);
@@ -1858,7 +1946,7 @@ mod tests {
         fs::write(dir.path().join("b.txt"), b"two").unwrap();
         let cp = repo.save("two files").unwrap();
 
-        let out = dir.path().join("dest");
+        let (_hold, out) = outside("dest");
         fs::create_dir_all(&out).unwrap();
         // A pre-existing unrelated file, and a stale copy of one of ours.
         fs::write(out.join("pre-existing.txt"), b"keep").unwrap();
@@ -1930,21 +2018,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checkout_refuses_a_destination_inside_the_repository() {
+        // `checkout` overwrites what it finds and holds `&self`, so it cannot
+        // capture the working state first the way switch, start and undo do.
+        // Pointed at the root it therefore destroyed uncheckpointed work and
+        // exited 0 reporting success. The bytes below exist nowhere else.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"checkpointed").unwrap();
+        let cp = repo.save("one").unwrap();
+        fs::write(dir.path().join("a.txt"), b"UNSAVED WORK").unwrap();
+
+        let err = repo.checkout(&cp.id, dir.path()).unwrap_err();
+        assert_eq!(err.category(), crate::error::Category::Invalid);
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            b"UNSAVED WORK",
+            "uncheckpointed work must survive a refused checkout"
+        );
+
+        // A subdirectory is working state too — snapshot_dir walks the whole
+        // root — so it is refused on the same grounds, not just the root.
+        let err = repo.checkout(&cp.id, &dir.path().join("sub")).unwrap_err();
+        assert_eq!(err.category(), crate::error::Category::Invalid);
+
+        // A `..` that walks back INTO the repository must be refused too. The
+        // first shape hides the return behind a component that does not exist
+        // yet, so nothing on the way can be canonicalised in one step; the
+        // second is a plain round trip. Both must resolve as "inside", and
+        // must say so rather than failing with an unrelated I/O error.
+        for sneaky in [
+            dir.path().join("missing/../a.txt"),
+            dir.path().join("../").join(dir.path().file_name().unwrap()),
+        ] {
+            let err = repo.checkout(&cp.id, &sneaky).unwrap_err();
+            assert_eq!(
+                err.category(),
+                crate::error::Category::Invalid,
+                "{} must be refused as inside the repository, not fail obscurely",
+                sneaky.display()
+            );
+        }
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            b"UNSAVED WORK",
+            "no traversal shape may reach the working state"
+        );
+
+        // Outside the repository it still works, which is what it is for.
+        let (_hold, out) = outside("out");
+        repo.checkout(&cp.id, &out).unwrap();
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"checkpointed");
+    }
+
     #[cfg(unix)]
     #[test]
     fn checkout_refuses_a_symlinked_destination() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f.txt"), b"x").unwrap();
         let cp = repo.save("one").unwrap();
-        let outside = dir.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        let dest = dir.path().join("dest_link");
-        std::os::unix::fs::symlink(&outside, &dest).unwrap();
+        // Both the link and its target sit outside the repository, so the
+        // only guard that can fire here is the symlink one this test is for.
+        let (hold, dest) = outside("dest_link");
+        let target = hold.path().join("target");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &dest).unwrap();
 
         let err = repo.checkout(&cp.id, &dest).unwrap_err();
         assert_eq!(err.category(), crate::error::Category::Invalid);
         assert!(
-            !outside.join("f.txt").exists(),
+            !target.join("f.txt").exists(),
             "a symlinked destination must be refused, not written through"
         );
     }
@@ -1958,11 +2101,11 @@ mod tests {
         let cp = repo.save("one").unwrap();
 
         // Destination pre-seeded with a symlink "sub" pointing OUTSIDE dest.
-        let out = dir.path().join("dest");
+        let (hold, out) = outside("dest");
         fs::create_dir_all(&out).unwrap();
-        let outside = dir.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, out.join("sub")).unwrap();
+        let target = hold.path().join("target");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, out.join("sub")).unwrap();
 
         repo.checkout(&cp.id, &out).unwrap();
 
@@ -1971,7 +2114,7 @@ mod tests {
             "content must be written under dest"
         );
         assert!(
-            !outside.join("f.txt").exists(),
+            !target.join("f.txt").exists(),
             "checkout must not follow a destination symlink and write outside dest"
         );
         assert!(
@@ -1989,7 +2132,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("sub/.lattice")).unwrap();
         fs::write(dir.path().join("sub/.lattice/config"), b"nested").unwrap();
         let cp = repo.save("nested dot-lattice").unwrap();
-        let out = dir.path().join("dest");
+        let (_hold, out) = outside("dest");
         repo.checkout(&cp.id, &out).unwrap();
         assert_eq!(
             fs::read(out.join("sub/.lattice/config")).unwrap(),
