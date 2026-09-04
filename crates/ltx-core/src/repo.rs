@@ -455,6 +455,12 @@ impl Repo {
         if !forensic {
             return self.history(limit);
         }
+        // A limit of zero asks for nothing; the frontier loop below pushes
+        // before it checks, so it would otherwise return one. `history` already
+        // answers this correctly and the two views must agree.
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
         let state = self.line_state()?;
         // With a limit, resolve lazily and memoised: the caller asked for a
         // handful, so materialising every checkpoint in the repository first
@@ -2432,6 +2438,18 @@ mod tests {
             repo.lines().unwrap().current,
             "feature",
             "undoing a switch returns to the line it left"
+        );
+    }
+
+    #[test]
+    fn a_zero_limit_returns_nothing_in_both_log_views() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"0").unwrap();
+        repo.save("seed").unwrap();
+        assert!(repo.log_view(false, Some(0)).unwrap().is_empty());
+        assert!(
+            repo.log_view(true, Some(0)).unwrap().is_empty(),
+            "the forensic view must agree with the default one at the boundary"
         );
     }
 
