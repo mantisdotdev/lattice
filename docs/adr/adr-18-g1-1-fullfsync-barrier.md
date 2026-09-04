@@ -129,15 +129,23 @@ run confirms both points rather than leaving them as assertions:
   reached. G1.1 cannot pass until that surface is built. That is the
   harness-first discipline working as intended, not a defect.
 - Any residual failure after this change is a real crash-safety finding and is
-  to be treated as one. On this run there were none to treat: 427 observed
-  against 428.6 predicted by the unimplemented commands alone, and zero
-  checkpoints lost.
+  to be treated as one. None surfaced on this run, within the limits stated
+  above: zero checkpoints lost across all 3,000 trials, and every retained
+  failure reason an unimplemented command.
 
 What this run does establish is narrower than "the engine is crash-safe", and
 the difference matters: 2,000 SIGKILL injections and 1,000 power-loss
 injections across `save`, `start`, `switch` and `undo` lost nothing. The
 operations that do not exist have never been fault-injected, and the four
-critical sections named above have never been entered.
+critical sections in the coverage note have never been entered.
+
+`merge` among those four is a different case from `compaction`, `thinning` and
+`sync`, and should not be folded in with them. Those three name commands that
+trials drew and that failed because they do not exist. `merge` is not a command
+in `OPERATION_POOL` at all — `CRITICAL_SECTIONS` (`g1_1_crash_safety.py:71`) is
+a list of code regions the replayer reports as touched, not of CLI verbs. So
+its section was never entered because nothing in the pool reaches it, and
+nothing measured here establishes anything further about why.
 
 ## Measured effect
 
@@ -157,15 +165,53 @@ critical_section_hits: {store_write: 563, compaction: 0, thinning: 0,
                         merge: 0, sync: 0}
 ```
 
-**Zero checkpoints lost across 3,000 fault injections**, and no panic in the
-recorded sample — where the previous run's sample carried two redb panics and
-`DB corrupted: All roots are corrupted`.
+**Zero checkpoints lost across 3,000 fault injections.** That field is a
+complete aggregate over every trial, not a sample, so it does establish its
+claim: no trial lost a checkpoint. Every real failure in the previous run
+carried `checkpoints_lost: 1`, so the failure class this ADR is about is
+provably absent.
 
-Every one of the 427 is a command that does not exist. Three of the seven pool
-operations are unimplemented (`sync`, `internals compact`, `internals thin`),
-so the expected count from that cause alone is 1000 × 3/7 = **428.6** against
-**427** observed. There is no room left for a real failure, and the independent
-`checkpoints_lost_total: 0` says the same thing a second way.
+What the record does **not** establish is that all 427 failures were
+unimplemented commands, and an earlier draft of this section claimed it did.
+The harness stores `failures[:25]`; the other 402 reasons are not retained. All
+25 that are retained are `unrecognized subcommand`, and three of the seven pool
+operations do not exist, giving an expected 1000 × 3/7 = 428.6 against 427
+observed — but that count is Binomial(1000, 3/7) with a standard deviation of
+15.6, so the draws could plausibly have been as low as 397 and left ~30
+failures from another cause. The arithmetic is consistent with the conclusion;
+it does not force it.
+
+Bounding what could hide there: it cannot be a checkpoint loss, since that
+aggregate is 0 over all trials. It would have to be a verify failure that lost
+nothing.
+
+`scripts/probe_powerloss.py` measures that directly, because it classifies
+**every** failure rather than the first 25. Run with G1.1's pool verbatim,
+unimplemented operations included, over 300 power-loss trials:
+
+```json
+{"pool": "full (G1.1 verbatim)", "trials_run": 300,
+ "failures": 130,
+ "failure_kinds": {"unimplemented command": 130},
+ "failures_by_operation": {"sync": 44, "internals": 86},
+ "checkpoints_lost_total": 0,
+ "trials_where_replayer_saw_no_barrier": 7}
+```
+
+130 of 300 against 300 × 3/7 = 128.6 expected, and **every one of the 130
+classified**, not sampled: no verify failure and no checkpoint loss in any
+trial. The seven trials where the replayer saw no barrier are the legitimate
+case — the crash point fell before the first sync — and they passed too.
+
+The full output is committed at
+`bench/probes/g1-1-powerloss-full-pool-300.json`, with the command that
+produced it. This is a controlled sample rather than the gate's own 1,000, so
+it supports the reading of the 427 without replacing it.
+
+**Follow-up, not done here:** the honest fix is for G1.1 to retain a
+machine-readable count of failure reasons instead of truncating at 25. That is
+a change to a frozen harness and needs its own §0.3 record, so it is noted
+rather than taken.
 
 The SIGKILL half is silent for the same reason it needed 3,532 attempts to land
 2,000 injections: an unrecognised subcommand exits before reaching its byte
