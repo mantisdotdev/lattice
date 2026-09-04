@@ -55,6 +55,15 @@ pub enum Error {
     #[error("{0}")]
     Invalid(String),
 
+    /// A line that does not exist. Distinct from NotFound so the §4.2 concept
+    /// G2.4 reports is `line` rather than `checkpoint`.
+    #[error("{0}")]
+    NoSuchLine(String),
+
+    /// A name that cannot be a line. Distinct from Invalid for the same reason.
+    #[error("{0}")]
+    InvalidLine(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -71,7 +80,8 @@ impl Error {
             Error::NotARepository(_) => Category::NotARepository,
             Error::NotFound(_) => Category::NotFound,
             Error::Corrupt(_) => Category::Corrupt,
-            Error::Invalid(_) => Category::Invalid,
+            Error::Invalid(_) | Error::InvalidLine(_) => Category::Invalid,
+            Error::NoSuchLine(_) => Category::NotFound,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Category::Io,
         }
     }
@@ -82,6 +92,7 @@ impl Error {
             Error::NotFound(_) => Concept::Checkpoint,
             Error::Corrupt(_) => Concept::Checkpoint,
             Error::Invalid(_) => Concept::WorkingState,
+            Error::NoSuchLine(_) | Error::InvalidLine(_) => Concept::Line,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
         }
     }
@@ -102,6 +113,11 @@ impl Error {
             Error::Invalid(_) => {
                 "run `ltx status` to see the current state, then reissue the command \
                  with a valid argument"
+            }
+            Error::NoSuchLine(_) => "run `ltx line list` to see which lines exist",
+            Error::InvalidLine(_) => {
+                "choose a name of letters, digits, dot, underscore, dash or slash; \
+                 run `ltx line list` to see the lines that exist"
             }
             Error::Io(_) => {
                 "check permissions and free space on the repository directory, then \
@@ -170,13 +186,18 @@ mod tests {
         // A user who runs the suggested command must not hit "unrecognized
         // subcommand". This keeps the advice tracking the actual CLI surface,
         // so adopt/sync/undo cannot be advertised before they are built.
-        const IMPLEMENTED: &[&str] = &["init", "save", "status", "log", "verify", "checkout"];
+        const IMPLEMENTED: &[&str] = &[
+            "init", "save", "status", "log", "verify", "checkout", "undo", "start", "switch",
+            "line",
+        ];
         let cases: Vec<Error> = vec![
             Error::NotARepository(PathBuf::from("/tmp")),
             Error::NotFound("x".into()),
             Error::Corrupt("x".into()),
             Error::Invalid("x".into()),
             Error::Io(std::io::Error::other("x")),
+            Error::NoSuchLine("x".into()),
+            Error::InvalidLine("x".into()),
             Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
         ];
         for e in cases {
