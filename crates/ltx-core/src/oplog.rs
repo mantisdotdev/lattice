@@ -161,11 +161,16 @@ impl Operation {
     /// it); reversing an undo would be a forward "redo", which would oscillate
     /// under repeated `ltx undo` and never reach `nothing_to_undo`. Redo is a
     /// separate forward mechanism, deferred (ADR-15).
+    ///
+    /// `Adopt` has no defined inverse yet. Marking it here rather than only in
+    /// the dispatcher means a core caller cannot append one and have undo skip
+    /// it in silence; defining its inverse belongs to the adopt slice.
     pub fn is_undoable(&self) -> bool {
         !matches!(
             self,
             Operation::Init
                 | Operation::Undo { .. }
+                | Operation::Adopt { .. }
                 | Operation::Redact { .. }
                 | Operation::Thin { .. }
         )
@@ -223,7 +228,7 @@ struct GroupState {
     /// Entries staged but not yet flushed, each with the LineState publish
     /// that must land in the SAME transaction as the entry (ADR-16 §7), so the
     /// log and the line state can never disagree after a crash.
-    pending: Vec<(Entry, Option<LineState>)>,
+    pending: Vec<(Entry, Option<LineState>, Option<u64>)>,
     /// Sequence number through which the log is durable.
     durable_through: u64,
     /// A flush is in progress; late arrivals wait rather than starting another.
@@ -354,11 +359,35 @@ impl OpLog {
         self.commit(operation, None)
     }
 
+    /// Create the repository's first entry, its line state and its format
+    /// version in a SINGLE transaction.
+    ///
+    /// Init must be all-or-nothing: a `.lattice` that exists but records no
+    /// format is refused by `open` AND by `init` ("already contains a
+    /// repository"), which is a directory with no way forward.
+    pub fn commit_initial(
+        &self,
+        operation: Operation,
+        lines: LineState,
+        format: u64,
+    ) -> Result<Entry> {
+        self.commit_inner(operation, Some(lines), Some(format))
+    }
+
     /// Append an operation and, in the SAME durable transaction, publish the
     /// new line state. One transaction is what makes "which entries are undone"
     /// and "where the lines point" impossible to disagree after a crash, and it
     /// is why `set_head` is retired as a write (ADR-16 §7).
     pub fn commit(&self, operation: Operation, lines: Option<LineState>) -> Result<Entry> {
+        self.commit_inner(operation, lines, None)
+    }
+
+    fn commit_inner(
+        &self,
+        operation: Operation,
+        lines: Option<LineState>,
+        format: Option<u64>,
+    ) -> Result<Entry> {
         let entry = {
             let mut state = self.group.lock().unwrap();
             if let Some(msg) = &state.poisoned {
@@ -384,7 +413,7 @@ impl OpLog {
                 operation,
             };
             state.last_id = Some(id);
-            state.pending.push((entry.clone(), lines));
+            state.pending.push((entry.clone(), lines, format));
             entry
         };
 
@@ -424,7 +453,8 @@ impl OpLog {
             // `mem::take` rather than `drain(..).collect()`: same effect,
             // one allocation instead of two, and it is what
             // `clippy::drain_collect` asks for.
-            let batch: Vec<(Entry, Option<LineState>)> = std::mem::take(&mut state.pending);
+            let batch: Vec<(Entry, Option<LineState>, Option<u64>)> =
+                std::mem::take(&mut state.pending);
             drop(state);
 
             // If commit_batch unwinds, this guard re-locks and clears
@@ -461,14 +491,14 @@ impl OpLog {
         }
     }
 
-    fn commit_batch(&self, batch: &[(Entry, Option<LineState>)]) -> Result<u64> {
+    fn commit_batch(&self, batch: &[(Entry, Option<LineState>, Option<u64>)]) -> Result<u64> {
         if batch.is_empty() {
             return Ok(0);
         }
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(ENTRIES)?;
-            for (entry, _) in batch {
+            for (entry, _, _) in batch {
                 let bytes = serde_json::to_vec(entry)?;
                 table.insert(entry.seq, bytes.as_slice())?;
             }
@@ -482,16 +512,24 @@ impl OpLog {
             // is the writer's own sequence. True cross-process concurrency is
             // the deferred workspace slice (ADR-16, open conflict 2).
             let mut table = tx.open_table(LINES)?;
-            for (_, lines) in batch {
+            for (_, lines, _) in batch {
                 if let Some(state) = lines {
                     let bytes = serde_json::to_vec(state)?;
                     table.insert(LINES_KEY, bytes.as_slice())?;
                 }
             }
         }
+        {
+            let mut table = tx.open_table(HEADS)?;
+            for (_, _, format) in batch {
+                if let Some(v) = format {
+                    table.insert(FORMAT_KEY, *v)?;
+                }
+            }
+        }
         // redb's commit is the durability barrier; it fsyncs.
         tx.commit()?;
-        Ok(batch.last().map(|(e, _)| e.seq).unwrap_or(0))
+        Ok(batch.last().map(|(e, _, _)| e.seq).unwrap_or(0))
     }
 
     /// The published line state, or `None` for a repository that has none.

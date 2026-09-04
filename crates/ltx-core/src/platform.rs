@@ -192,6 +192,22 @@ pub fn file_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
+/// Remove a file or a symlink, whatever kind of link it is.
+///
+/// Windows distinguishes file and directory symlinks: a directory link must be
+/// removed with `remove_dir`, and `remove_file` fails on it. Unix has one
+/// unlink for both, so the fallback is simply never taken there.
+pub fn remove_file_or_symlink(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if cfg!(windows) => {
+            fs::remove_dir(path).map_err(|_| e)?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Human-readable name for the current platform, for reports.
 pub fn platform_name() -> &'static str {
     if cfg!(windows) {

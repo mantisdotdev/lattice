@@ -82,7 +82,7 @@ enum Command {
     },
     /// Return to the previous checkpoint.
     Undo,
-    /// Begin a new line of work here, and switch to it.
+    /// Begin a new line here, and switch to it.
     Start {
         /// What to call the line.
         name: String,
@@ -316,6 +316,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         "undo_seq": outcome.undo_seq,
                         "oplog_seq": outcome.undo_seq,
                         "preserved_tree": outcome.preserved_tree,
+                        "rescued_tree": outcome.rescued_tree,
                         // Challenge 8 / §4.3: undo names any remote residue it
                         // could not reverse. Empty for a purely local undo.
                         "remote_effects_not_undone": outcome.remote_effects_not_undone,
