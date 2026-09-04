@@ -131,11 +131,17 @@ def main() -> int:
             pairs = [(k, exact(v)) for k, v in PAIR.findall(block)]
             if not pairs:
                 continue
-            # An explicit attribution immediately before the fence exempts the
+            # An explicit attribution IMMEDIATELY before the fence exempts the
             # block from artifact matching, and only that.
+            #
+            # "Immediately" is load-bearing. Searching the preceding text for
+            # any marker would let one attached to an earlier block also exempt
+            # the block after it: two fences close together, one marker, both
+            # skipped. So take the LAST marker before this fence and require
+            # nothing but whitespace between it and the fence.
             preamble = text[max(0, m.start() - 400):m.start()]
-            marker = EVIDENCE_MARKER.search(preamble)
-            if marker:
+            markers = list(EVIDENCE_MARKER.finditer(preamble))
+            if markers and not preamble[markers[-1].end():].strip():
                 attributed += 1
                 continue
             # The block describes the artifact it has the MOST keys in common
