@@ -792,6 +792,16 @@ impl Repo {
         // `start`, and a line with no tip would empty that array.
         let captured = self.capture_working_tree()?;
         let tip = lines.lines.get(&from).and_then(|r| r.tip.clone());
+        // The new line inherits the assignments too, for the same reason it
+        // inherits the bytes (ADR-17 §4): the files are still on disk, and a
+        // labelling that vanished across `start` would be a silent loss of
+        // user intent — the work would still be there, but which unit of work
+        // it belonged to would not.
+        let (changes, current_change) = lines
+            .lines
+            .get(&from)
+            .map(|r| (r.changes.clone(), r.current_change.clone()))
+            .unwrap_or_default();
         if let Some(rec) = lines.lines.get_mut(&from) {
             rec.working = Some(captured);
         }
@@ -800,6 +810,8 @@ impl Repo {
             LineRecord {
                 tip: tip.clone(),
                 working: None,
+                changes,
+                current_change,
             },
         );
         lines.current = name.clone();
@@ -2026,6 +2038,51 @@ mod tests {
             report.entries_written, on_disk,
             "entries_written must equal the files actually present, so a folded \
              sibling is never counted as written when it overwrote another"
+        );
+    }
+
+    #[test]
+    fn a_new_line_inherits_the_changes_open_on_the_line_it_starts_from() {
+        // ADR-17 §4. `start` inherits the on-disk bytes, so it must inherit
+        // the labelling of those bytes too: work that is still present but
+        // whose unit of work silently vanished is a loss of user intent, and
+        // nothing would report it.
+        //
+        // Seeded through the line state directly because `assign` does not
+        // exist yet — the inheritance is otherwise unreachable, and an
+        // unreachable branch shipped without a test is how it stays wrong.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+        repo.save("seed").unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.insert(
+            "7f3a".into(),
+            crate::oplog::ChangeRecord {
+                assigned: [b"a.txt".to_vec()].into_iter().collect(),
+            },
+        );
+        rec.current_change = Some("7f3a".into());
+        repo.oplog.publish_lines(&lines).unwrap();
+
+        repo.start_line("feature").unwrap();
+
+        let after = repo.line_state().unwrap();
+        let started = after.lines.get("feature").expect("the line exists");
+        assert_eq!(
+            started.current_change.as_deref(),
+            Some("7f3a"),
+            "the current change must survive `start`"
+        );
+        assert_eq!(
+            started.changes.get("7f3a").map(|c| &c.assigned),
+            Some(&[b"a.txt".to_vec()].into_iter().collect()),
+            "the assignment must survive `start`, since the bytes did"
+        );
+        assert!(
+            after.lines[DEFAULT_LINE].changes.contains_key("7f3a"),
+            "and the line started FROM keeps its own copy"
         );
     }
 

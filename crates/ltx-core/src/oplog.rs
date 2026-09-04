@@ -74,8 +74,22 @@ pub const MIN_READABLE_FORMAT: u64 = 3;
 
 const FORMAT_KEY: &str = "format";
 
-/// One line of work: where it points, and the working state held for it while
-/// it is not current.
+/// A change: a logical unit of work that has not been checkpointed yet
+/// (§4.2, noun 2).
+///
+/// Holds a selection over the working tree, not content. The bytes stay on
+/// disk and remain the truth while their line is current (ADR-16 §1); this
+/// records only which of them a user has claimed for this unit of work.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangeRecord {
+    /// Working-tree paths assigned to this change, relative to the root, as
+    /// raw bytes — the same doctrine tree entry names follow, so a path that
+    /// is not valid UTF-8 is assignable like any other.
+    pub assigned: std::collections::BTreeSet<Vec<u8>>,
+}
+
+/// One line of work: where it points, the working state held for it while it
+/// is not current, and the changes open on it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineRecord {
     /// Checkpoint id this line points at, if it has one.
@@ -90,6 +104,31 @@ pub struct LineRecord {
     /// the bytes on disk are the truth. Every undo inverse is exact and
     /// mechanical only because of this invariant (ADR-16 §1).
     pub working: Option<String>,
+    /// Live, un-checkpointed changes on this line, by id.
+    ///
+    /// Here rather than in a table of their own (ADR-17 §4): a switch already
+    /// mutates the source line's preserved state, the target's, and `current`
+    /// in one write, and an assignment is a selection over exactly those
+    /// working-tree bytes. Sharing the key makes it atomic by construction
+    /// instead of by a second write that has to be kept in step.
+    ///
+    /// Per-line, not repository-global, and that is not a close call: a switch
+    /// replaces the working tree wholesale, so a global change set would name
+    /// paths holding another line's content the instant it happened.
+    ///
+    /// `BTreeMap` so the serialised form and `change list` are canonical
+    /// rather than creation-ordered — `change list` sits in G1.3's equality
+    /// domain, where an unstable order would fail undo-all for a reason that
+    /// has nothing to do with undo.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub changes: std::collections::BTreeMap<String, ChangeRecord>,
+    /// The change a bare `ltx assign` adds to. `None` until the first assign.
+    ///
+    /// A current change exists because G1.4's frozen pool draws `assign .`
+    /// with no change named, ten thousand times; without one, each draw would
+    /// either fail or mint a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_change: Option<String>,
 }
 
 /// Which lines exist and which one is current.
