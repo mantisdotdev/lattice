@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::ChunkId;
 use crate::error::{Error, Result};
-use crate::oplog::{Entry, OpLog, Operation};
+use crate::oplog::{Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE, FORMAT_VERSION};
 use crate::platform;
 use crate::store::{PackWriter, Store};
 use crate::tree::{self, Node, Tree};
@@ -106,6 +106,12 @@ impl Repo {
         fs::create_dir_all(dir.join("packs"))?;
         let store = Store::open(&dir.join("packs"))?;
         let oplog = OpLog::open(&dir.join("meta.redb"))?;
+        oplog.set_format_version(FORMAT_VERSION)?;
+        // The default line is published by `init`, NOT by a StartLine entry:
+        // such an entry would be an eligible undo target and undo-all would
+        // delete `main` (ADR-16 §2). `Init` is not undoable, so `main` sits
+        // below the undo floor.
+        oplog.publish_lines(&LineState::initial())?;
         oplog.append(Operation::Init)?;
         Ok(Repo {
             root: root.to_path_buf(),
@@ -136,6 +142,21 @@ impl Repo {
         }
         let store = Store::open(&dir.join("packs"))?;
         let oplog = OpLog::open(&dir.join("meta.redb"))?;
+        // An older log predates the Save/StartLine fields, so re-serialising
+        // its entries would change every id and `verify_chain` would report
+        // phantom tampering. Refuse with a way forward instead (ADR-16 §9).
+        match oplog.format_version()? {
+            Some(v) if v == FORMAT_VERSION => {}
+            other => {
+                return Err(Error::Invalid(format!(
+                    "this repository is on-disk format {} but this build reads format {}",
+                    other
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "1 (unversioned)".into()),
+                    FORMAT_VERSION
+                )))
+            }
+        }
         Ok(Repo {
             root: root.to_path_buf(),
             store,
@@ -198,11 +219,17 @@ impl Repo {
         packer.retain_unknown(&self.store);
         self.store.write_pack(packer)?;
 
-        let entry = self.oplog.append(Operation::Save {
-            message: message.to_string(),
-            checkpoint: checkpoint.id.clone(),
-        })?;
-        self.oplog.set_head("checkpoint", entry.seq)?;
+        let mut lines = self.line_state()?;
+        let current = lines.current.clone();
+        lines.lines.entry(current.clone()).or_default().tip = Some(checkpoint.id.clone());
+        let entry = self.oplog.commit(
+            Operation::Save {
+                message: message.to_string(),
+                checkpoint: checkpoint.id.clone(),
+                line: current,
+            },
+            Some(lines),
+        )?;
         self.write_head_pointer(&checkpoint.id)?;
 
         // The caller's copy carries the real sequence; reads resolve the same
@@ -237,45 +264,53 @@ impl Repo {
         Ok(())
     }
 
-    pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
-        // The durable op-log head in redb is the authoritative, transactional
-        // record of the current checkpoint. The .lattice/HEAD file is a
-        // human-readable cache written AFTER the redb head (in both save and
-        // undo), so it can only ever be equal to or STALER than redb — never
-        // fresher. A crash between the two writes must NOT let the stale file
-        // override redb, or a crash mid-undo would resurrect the undone
-        // checkpoint and a crash mid-save would mask a committed one. So redb is
-        // consulted first; the file is a fallback only when redb records no head
-        // (a repository created before heads were tracked, or a manual edit).
-        if let Some(cp) = self.durable_head_checkpoint()? {
-            return Ok(Some(cp));
+    /// The published line state, synthesised for a repository that has none.
+    ///
+    /// Head-resolution ladder, most durable first (ADR-16 §7). Each rung has
+    /// exactly one authority, and the file is always last because it is a cache
+    /// written AFTER the transaction — only ever equal to or staler than redb,
+    /// never fresher. Letting it win would resurrect an undone checkpoint or
+    /// mask a committed one after a crash.
+    ///   1. `LINES["state"]` — authoritative.
+    ///   2. `HEADS["checkpoint"]` — read-only legacy rung, for a database
+    ///      written by an earlier build before lines existed.
+    ///   3. `.lattice/HEAD` — human-readable cache.
+    pub fn line_state(&self) -> Result<LineState> {
+        if let Some(state) = self.oplog.line_state()? {
+            return Ok(state);
         }
-        let path = self.head_pointer_path();
-        if let Ok(raw) = fs::read_to_string(&path) {
+        let mut state = LineState::initial();
+        if let Some(rec) = state.lines.get_mut(DEFAULT_LINE) {
+            rec.tip = self.legacy_head_id()?;
+        }
+        Ok(state)
+    }
+
+    /// Rungs 2 and 3 of the ladder, for a repository with no published lines.
+    fn legacy_head_id(&self) -> Result<Option<String>> {
+        if let Some(seq) = self.oplog.get_head("checkpoint")? {
+            if let Some(entry) = self.oplog.get(seq)? {
+                if let Operation::Save { checkpoint, .. } = entry.operation {
+                    return Ok(Some(checkpoint));
+                }
+            }
+        }
+        if let Ok(raw) = fs::read_to_string(self.head_pointer_path()) {
             let id = raw.trim();
             if ChunkId::from_hex(id).is_some() {
-                return self.checkpoint(id);
+                return Ok(Some(id.to_string()));
             }
         }
         Ok(None)
     }
 
-    /// Resolve the current checkpoint from the durable op-log head alone.
-    ///
-    /// `save` records `set_head("checkpoint", seq)` in redb before publishing
-    /// the HEAD file, so this survives a crash that loses the file. The Save
-    /// entry at that sequence carries the checkpoint id.
-    fn durable_head_checkpoint(&self) -> Result<Option<Checkpoint>> {
-        let Some(seq) = self.oplog.get_head("checkpoint")? else {
+    /// The checkpoint the CURRENT line points at.
+    pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
+        let state = self.line_state()?;
+        let Some(tip) = state.lines.get(&state.current).and_then(|r| r.tip.clone()) else {
             return Ok(None);
         };
-        let Some(entry) = self.oplog.get(seq)? else {
-            return Ok(None);
-        };
-        match entry.operation {
-            Operation::Save { checkpoint, .. } => self.checkpoint(&checkpoint),
-            _ => Ok(None),
-        }
+        self.checkpoint(&tip)
     }
 
     pub fn checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
@@ -392,6 +427,46 @@ impl Repo {
         Ok(out)
     }
 
+    /// The `log` view: the current line's history, or — with `forensic` — the
+    /// union of every live line's history.
+    ///
+    /// The union matters (ADR-16 §8): G1.1 asserts no baseline checkpoint
+    /// disappears, and with only the current line's chain an ordinary `switch`
+    /// would look exactly like checkpoint loss. The union makes "no
+    /// checkpointed data is ever lost" true by construction in the array the
+    /// HARD gate actually reads.
+    pub fn log_view(&self, forensic: bool, limit: Option<usize>) -> Result<Vec<Checkpoint>> {
+        if !forensic {
+            return self.history(limit);
+        }
+        let state = self.line_state()?;
+        let mut seen: std::collections::BTreeMap<String, Checkpoint> =
+            std::collections::BTreeMap::new();
+        for rec in state.lines.values() {
+            let Some(tip) = rec.tip.clone() else { continue };
+            let mut cursor = self.checkpoint(&tip)?;
+            while let Some(cp) = cursor {
+                let parent = cp.parent.clone();
+                if seen.insert(cp.id.clone(), cp).is_some() {
+                    // Already walked this ancestry through another line.
+                    break;
+                }
+                cursor = match parent {
+                    Some(pid) => self.checkpoint(&pid)?,
+                    None => None,
+                };
+            }
+        }
+        let mut out: Vec<Checkpoint> = seen.into_values().collect();
+        // Newest first, with the id as a deterministic tiebreak so two runs
+        // over the same state produce byte-identical output.
+        out.sort_by(|a, b| b.oplog_seq.cmp(&a.oplog_seq).then(a.id.cmp(&b.id)));
+        if let Some(n) = limit {
+            out.truncate(n);
+        }
+        Ok(out)
+    }
+
     /// The history the user sees: reachable checkpoints, newest first,
     /// optionally capped at `limit`. The default-and-limit policy lives here
     /// rather than in the CLI (§8) — the CLI and the daemon API share it.
@@ -412,34 +487,370 @@ impl Repo {
     /// root checkpoint (no parent) there is nothing to undo and no record is
     /// appended — ADR-15 explains why the root is the floor. The op-log entry
     /// is written before the head moves, mirroring save's durable order.
+    /// Reverse the most recent undoable operation on user-visible state.
+    ///
+    /// Selects the highest-seq LIVE, ELIGIBLE op-log entry and applies its
+    /// kind-specific inverse (ADR-16 §4). Three invariants make this correct:
+    ///
+    /// * **Scan candidates, not entries.** After any undo the newest entry is
+    ///   an `Undo`, so "reverse the last operation" must mean the last *live
+    ///   candidate*.
+    /// * **LIFO over the live set.** Always taking the maximum means every live
+    ///   entry above the target is already reversed, so the state equals the
+    ///   state just after the target was applied — which is what licenses these
+    ///   local inverses with no conflict analysis.
+    /// * **Eligibility reads only immutable data** (the entry's own fields and
+    ///   its own checkpoint's parent), never the mutable head — so a later undo
+    ///   can never re-enable a target, and the termination measure holds.
+    ///
+    /// Each undo removes exactly one member of the eligible-live set and adds
+    /// no candidate, so undo-all terminates and `nothing_to_undo` is absorbing.
     pub fn undo(&mut self) -> Result<UndoOutcome> {
-        let Some(head) = self.head_checkpoint()? else {
+        let Some(target) = self.next_undo_target()? else {
             return Ok(UndoOutcome::nothing());
         };
-        let Some(parent_id) = head.parent.clone() else {
-            return Ok(UndoOutcome::nothing());
-        };
-        let Some(parent) = self.checkpoint(&parent_id)? else {
-            return Err(Error::Corrupt(format!(
-                "checkpoint {} names a parent {} that is not present",
-                crate::short_id(&head.id),
-                crate::short_id(&parent_id)
-            )));
-        };
+        self.reverse(&target)
+    }
 
-        let entry = self.oplog.append(Operation::Undo {
-            undone_seq: head.oplog_seq,
-        })?;
-        self.oplog.set_head("checkpoint", parent.oplog_seq)?;
-        self.write_head_pointer(&parent.id)?;
+    /// The highest-seq live, eligible entry, or None at the floor.
+    fn next_undo_target(&self) -> Result<Option<Entry>> {
+        let entries = self.oplog.entries()?;
+        let undone: std::collections::HashSet<u64> = entries
+            .iter()
+            .filter_map(|e| match &e.operation {
+                Operation::Undo { undone_seq } => Some(*undone_seq),
+                _ => None,
+            })
+            .collect();
+        for entry in entries.iter().rev() {
+            if !entry.operation.is_undoable() || undone.contains(&entry.seq) {
+                continue;
+            }
+            if self.is_eligible(&entry.operation)? {
+                return Ok(Some(entry.clone()));
+            }
+        }
+        Ok(None)
+    }
 
-        Ok(UndoOutcome {
-            nothing_to_undo: false,
-            undone_checkpoint: Some(head.id),
-            now_at: Some(parent.id),
-            undo_seq: Some(entry.seq),
-            remote_effects_not_undone: Vec::new(),
+    /// Whether an operation still has something to reverse.
+    ///
+    /// Depends only on immutable data. A save at the root of its line has no
+    /// parent to return to — that is the floor ADR-15 established, expressed
+    /// per-candidate rather than against the mutable head.
+    fn is_eligible(&self, op: &Operation) -> Result<bool> {
+        Ok(match op {
+            Operation::Save { checkpoint, .. } => match self.checkpoint(checkpoint)? {
+                Some(cp) => cp.parent.is_some(),
+                None => false,
+            },
+            Operation::StartLine { .. } | Operation::Switch { .. } => true,
+            // Adopt has no defined inverse yet and cannot occur (there is no
+            // `adopt` command); giving it one is the adopt slice's decision.
+            _ => false,
         })
+    }
+
+    /// Apply the inverse of one entry. Exhaustive by kind, so a new undoable
+    /// variant without an arm fails to compile — which is how §6's "no command
+    /// silently dodges" is mechanised.
+    fn reverse(&mut self, entry: &Entry) -> Result<UndoOutcome> {
+        let mut lines = self.line_state()?;
+        let mut outcome = UndoOutcome {
+            nothing_to_undo: false,
+            undone_checkpoint: None,
+            now_at: None,
+            undo_seq: None,
+            preserved_tree: None,
+            remote_effects_not_undone: Vec::new(),
+        };
+        // What the working tree must look like afterwards, if it must change.
+        let mut materialise: Option<Option<String>> = None;
+
+        match &entry.operation {
+            Operation::Save {
+                checkpoint, line, ..
+            } => {
+                let cp = self.checkpoint(checkpoint)?.ok_or_else(|| {
+                    Error::Corrupt(format!(
+                        "operation {} saved checkpoint {} but its record is not present",
+                        entry.seq,
+                        crate::short_id(checkpoint)
+                    ))
+                })?;
+                // Save never touched the working tree, so neither does its
+                // inverse: this is pure tip movement.
+                lines.lines.entry(line.clone()).or_default().tip = cp.parent.clone();
+                outcome.undone_checkpoint = Some(cp.id.clone());
+                outcome.now_at = cp.parent.clone();
+            }
+            Operation::StartLine {
+                name,
+                from,
+                created,
+            } => {
+                let captured = self.capture_working_tree()?;
+                if *created {
+                    // The line being left is deleted, so there is nowhere in the
+                    // line state to park the capture. It is still written to the
+                    // store as durable content and named in the result, so the
+                    // work is never destroyed — retrieval belongs to the
+                    // ephemeral tier (ADR-16, open conflict 3).
+                    lines.lines.remove(name);
+                    outcome.preserved_tree = Some(captured);
+                } else {
+                    lines.lines.entry(name.clone()).or_default().working = Some(captured);
+                }
+                let restored = lines.lines.entry(from.clone()).or_default().working.take();
+                lines.current = from.clone();
+                materialise = Some(restored);
+                outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
+            }
+            Operation::Switch { from, to } => {
+                if from != to {
+                    let captured = self.capture_working_tree()?;
+                    lines.lines.entry(to.clone()).or_default().working = Some(captured);
+                    let restored = lines.lines.entry(from.clone()).or_default().working.take();
+                    lines.current = from.clone();
+                    materialise = Some(restored);
+                }
+                outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
+            }
+            other => {
+                return Err(Error::Invalid(format!(
+                    "operation {} ({}) has no inverse",
+                    entry.seq,
+                    other.name()
+                )))
+            }
+        }
+
+        let undo_entry = self.oplog.commit(
+            Operation::Undo {
+                undone_seq: entry.seq,
+            },
+            Some(lines.clone()),
+        )?;
+        outcome.undo_seq = Some(undo_entry.seq);
+
+        if let Some(target) = materialise {
+            self.materialise_working_tree(target.as_deref(), &lines)?;
+        }
+        self.sync_head_pointer(&lines)?;
+        Ok(outcome)
+    }
+
+    // -------------------------------------------------------------- lines
+
+    /// Create a line and make it current; if it already exists, this is a
+    /// switch. The postcondition is uniform — the line exists and is current —
+    /// which is why `start <existing>` succeeds rather than erroring (ADR-16 §3).
+    pub fn start_line(&mut self, name: &str) -> Result<LineOutcome> {
+        let name = validate_line_name(name)?;
+        let mut lines = self.line_state()?;
+        let from = lines.current.clone();
+        if lines.lines.contains_key(&name) {
+            return self.switch_to(lines, &from, &name, false);
+        }
+        // A new line inherits the current tip AND the on-disk bytes, so there
+        // is nothing to materialise. Inheriting the tip is forced: G1.1 asserts
+        // no baseline checkpoint disappears after a crash on a pool including
+        // `start`, and a line with no tip would empty that array.
+        let captured = self.capture_working_tree()?;
+        let tip = lines.lines.get(&from).and_then(|r| r.tip.clone());
+        if let Some(rec) = lines.lines.get_mut(&from) {
+            rec.working = Some(captured);
+        }
+        lines.lines.insert(
+            name.clone(),
+            LineRecord {
+                tip: tip.clone(),
+                working: None,
+            },
+        );
+        lines.current = name.clone();
+        let entry = self.oplog.commit(
+            Operation::StartLine {
+                name: name.clone(),
+                from,
+                created: true,
+            },
+            Some(lines.clone()),
+        )?;
+        self.sync_head_pointer(&lines)?;
+        Ok(LineOutcome {
+            line: name,
+            created: true,
+            now_at: tip,
+            oplog_seq: entry.seq,
+        })
+    }
+
+    /// Make an existing line current, preserving this line's working state and
+    /// restoring the target's. Refuses only an unknown or invalid name — §4.3
+    /// forbids a dirty-tree refusal, and state is preserved per line.
+    pub fn switch_line(&mut self, name: &str) -> Result<LineOutcome> {
+        let name = validate_line_name(name)?;
+        let lines = self.line_state()?;
+        let from = lines.current.clone();
+        if !lines.lines.contains_key(&name) {
+            return Err(Error::NoSuchLine(format!("there is no line named {name}")));
+        }
+        self.switch_to(lines, &from, &name, false)
+    }
+
+    fn switch_to(
+        &mut self,
+        mut lines: LineState,
+        from: &str,
+        to: &str,
+        created: bool,
+    ) -> Result<LineOutcome> {
+        // Self-switch short-circuits: the target state IS the current state, so
+        // no capture and no file is touched. G1.4 draws `switch main` while
+        // already on `main` thousands of times, and a full capture-and-rewrite
+        // there is O(repo) work for no benefit.
+        if from == to {
+            let entry = self.oplog.commit(
+                Operation::Switch {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                },
+                None,
+            )?;
+            return Ok(LineOutcome {
+                line: to.to_string(),
+                created: false,
+                now_at: lines.lines.get(to).and_then(|r| r.tip.clone()),
+                oplog_seq: entry.seq,
+            });
+        }
+
+        // Capture first: no materialisation ever happens without the current
+        // working tree already durable in the store.
+        let captured = self.capture_working_tree()?;
+        if let Some(rec) = lines.lines.get_mut(from) {
+            rec.working = Some(captured);
+        }
+        let target = lines.lines.entry(to.to_string()).or_default();
+        let restored = target.working.take();
+        let tip = target.tip.clone();
+        lines.current = to.to_string();
+
+        // Publish BEFORE materialising: a crash then leaves us unambiguously on
+        // the target with a re-runnable idempotent materialisation, rather than
+        // on the source holding the target's files. No work is lost either way,
+        // because the capture is durable content first.
+        let op = if created {
+            Operation::StartLine {
+                name: to.to_string(),
+                from: from.to_string(),
+                created: false,
+            }
+        } else {
+            Operation::Switch {
+                from: from.to_string(),
+                to: to.to_string(),
+            }
+        };
+        let entry = self.oplog.commit(op, Some(lines.clone()))?;
+        self.materialise_working_tree(restored.as_deref(), &lines)?;
+        self.sync_head_pointer(&lines)?;
+        Ok(LineOutcome {
+            line: to.to_string(),
+            created: false,
+            now_at: tip,
+            oplog_seq: entry.seq,
+        })
+    }
+
+    /// Every line and which one is current.
+    pub fn lines(&self) -> Result<LineState> {
+        self.line_state()
+    }
+
+    /// Snapshot the working tree into the store and return its tree address.
+    fn capture_working_tree(&mut self) -> Result<String> {
+        let mut packer = PackWriter::new();
+        let tree = self.snapshot_dir(&self.root.clone(), &mut packer)?;
+        packer.retain_unknown(&self.store);
+        self.store.write_pack(packer)?;
+        Ok(tree)
+    }
+
+    /// Bring the working tree to `tree` (or the current line's tip tree when
+    /// there is no preserved state), removing what the target does not name.
+    fn materialise_working_tree(&self, tree: Option<&str>, lines: &LineState) -> Result<()> {
+        let target = match tree {
+            Some(t) => Some(t.to_string()),
+            None => match lines.lines.get(&lines.current).and_then(|r| r.tip.clone()) {
+                Some(tip) => self.checkpoint(&tip)?.map(|cp| cp.tree),
+                None => None,
+            },
+        };
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let root = self.root.clone();
+        let mut report = CheckoutReport {
+            checkpoint: String::new(),
+            entries_written: 0,
+            collisions: Vec::new(),
+        };
+        // Reconciling, unlike `checkout --into`: switching lines must also
+        // REMOVE what the target tree does not name, or the working tree
+        // becomes the union of both lines and switch stops being involutive.
+        self.prune_to_tree(&target, &root)?;
+        self.restore_tree(&target, &root, &mut report)?;
+        Ok(())
+    }
+
+    /// Delete working-tree entries the target tree does not name.
+    fn prune_to_tree(&self, tree_id: &str, dir: &Path) -> Result<()> {
+        let Some(id) = ChunkId::from_hex(tree_id) else {
+            return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
+        };
+        let Some(bytes) = self.store.read(id)? else {
+            return Ok(());
+        };
+        let tree = Tree::from_bytes(&bytes)?;
+        let entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
+        for entry in entries {
+            let name = entry.file_name();
+            let raw = name.as_encoded_bytes().to_vec();
+            // The repository's own directory is never part of a tree.
+            if dir == self.root.as_path() && raw == REPO_DIR.as_bytes() {
+                continue;
+            }
+            let path = entry.path();
+            match tree.entries.get(&raw) {
+                Some(Node::Directory { tree: child }) => {
+                    if path.is_dir() {
+                        self.prune_to_tree(child, &path)?;
+                    } else {
+                        fs::remove_file(&path)?;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let meta = fs::symlink_metadata(&path)?;
+                    if meta.is_dir() && !meta.file_type().is_symlink() {
+                        fs::remove_dir_all(&path)?;
+                    } else {
+                        fs::remove_file(&path)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the human-readable HEAD cache in step with the published state.
+    fn sync_head_pointer(&self, lines: &LineState) -> Result<()> {
+        match lines.lines.get(&lines.current).and_then(|r| r.tip.clone()) {
+            Some(tip) => self.write_head_pointer(&tip),
+            None => Ok(()),
+        }
     }
 
     // ------------------------------------------------------------ snapshot
@@ -487,7 +898,6 @@ impl Repo {
 
     // ------------------------------------------------------------ checkout
 
-    /// Materialise a checkpoint's tree into `dest`.
     pub fn checkout(&self, checkpoint_id: &str, dest: &Path) -> Result<CheckoutReport> {
         let Some(cp) = self.checkpoint(checkpoint_id)? else {
             return Err(Error::NotFound(format!("no checkpoint {checkpoint_id}")));
@@ -776,6 +1186,41 @@ impl Repo {
             }
         }
 
+        // Line records are part of the integrity surface now: a tip that does
+        // not resolve, or a preserved working tree that is gone, is a hole a
+        // user would meet as a broken switch. They are also GC roots — any
+        // future thinning must treat them as such or it destroys preserved work.
+        let state = self.line_state()?;
+        for (name, rec) in &state.lines {
+            if let Some(tip) = &rec.tip {
+                if self.checkpoint(tip)?.is_none() {
+                    report.structure_verified = false;
+                    report.errors.push(format!(
+                        "line {name} points at checkpoint {} which is not present",
+                        crate::short_id(tip)
+                    ));
+                }
+            }
+            if let Some(working) = &rec.working {
+                let present = ChunkId::from_hex(working)
+                    .map(|id| self.store.contains(id))
+                    .unwrap_or(false);
+                if !present {
+                    report.structure_verified = false;
+                    report.errors.push(format!(
+                        "line {name} holds working state {} which is not present",
+                        crate::short_id(working)
+                    ));
+                }
+            }
+        }
+        if !state.lines.contains_key(&state.current) {
+            report.structure_verified = false;
+            report
+                .errors
+                .push(format!("the current line {} does not exist", state.current));
+        }
+
         if complete && report.chunks_absent > 0 {
             report.errors.push(format!(
                 "{} referenced chunks are not present locally",
@@ -881,6 +1326,13 @@ pub struct UndoOutcome {
     pub now_at: Option<String>,
     /// Op-log sequence of the appended Undo record, if one was appended.
     pub undo_seq: Option<u64>,
+    /// Tree address of working state captured while reversing a line creation.
+    ///
+    /// Undoing `start` deletes the line, so there is nowhere in the line state
+    /// to park the capture — it is written to the store as durable content and
+    /// named here instead, so the work is never destroyed even though no
+    /// command yet retrieves it (that is the ephemeral tier's job).
+    pub preserved_tree: Option<String>,
     /// Remote effects an undo could not reverse (Challenge 8 / SPEC §4.3).
     /// Always empty for a purely local undo; present so a future sync-undo can
     /// name its residue rather than silently leaving it.
@@ -894,8 +1346,46 @@ impl UndoOutcome {
             undone_checkpoint: None,
             now_at: None,
             undo_seq: None,
+            preserved_tree: None,
             remote_effects_not_undone: Vec::new(),
         }
+    }
+}
+
+/// What `start` or `switch` did.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LineOutcome {
+    pub line: String,
+    /// Whether this call created the line (a `start` of a new name) rather than
+    /// switching to one that already existed.
+    pub created: bool,
+    /// The checkpoint the line now points at, if any.
+    pub now_at: Option<String>,
+    /// Position of the recorded operation. Every state-changing command reports
+    /// one so a concurrent history can be checked for linearizability.
+    pub oplog_seq: u64,
+}
+
+/// A line name, parsed once at the boundary.
+///
+/// Kept to a conservative set so a name is never mistaken for a path segment
+/// and never needs escaping. Names are values in the line state, never redb
+/// keys, so no reserved word is required.
+fn validate_line_name(name: &str) -> Result<String> {
+    let ok = !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with(['/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
+    if ok {
+        Ok(name.to_string())
+    } else {
+        Err(Error::InvalidLine(format!(
+            "{name:?} is not a valid line name (letters, digits, . _ - /; up to 128 bytes)"
+        )))
     }
 }
 
@@ -1441,25 +1931,186 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_head_file_does_not_override_the_durable_redb_head() {
+    fn a_stale_head_file_does_not_override_the_durable_redb_state() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f"), b"1").unwrap();
         let a = repo.save("one").unwrap();
         fs::write(dir.path().join("f"), b"2").unwrap();
         let b = repo.save("two").unwrap();
 
-        // The residue of a crash mid-undo (or mid-save): the durable redb head
-        // moved to `a`, but the HEAD file still names `b` because
-        // write_head_pointer had not run. The durable redb head must win — a
-        // staler cache file must not resurrect the old head.
-        repo.oplog().set_head("checkpoint", a.oplog_seq).unwrap();
+        // The residue of a crash mid-undo: the durable redb line state moved
+        // back to `a`, but the HEAD file still names `b` because the cache
+        // write had not run. redb is the authority (rung 1); the file is a
+        // cache (rung 3) and must not resurrect the newer id.
+        let mut state = repo.line_state().unwrap();
+        state.lines.get_mut(DEFAULT_LINE).unwrap().tip = Some(a.id.clone());
+        repo.oplog().publish_lines(&state).unwrap();
         fs::write(repo.head_pointer_path(), &b.id).unwrap();
 
         assert_eq!(
             repo.head_checkpoint().unwrap().unwrap().id,
             a.id,
-            "the durable redb head must win over a staler HEAD file"
+            "the durable redb line state must win over a staler HEAD file"
         );
+    }
+
+    #[test]
+    fn init_creates_the_default_line_below_the_undo_floor() {
+        let (_dir, repo) = repo();
+        let state = repo.lines().unwrap();
+        assert_eq!(state.current, DEFAULT_LINE);
+        assert!(state.lines.contains_key(DEFAULT_LINE));
+        // main must not come from a StartLine entry, or undo-all would delete it.
+        for entry in repo.oplog().entries().unwrap() {
+            assert!(
+                !matches!(entry.operation, Operation::StartLine { .. }),
+                "the default line must not be created by an undoable entry"
+            );
+        }
+    }
+
+    #[test]
+    fn start_creates_a_line_and_makes_it_current() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        let seed = repo.save("seed").unwrap();
+
+        let out = repo.start_line("feature").unwrap();
+        assert!(out.created);
+        assert_eq!(out.line, "feature");
+        let state = repo.lines().unwrap();
+        assert_eq!(state.current, "feature");
+        // A new line inherits the tip, so no baseline checkpoint disappears.
+        assert_eq!(
+            state.lines["feature"].tip.as_deref(),
+            Some(seed.id.as_str())
+        );
+    }
+
+    #[test]
+    fn start_of_an_existing_line_switches_and_succeeds() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        repo.save("seed").unwrap();
+        repo.start_line("feature").unwrap();
+        repo.switch_line(DEFAULT_LINE).unwrap();
+
+        // G1.4 draws `start <name>` thousands of times against one repository
+        // and requires exit 0 every time.
+        let out = repo.start_line("feature").unwrap();
+        assert!(!out.created, "an existing line is not created again");
+        assert_eq!(repo.lines().unwrap().current, "feature");
+    }
+
+    #[test]
+    fn switch_preserves_this_lines_work_and_restores_the_others() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("shared.txt"), b"shared").unwrap();
+        repo.save("seed").unwrap();
+
+        repo.start_line("feature").unwrap();
+        fs::write(dir.path().join("only-on-feature.txt"), b"work").unwrap();
+        repo.save("feature work").unwrap();
+
+        repo.switch_line(DEFAULT_LINE).unwrap();
+        assert!(
+            !dir.path().join("only-on-feature.txt").exists(),
+            "the other line's file must not linger after switching away"
+        );
+        assert!(dir.path().join("shared.txt").exists());
+
+        repo.switch_line("feature").unwrap();
+        assert!(
+            dir.path().join("only-on-feature.txt").exists(),
+            "switching back must restore that line's working state"
+        );
+    }
+
+    #[test]
+    fn switching_to_an_unknown_line_is_refused_by_name() {
+        let (_dir, mut repo) = repo();
+        let err = repo.switch_line("nope").unwrap_err();
+        assert_eq!(err.category(), crate::error::Category::NotFound);
+        assert_eq!(err.concept(), crate::error::Concept::Line);
+        let bad = repo.start_line("has space").unwrap_err();
+        assert_eq!(bad.concept(), crate::error::Concept::Line);
+    }
+
+    #[test]
+    fn undo_of_start_removes_the_line_and_returns_to_the_previous_one() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        repo.save("seed").unwrap();
+        repo.start_line("feature").unwrap();
+        assert_eq!(repo.lines().unwrap().current, "feature");
+
+        let out = repo.undo().unwrap();
+        assert!(!out.nothing_to_undo);
+        let state = repo.lines().unwrap();
+        assert_eq!(state.current, DEFAULT_LINE);
+        assert!(
+            !state.lines.contains_key("feature"),
+            "undoing a start removes the line it created"
+        );
+    }
+
+    #[test]
+    fn undo_of_switch_returns_to_the_previous_line() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("f"), b"1").unwrap();
+        repo.save("seed").unwrap();
+        repo.start_line("feature").unwrap();
+        repo.switch_line(DEFAULT_LINE).unwrap();
+        assert_eq!(repo.lines().unwrap().current, DEFAULT_LINE);
+
+        repo.undo().unwrap();
+        assert_eq!(
+            repo.lines().unwrap().current,
+            "feature",
+            "undoing a switch returns to the line it left"
+        );
+    }
+
+    #[test]
+    fn undo_all_with_lines_returns_to_the_seed_state() {
+        // The G1.3 property in miniature, now with the `lines` domain live:
+        // a batch of start/switch/save must undo-all back to the post-seed
+        // state — same current line, same lines, same reachable graph.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("seed.txt"), b"seed\n").unwrap();
+        repo.save("seed").unwrap();
+        let lines_before = repo.lines().unwrap();
+        let graph_before: Vec<String> = repo
+            .log_view(true, None)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+
+        repo.start_line("probe-line").unwrap();
+        repo.save("on probe").unwrap();
+        repo.switch_line(DEFAULT_LINE).unwrap();
+        repo.save("on main").unwrap();
+        repo.start_line("probe-line").unwrap();
+
+        for _ in 0..64 {
+            if repo.undo().unwrap().nothing_to_undo {
+                break;
+            }
+        }
+
+        assert_eq!(
+            repo.lines().unwrap(),
+            lines_before,
+            "line state must return"
+        );
+        let graph_after: Vec<String> = repo
+            .log_view(true, None)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(graph_after, graph_before, "checkpoint graph must return");
     }
 
     #[test]

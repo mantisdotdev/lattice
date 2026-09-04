@@ -31,6 +31,66 @@ use crate::error::{Error, Result};
 const ENTRIES: TableDefinition<u64, &[u8]> = TableDefinition::new("oplog");
 const HEADS: TableDefinition<&str, u64> = TableDefinition::new("heads");
 
+/// Line state, held under a SINGLE key (`state`).
+///
+/// One key rather than one per line for two reasons (ADR-16 §7): a publish
+/// mutates three facts at once — the source line's preserved working state, the
+/// target's, and which line is current — so a single-key write makes it atomic
+/// by construction; and user-controlled line names never become redb keys, so
+/// the whole class of key-namespace questions does not arise.
+const LINES: TableDefinition<&str, &[u8]> = TableDefinition::new("lines");
+const LINES_KEY: &str = "state";
+
+/// On-disk format version. Bumped to 2 when lines were added: `Save` and
+/// `StartLine` gained fields, which changes what `Entry::compute_id`
+/// re-serialises, so an older log would report every entry as "altered"
+/// (ADR-16 §9). `Repo::open` refuses an older database with a recovery action
+/// rather than reporting phantom tampering.
+pub const FORMAT_VERSION: u64 = 2;
+const FORMAT_KEY: &str = "format";
+
+/// One line of work: where it points, and the working state held for it while
+/// it is not current.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineRecord {
+    /// Checkpoint id this line points at, if it has one.
+    ///
+    /// An id, not an op-log seq: undo moves a tip to `checkpoint.parent`, which
+    /// has an id but no unambiguous sequence number.
+    pub tip: Option<String>,
+    /// Tree address of the working state preserved for this line.
+    ///
+    /// Always `None` for the CURRENT line — becoming current consumes the
+    /// preserved state, ceasing to be current sets it. While a line is current
+    /// the bytes on disk are the truth. Every undo inverse is exact and
+    /// mechanical only because of this invariant (ADR-16 §1).
+    pub working: Option<String>,
+}
+
+/// Which lines exist and which one is current.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineState {
+    pub current: String,
+    pub lines: std::collections::BTreeMap<String, LineRecord>,
+}
+
+/// The line every repository starts on. G1.1 and G1.4 both run `switch main`
+/// against a repository whose only setup is `init` + `save`, so it must exist
+/// by default — and it is created by `init`, never by a `StartLine` entry,
+/// which would be an eligible undo target (ADR-16 §2).
+pub const DEFAULT_LINE: &str = "main";
+
+impl LineState {
+    pub fn initial() -> Self {
+        let mut lines = std::collections::BTreeMap::new();
+        lines.insert(DEFAULT_LINE.to_string(), LineRecord::default());
+        LineState {
+            current: DEFAULT_LINE.to_string(),
+            lines,
+        }
+    }
+}
+
 /// How long a committing thread waits for others to join its batch.
 ///
 /// Small enough to be invisible against a ~4.7 ms flush, large enough that
@@ -47,9 +107,19 @@ pub enum Operation {
     Save {
         message: String,
         checkpoint: String,
+        /// The line whose tip this save advanced — undo must move that line's
+        /// tip back, not whichever line happens to be current later.
+        line: String,
     },
     StartLine {
         name: String,
+        /// The line that was current before, so the inverse can return to it.
+        from: String,
+        /// Whether this call actually created the line. `start <existing>` is
+        /// a switch and must exit 0 (G1.4 draws it thousands of times), so the
+        /// record says what happened and the inverse reads it — otherwise undo
+        /// would delete a line the FIRST start created.
+        created: bool,
     },
     Switch {
         from: String,
@@ -150,8 +220,10 @@ pub struct OpLog {
 
 #[derive(Default)]
 struct GroupState {
-    /// Entries staged but not yet flushed.
-    pending: Vec<Entry>,
+    /// Entries staged but not yet flushed, each with the LineState publish
+    /// that must land in the SAME transaction as the entry (ADR-16 §7), so the
+    /// log and the line state can never disagree after a crash.
+    pending: Vec<(Entry, Option<LineState>)>,
     /// Sequence number through which the log is durable.
     durable_through: u64,
     /// A flush is in progress; late arrivals wait rather than starting another.
@@ -199,6 +271,7 @@ impl OpLog {
             let tx = db.begin_write()?;
             tx.open_table(ENTRIES)?;
             tx.open_table(HEADS)?;
+            tx.open_table(LINES)?;
             tx.commit()?;
         }
         let last = {
@@ -276,7 +349,16 @@ impl OpLog {
     /// to arrive, and then one thread flushes the whole batch. Every caller
     /// returns only after the flush that covers its own sequence number, so the
     /// durability promise is per-operation even though the cost is shared.
+    /// Append an operation with no state publish.
     pub fn append(&self, operation: Operation) -> Result<Entry> {
+        self.commit(operation, None)
+    }
+
+    /// Append an operation and, in the SAME durable transaction, publish the
+    /// new line state. One transaction is what makes "which entries are undone"
+    /// and "where the lines point" impossible to disagree after a crash, and it
+    /// is why `set_head` is retired as a write (ADR-16 §7).
+    pub fn commit(&self, operation: Operation, lines: Option<LineState>) -> Result<Entry> {
         let entry = {
             let mut state = self.group.lock().unwrap();
             if let Some(msg) = &state.poisoned {
@@ -302,7 +384,7 @@ impl OpLog {
                 operation,
             };
             state.last_id = Some(id);
-            state.pending.push(entry.clone());
+            state.pending.push((entry.clone(), lines));
             entry
         };
 
@@ -342,7 +424,7 @@ impl OpLog {
             // `mem::take` rather than `drain(..).collect()`: same effect,
             // one allocation instead of two, and it is what
             // `clippy::drain_collect` asks for.
-            let batch: Vec<Entry> = std::mem::take(&mut state.pending);
+            let batch: Vec<(Entry, Option<LineState>)> = std::mem::take(&mut state.pending);
             drop(state);
 
             // If commit_batch unwinds, this guard re-locks and clears
@@ -379,21 +461,81 @@ impl OpLog {
         }
     }
 
-    fn commit_batch(&self, batch: &[Entry]) -> Result<u64> {
+    fn commit_batch(&self, batch: &[(Entry, Option<LineState>)]) -> Result<u64> {
         if batch.is_empty() {
             return Ok(0);
         }
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(ENTRIES)?;
-            for entry in batch {
+            for (entry, _) in batch {
                 let bytes = serde_json::to_vec(entry)?;
                 table.insert(entry.seq, bytes.as_slice())?;
             }
         }
+        {
+            // Line publishes land in the same transaction as their entries, in
+            // sequence order. A state-changing command holds the repository
+            // exclusively from its LineState read to this commit (`&mut Repo`
+            // within a process, redb's exclusive lock across them), so a batch
+            // carries at most one publish per writer and applying them in order
+            // is the writer's own sequence. True cross-process concurrency is
+            // the deferred workspace slice (ADR-16, open conflict 2).
+            let mut table = tx.open_table(LINES)?;
+            for (_, lines) in batch {
+                if let Some(state) = lines {
+                    let bytes = serde_json::to_vec(state)?;
+                    table.insert(LINES_KEY, bytes.as_slice())?;
+                }
+            }
+        }
         // redb's commit is the durability barrier; it fsyncs.
         tx.commit()?;
-        Ok(batch.last().map(|e| e.seq).unwrap_or(0))
+        Ok(batch.last().map(|(e, _)| e.seq).unwrap_or(0))
+    }
+
+    /// The published line state, or `None` for a repository that has none.
+    pub fn line_state(&self) -> Result<Option<LineState>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(LINES)?;
+        match table.get(LINES_KEY)? {
+            Some(v) => Ok(Some(serde_json::from_slice(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Record the on-disk format version. Written by `init` in the same
+    /// transaction that creates the repository's first entry.
+    pub fn set_format_version(&self, version: u64) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(HEADS)?;
+            table.insert(FORMAT_KEY, version)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The recorded format version, or `None` for a database written before
+    /// versions were recorded.
+    pub fn format_version(&self) -> Result<Option<u64>> {
+        self.get_head(FORMAT_KEY)
+    }
+
+    /// Publish line state without appending an operation.
+    ///
+    /// Used only by `init`, which must create the default line below the undo
+    /// floor — it cannot be created by a `StartLine` entry, which undo would be
+    /// eligible to reverse (ADR-16 §2).
+    pub fn publish_lines(&self, state: &LineState) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(LINES)?;
+            let bytes = serde_json::to_vec(state)?;
+            table.insert(LINES_KEY, bytes.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Walk the hash chain. Returns the first break, or None if intact.
@@ -552,6 +694,8 @@ mod tests {
         let b = log
             .append(Operation::StartLine {
                 name: "auth".into(),
+                from: "main".into(),
+                created: true,
             })
             .unwrap();
         assert_eq!(a.seq, 1);
@@ -568,6 +712,7 @@ mod tests {
         log.append(Operation::Save {
             message: "first".into(),
             checkpoint: "abc".into(),
+            line: "main".into(),
         })
         .unwrap();
         assert!(log.verify_chain().unwrap().is_none());
@@ -584,6 +729,7 @@ mod tests {
                 entry.operation = Operation::Save {
                     message: "tampered".into(),
                     checkpoint: "abc".into(),
+                    line: "main".into(),
                 };
                 let bytes = serde_json::to_vec(&entry).unwrap();
                 table.insert(2u64, bytes.as_slice()).unwrap();
@@ -610,7 +756,8 @@ mod tests {
         assert!(!Operation::Thin { collected: 3 }.is_undoable());
         assert!(Operation::Save {
             message: "m".into(),
-            checkpoint: "c".into()
+            checkpoint: "c".into(),
+            line: "main".into(),
         }
         .is_undoable());
         assert!(
@@ -637,6 +784,8 @@ mod tests {
                 for i in 0..25 {
                     log.append(Operation::StartLine {
                         name: format!("t{t}-{i}"),
+                        from: "main".into(),
+                        created: true,
                     })
                     .unwrap();
                 }
