@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::change;
 use crate::chunk::ChunkId;
 use crate::error::{Error, Result};
 use crate::oplog::{
@@ -90,7 +91,36 @@ pub struct Repo {
     root: PathBuf,
     store: Store,
     oplog: OpLog,
+    change_id_bits: ChangeIdBits,
 }
+
+/// Where a new change id gets its 128 bits (ADR-17 §3).
+///
+/// Injected rather than reached for: the engine never touches an entropy
+/// source itself, so a test or the property runner substitutes a counter and
+/// exercises the code that ships rather than a second path beside it.
+/// Fallible because a machine that cannot produce entropy has to say so, not
+/// mint a predictable identity.
+pub type ChangeIdBits = Box<dyn FnMut() -> Result<[u8; 16]> + Send>;
+
+fn os_change_id_bits() -> Result<[u8; 16]> {
+    let mut bits = [0u8; 16];
+    getrandom::fill(&mut bits).map_err(|e| Error::Io(std::io::Error::from(e)))?;
+    Ok(bits)
+}
+
+/// The most paths one change may hold.
+///
+/// Nothing from outside is unbounded, and this set is unusual in being
+/// published into the line state on EVERY operation — so an uncapped one would
+/// grow every write in the repository, not just its own. Reaching it is a
+/// refusal, reported and exiting 0, never an error: the paths already in the
+/// change stay assigned.
+///
+/// When hunk-level assignment lands, assignment sets move to content-addressed
+/// blobs referenced by address — the pattern `working` already uses — and this
+/// stops bounding a redb value (ADR-17 §4).
+const MAX_ASSIGNED_PATHS: usize = 1000;
 
 impl Repo {
     fn repo_dir(root: &Path) -> PathBuf {
@@ -137,6 +167,7 @@ impl Repo {
             root: root.to_path_buf(),
             store,
             oplog,
+            change_id_bits: Box::new(os_change_id_bits),
         })
     }
 
@@ -189,7 +220,21 @@ impl Repo {
             root: root.to_path_buf(),
             store,
             oplog,
+            change_id_bits: Box::new(os_change_id_bits),
         })
+    }
+
+    /// Replace where new change ids get their bits.
+    ///
+    /// The one seam ADR-17 §3 asks for: entropy enters at this boundary and
+    /// nowhere else, so a caller that needs a run to be reproducible passes a
+    /// counter instead of the machine's entropy.
+    pub fn with_change_id_bits(
+        mut self,
+        bits: impl FnMut() -> Result<[u8; 16]> + Send + 'static,
+    ) -> Self {
+        self.change_id_bits = Box::new(bits);
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -878,6 +923,230 @@ impl Repo {
         }
         self.sync_head_pointer(&lines)?;
         Ok(outcome)
+    }
+
+    // ------------------------------------------------------------ changes
+
+    /// Mint an identity for a new change.
+    fn new_change_id(&mut self) -> Result<String> {
+        Ok(change::mint((self.change_id_bits)()?))
+    }
+
+    /// Route working-tree paths into a change.
+    ///
+    /// Paths resolve as the process resolves them, so a relative one is
+    /// relative to the working directory — the contract `checkout --into`
+    /// already follows.
+    ///
+    /// `to` names an existing change; `None` means the current one, creating
+    /// it if the line has none. `--to` never creates, so there is exactly one
+    /// creation path and an unknown id is an error rather than a new change
+    /// nobody asked for (ADR-17 §6).
+    ///
+    /// Records an intent. Not a byte of working state is read or written —
+    /// which is what keeps ADR-16 §1's linchpin true, and why the inverse
+    /// needs no capture and no materialisation.
+    ///
+    /// A path this cannot take is REFUSED, never silently dropped, and a
+    /// refusal is not an error: the call succeeds carrying what it refused and
+    /// why. G1.4 draws `assign .` about ten thousand times and counts any
+    /// non-zero exit as a failure, so a refusal that exited non-zero would
+    /// fail a HARD gate for doing the right thing.
+    pub fn assign(&mut self, paths: &[PathBuf], to: Option<&str>) -> Result<AssignOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let (candidates, mut refused) = self.locate(paths)?;
+        let mut lines = self.line_state()?;
+        let line = lines.current.clone();
+        let record = lines.lines.entry(line.clone()).or_default();
+        let from_current = record.current_change.clone();
+
+        // Which change holds each path now, so a previous owner is a lookup
+        // rather than a scan of every change for every path.
+        let mut owner_of: std::collections::HashMap<Vec<u8>, String> =
+            std::collections::HashMap::new();
+        for (id, held) in record.changes.iter() {
+            for path in &held.assigned {
+                owner_of.insert(path.clone(), id.clone());
+            }
+        }
+
+        // The target is settled before anything moves, so a `--to` that names
+        // no open change leaves the repository exactly as it found it.
+        let (change, created) = match to {
+            Some(typed) => (resolve_change(typed, &record.changes)?, false),
+            None => match &record.current_change {
+                Some(current) => (current.clone(), false),
+                // A bare assign with no current change starts one — even if
+                // every path is then refused, which leaves an empty change
+                // that `undo` removes. One rule; the alternative is an entry
+                // naming a change that was never created.
+                None => (self.new_change_id()?, true),
+            },
+        };
+
+        let record = lines.lines.entry(line.clone()).or_default();
+        let mut room = MAX_ASSIGNED_PATHS
+            .saturating_sub(record.changes.get(&change).map_or(0, |c| c.assigned.len()));
+        let mut moved: Vec<Vec<u8>> = Vec::new();
+        let mut displaced: Vec<(Vec<u8>, String)> = Vec::new();
+        for path in candidates {
+            let held_by = owner_of.get(&path);
+            // Already where it is being sent: nothing moved, so nothing is
+            // recorded and nothing would be reversed.
+            if held_by.is_some_and(|owner| *owner == change) {
+                continue;
+            }
+            if room == 0 {
+                refused.push(Refusal::capped(&path));
+                continue;
+            }
+            if let Some(owner) = held_by {
+                if let Some(previous) = record.changes.get_mut(owner) {
+                    previous.assigned.remove(&path);
+                }
+                displaced.push((path.clone(), owner.clone()));
+            }
+            record
+                .changes
+                .entry(change.clone())
+                .or_default()
+                .assigned
+                .insert(path.clone());
+            moved.push(path);
+            room -= 1;
+        }
+        record.current_change = Some(change.clone());
+        let short = change::abbreviate(
+            &change,
+            &record
+                .changes
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+
+        // One entry however many paths moved. G1.3's undo budget is
+        // `applied * 3 + 8`, so a k-path assign decomposing into k entries
+        // would exhaust it (ADR-17 §6).
+        let entry = self.oplog.commit(
+            Operation::Assign {
+                change: change.clone(),
+                line: line.clone(),
+                paths: moved.clone(),
+                created,
+                from_current,
+                displaced,
+            },
+            Some(lines),
+        )?;
+
+        Ok(AssignOutcome {
+            change,
+            short,
+            created,
+            line,
+            assigned: moved.iter().map(|p| display_path(p)).collect(),
+            refused,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Every change open on the current line.
+    ///
+    /// Carries no timestamp, no counter and no op-log position, so the
+    /// document is invariant under apply-a-batch-then-undo-all — which is what
+    /// G1.3 compares it for.
+    pub fn changes(&self) -> Result<Vec<ChangeView>> {
+        let lines = self.line_state()?;
+        let Some(record) = lines.lines.get(&lines.current) else {
+            return Ok(Vec::new());
+        };
+        let ids: Vec<&str> = record.changes.keys().map(String::as_str).collect();
+        Ok(record
+            .changes
+            .iter()
+            .map(|(id, held)| ChangeView {
+                short: change::abbreviate(id, &ids),
+                id: id.clone(),
+                assigned: held.assigned.iter().map(|p| display_path(p)).collect(),
+                current: record.current_change.as_deref() == Some(id.as_str()),
+            })
+            .collect())
+    }
+
+    /// Expand what the user named into working-tree paths, with a reason for
+    /// each one that cannot be taken.
+    ///
+    /// The repository's own directory is skipped at the root and nowhere else,
+    /// and no symlink is followed while walking — both the same rules
+    /// `snapshot_dir` follows, because these are the paths a tree will name.
+    fn locate(&self, given: &[PathBuf]) -> Result<(Vec<Vec<u8>>, Vec<Refusal>)> {
+        let root = resolve_as_far_as_it_exists(&self.root)?;
+        let mut found: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+        let mut refused = Vec::new();
+        for path in given {
+            // A named symlink resolves to what it points at, so `assign link`
+            // assigns the file rather than the link. Walking a DIRECTORY does
+            // not resolve: symlinks found inside are assigned as themselves,
+            // exactly as a tree records them.
+            let resolved = resolve_as_far_as_it_exists(path)?;
+            if !resolved.starts_with(&root) {
+                refused.push(Refusal::outside(path));
+                continue;
+            }
+            match fs::symlink_metadata(&resolved) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                    self.collect_under(&resolved, &root, &mut found, &mut refused)?;
+                }
+                Ok(_) => {
+                    if let Ok(relative) = resolved.strip_prefix(&root) {
+                        found.insert(relative.as_os_str().as_encoded_bytes().to_vec());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    refused.push(Refusal::absent(path))
+                }
+                Err(e) => refused.push(Refusal::unreadable(path, &e)),
+            }
+        }
+        Ok((found.into_iter().collect(), refused))
+    }
+
+    fn collect_under(
+        &self,
+        dir: &Path,
+        root: &Path,
+        found: &mut std::collections::BTreeSet<Vec<u8>>,
+        refused: &mut Vec<Refusal>,
+    ) -> Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            // An unreadable directory is refused with its own path rather than
+            // failing the command: the rest of what was named is still
+            // assignable, and §4.3 forbids the dead end.
+            Err(e) => {
+                refused.push(Refusal::unreadable(dir, &e));
+                return Ok(());
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let raw = entry.file_name().as_encoded_bytes().to_vec();
+            // The repository's own directory is skipped, but ONLY at the root:
+            // a user directory named `.lattice` nested below is real content.
+            if dir == root && raw == REPO_DIR.as_bytes() {
+                continue;
+            }
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                self.collect_under(&path, root, found, refused)?;
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                found.insert(relative.as_os_str().as_encoded_bytes().to_vec());
+            }
+        }
+        Ok(())
     }
 
     // -------------------------------------------------------------- lines
@@ -1744,6 +2013,120 @@ pub struct LineOutcome {
     pub rescued_working_state: Option<String>,
 }
 
+/// What `assign` did.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssignOutcome {
+    /// The change the paths went into, as recorded in history.
+    pub change: String,
+    /// The shortest prefix that names it among the changes open here — what a
+    /// user types, and what prose displays.
+    pub short: String,
+    /// Whether this call created the change rather than adding to one.
+    pub created: bool,
+    pub line: String,
+    /// The paths this call moved, which is not what was named: a path already
+    /// in the change is not moved, and a refused one never was.
+    pub assigned: Vec<String>,
+    /// What it would not take, and why. Reported as data so a caller cannot
+    /// miss it by not reading prose.
+    pub refused: Vec<Refusal>,
+    /// Position of the recorded operation. Every state-changing command
+    /// reports one so a concurrent history can be checked for linearizability.
+    pub oplog_seq: u64,
+    /// Work set aside while completing a switch an earlier command left
+    /// unfinished.
+    pub rescued_working_state: Option<String>,
+}
+
+/// A path `assign` would not take, and why.
+///
+/// Refusals are reported, never silent, and never fatal: the command exits 0
+/// carrying them (ADR-17 §6). Paths are rendered lossily because JSON cannot
+/// hold arbitrary bytes — the same compromise `Collision` makes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Refusal {
+    pub path: String,
+    pub reason: String,
+}
+
+impl Refusal {
+    fn absent(path: &Path) -> Self {
+        Refusal {
+            path: path.display().to_string(),
+            reason: "no such path in the working state".into(),
+        }
+    }
+
+    fn outside(path: &Path) -> Self {
+        Refusal {
+            path: path.display().to_string(),
+            reason: "outside the working state; a change holds paths in this \
+                     repository"
+                .into(),
+        }
+    }
+
+    fn unreadable(path: &Path, why: &std::io::Error) -> Self {
+        Refusal {
+            path: path.display().to_string(),
+            reason: format!("unreadable: {why}"),
+        }
+    }
+
+    fn capped(path: &[u8]) -> Self {
+        Refusal {
+            path: display_path(path),
+            reason: format!(
+                "this change already holds {MAX_ASSIGNED_PATHS} paths, the most one \
+                 change may hold; save it or assign to another change"
+            ),
+        }
+    }
+}
+
+/// One open change, as `change list` reports it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChangeView {
+    pub id: String,
+    pub short: String,
+    pub assigned: Vec<String>,
+    /// Whether a bare `ltx assign` adds to this one.
+    pub current: bool,
+}
+
+/// A working-tree path as a human reads it.
+///
+/// Lossy, because a path is raw bytes and JSON is text. The bytes stay exact
+/// in the change record and in the op-log; only what is shown is approximate.
+fn display_path(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).into_owned()
+}
+
+/// Resolve a change reference a user typed against the changes open on a line.
+fn resolve_change(
+    typed: &str,
+    changes: &std::collections::BTreeMap<String, crate::oplog::ChangeRecord>,
+) -> Result<String> {
+    let ids: Vec<&str> = changes.keys().map(String::as_str).collect();
+    match change::resolve(typed, &ids) {
+        change::Resolution::One(id) => Ok(id),
+        change::Resolution::Unknown => Err(Error::NoSuchChange(format!(
+            "no change {typed} is open on this line"
+        ))),
+        change::Resolution::Ambiguous(matched) => {
+            let shown: Vec<String> = matched
+                .iter()
+                .map(|id| change::abbreviate(id, &ids))
+                .collect();
+            Err(Error::InvalidChange(format!(
+                "{typed} names {} open changes ({})",
+                matched.len(),
+                shown.join(", ")
+            )))
+        }
+    }
+}
+
 /// Resolve `path` through symlinks as far as it exists, appending the part
 /// that does not exist yet verbatim.
 ///
@@ -2148,6 +2531,258 @@ mod tests {
             "entries_written must equal the files actually present, so a folded \
              sibling is never counted as written when it overwrote another"
         );
+    }
+
+    /// A repository whose change ids come from a counter rather than the
+    /// machine's entropy, so a test can name the changes it made. The counter
+    /// sits in the third byte, so two ids share their first four characters —
+    /// which is what makes an abbreviation grow past the floor.
+    fn counted_ids(dir_and_repo: (tempfile::TempDir, Repo)) -> (tempfile::TempDir, Repo) {
+        let (dir, repo) = dir_and_repo;
+        let mut n = 0u8;
+        let repo = repo.with_change_id_bits(move || {
+            n += 1;
+            let mut bits = [0u8; 16];
+            bits[2] = n;
+            Ok(bits)
+        });
+        (dir, repo)
+    }
+
+    #[test]
+    fn assigning_a_directory_takes_everything_under_it_but_never_the_repository() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/b.txt"), b"b").unwrap();
+        repo.save("seed").unwrap();
+
+        let out = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+
+        assert!(out.created, "there was no change open, so this started one");
+        assert_eq!(
+            out.assigned,
+            vec![
+                "a.txt".to_string(),
+                format!("sub{}b.txt", std::path::MAIN_SEPARATOR)
+            ],
+            "a directory assigns what is under it, and .lattice is not content"
+        );
+        assert!(out.refused.is_empty());
+    }
+
+    #[test]
+    fn a_second_bare_assign_adds_to_the_change_the_first_one_started() {
+        // G1.4 draws `assign .` about ten thousand times against one
+        // repository. Ten thousand bare assigns must not leave ten thousand
+        // changes behind, which is the whole reason a line holds a CURRENT
+        // change rather than assign minting one per call.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed").unwrap();
+
+        let first = repo.assign(&[dir.path().join("a.txt")], None).unwrap();
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let second = repo.assign(&[dir.path().join("b.txt")], None).unwrap();
+
+        assert_eq!(first.change, second.change);
+        assert!(!second.created, "the second call added, it did not start");
+        assert_eq!(repo.changes().unwrap().len(), 1);
+        assert_eq!(
+            repo.changes().unwrap()[0].assigned,
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn assign_writes_no_byte_of_working_state() {
+        // ADR-17 §2's invariant, and the reason the inverse needs neither a
+        // capture nor a materialisation.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"exactly this").unwrap();
+        repo.save("seed").unwrap();
+
+        repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+
+        assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"exactly this");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            2,
+            "a.txt and .lattice — assign created nothing"
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_not_there_is_refused_and_the_command_still_succeeds() {
+        // G1.4 counts any non-zero exit as a failure across ~10,000 draws, so
+        // a path that cannot be taken must be REPORTED rather than raised.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed").unwrap();
+
+        let out = repo.assign(&[dir.path().join("gone.txt")], None).unwrap();
+
+        assert!(out.assigned.is_empty());
+        assert_eq!(out.refused.len(), 1);
+        assert!(
+            out.refused[0].reason.contains("no such path"),
+            "the refusal says why: {}",
+            out.refused[0].reason
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_working_state_is_refused() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed").unwrap();
+        let (_elsewhere, outside) = outside("theirs.txt");
+        fs::write(&outside, b"not ours").unwrap();
+
+        let out = repo.assign(&[outside], None).unwrap();
+
+        assert!(
+            out.assigned.is_empty(),
+            "a change holds paths in ITS repository"
+        );
+        assert_eq!(out.refused.len(), 1);
+        assert!(out.refused[0].reason.contains("outside the working state"));
+    }
+
+    #[test]
+    fn assigning_to_a_change_that_is_not_open_changes_nothing() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed").unwrap();
+        let before = repo.oplog().len().unwrap();
+
+        let err = repo
+            .assign(&[dir.path().join("a.txt")], Some("deadbeef"))
+            .unwrap_err();
+
+        assert_eq!(
+            err.concept(),
+            crate::error::Concept::Change,
+            "the §4.2 noun involved"
+        );
+        assert!(!err.recovery().is_empty());
+        assert!(repo.changes().unwrap().is_empty(), "--to never creates");
+        assert_eq!(
+            repo.oplog().len().unwrap(),
+            before,
+            "and a refused target appends nothing"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_change_reference_names_the_changes_it_could_mean() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        repo.save("seed").unwrap();
+        let first = repo.assign(&[dir.path().join("a.txt")], None).unwrap();
+        // A second change, started by hand because `--to` never creates one.
+        let mut lines = repo.line_state().unwrap();
+        lines.lines.get_mut(DEFAULT_LINE).unwrap().current_change = None;
+        repo.oplog.publish_lines(&lines).unwrap();
+        let second = repo.assign(&[dir.path().join("b.txt")], None).unwrap();
+        let shared = &first.change[..4];
+        assert_eq!(
+            shared,
+            &second.change[..4],
+            "the premise: they share a prefix"
+        );
+
+        let err = repo
+            .assign(&[dir.path().join("a.txt")], Some(shared))
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains(&first.short), "names one: {message}");
+        assert!(message.contains(&second.short), "and the other: {message}");
+        assert_eq!(err.category(), crate::error::Category::Invalid);
+    }
+
+    #[test]
+    fn assigning_a_path_to_another_change_moves_it_and_undo_moves_it_back() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        repo.save("seed").unwrap();
+        let first = repo.assign(&[dir.path().join("a.txt")], None).unwrap();
+        let mut lines = repo.line_state().unwrap();
+        lines.lines.get_mut(DEFAULT_LINE).unwrap().current_change = None;
+        repo.oplog.publish_lines(&lines).unwrap();
+        let second = repo.assign(&[dir.path().join("b.txt")], None).unwrap();
+
+        repo.assign(&[dir.path().join("a.txt")], Some(&second.short))
+            .unwrap();
+
+        let moved = repo.changes().unwrap();
+        assert_eq!(
+            moved
+                .iter()
+                .find(|c| c.id == first.change)
+                .unwrap()
+                .assigned,
+            Vec::<String>::new(),
+            "a path belongs to one change at a time"
+        );
+        assert_eq!(
+            moved
+                .iter()
+                .find(|c| c.id == second.change)
+                .unwrap()
+                .assigned,
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+
+        repo.undo().unwrap();
+
+        let back = repo.changes().unwrap();
+        assert_eq!(
+            back.iter().find(|c| c.id == first.change).unwrap().assigned,
+            vec!["a.txt".to_string()],
+            "undo returns the path to the change it was taken from"
+        );
+        assert_eq!(
+            back.iter()
+                .find(|c| c.id == second.change)
+                .unwrap()
+                .assigned,
+            vec!["b.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_change_stops_taking_paths_at_its_cap_and_says_so() {
+        // The assignment set is published into the line state on every
+        // operation, so an uncapped one would grow every write in the
+        // repository. Reaching the cap is a refusal, not an error: what is
+        // already assigned stays assigned.
+        let (dir, mut repo) = counted_ids(repo());
+        for i in 0..MAX_ASSIGNED_PATHS + 2 {
+            fs::write(dir.path().join(format!("f{i:05}.txt")), b"x").unwrap();
+        }
+        repo.save("seed").unwrap();
+
+        let out = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+
+        assert_eq!(out.assigned.len(), MAX_ASSIGNED_PATHS);
+        assert_eq!(out.refused.len(), 2);
+        assert!(
+            out.refused[0]
+                .reason
+                .contains(&MAX_ASSIGNED_PATHS.to_string()),
+            "the refusal names the cap: {}",
+            out.refused[0].reason
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_changes_lists_none() {
+        let (_dir, repo) = repo();
+        assert!(repo.changes().unwrap().is_empty());
     }
 
     #[test]

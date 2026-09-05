@@ -120,4 +120,80 @@ fn line_and_change_views_answer_at_the_top_level() {
         doc.get("lines").map(|v| v.is_array()).unwrap_or(false),
         "`lines` must be a top-level array. Got: {doc}"
     );
+
+    let doc = ltx(dir.path(), &["change", "list"]);
+    assert_eq!(
+        doc.get("changes").and_then(|v| v.as_array()),
+        Some(&Vec::new()),
+        "a repository with no changes lists none, at the top level and \
+         exiting 0 — until this command existed the domain compared one \
+         error document to another and was vacuously equal. Got: {doc}"
+    );
+}
+
+#[test]
+fn the_change_view_carries_nothing_that_an_undone_batch_would_change() {
+    // The document sits in an equality domain compared before a batch and
+    // after undoing it, so a timestamp, a counter or an op-log position in it
+    // would fail undo-all for a reason that has nothing to do with undo.
+    let dir = seeded_repo();
+    ltx(dir.path(), &["assign", "seed.txt"]);
+    let doc = ltx(dir.path(), &["change", "list"]);
+
+    let keys: Vec<&str> = doc
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(keys, vec!["changes", "ok", "version"], "got: {doc}");
+    let row = doc["changes"][0].as_object().expect("a change row");
+    let mut row_keys: Vec<&str> = row.keys().map(|k| k.as_str()).collect();
+    row_keys.sort_unstable();
+    assert_eq!(
+        row_keys,
+        vec!["assigned", "current", "id", "short"],
+        "got: {doc}"
+    );
+}
+
+#[test]
+fn assign_takes_a_bare_path_and_reports_its_position() {
+    // harness/g1/g1_4_concurrency.py:45 draws exactly `["assign", "."]` — a
+    // bare path with no change named — and :77 reads `oplog_seq` from the
+    // result. An operation with no position is counted as its own failure, so
+    // omitting the field cannot be a way to pass.
+    let dir = seeded_repo();
+    let doc = ltx(dir.path(), &["assign", "."]);
+    assert!(
+        doc.get("oplog_seq").and_then(|v| v.as_u64()).is_some(),
+        "`oplog_seq` must be a top-level number. Got: {doc}"
+    );
+    assert_eq!(
+        doc.get("assigned").and_then(|v| v.as_array()).map(Vec::len),
+        Some(1),
+        "`.` is the working tree, and seed.txt is in it. Got: {doc}"
+    );
+}
+
+#[test]
+fn assign_exits_zero_when_it_refuses() {
+    // harness/g1/g1_4_concurrency.py:66 counts ANY non-zero exit as a failure,
+    // across ~10,000 draws against a target of 0. A path that cannot be taken
+    // is reported in `refused` at exit 0 — refusing loudly, in JSON.
+    let dir = seeded_repo();
+    let out = Command::new(env!("CARGO_BIN_EXE_ltx"))
+        .args(["assign", "not-here.txt", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("ltx runs");
+
+    assert!(out.status.success(), "refusing is not failing");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(doc["ok"], serde_json::json!(true));
+    assert_eq!(
+        doc["refused"].as_array().map(Vec::len),
+        Some(1),
+        "and the refusal is reported as data, never silently. Got: {doc}"
+    );
 }

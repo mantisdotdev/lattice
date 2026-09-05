@@ -12,6 +12,9 @@ repository = "https://github.com/mantisdotdev/lattice"
 [workspace.dependencies]
 blake3 = "1.5"
 fastcdc = "3.2"
+# `std` for the `io::Error: From<getrandom::Error>` conversion: a failure to
+# read entropy is an OS failure and is reported as one.
+getrandom = { version = "0.4", features = ["std"] }
 zstd = "0.13"
 redb = "2.2"
 serde = { version = "1", features = ["derive"] }

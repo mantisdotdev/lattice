@@ -92,12 +92,31 @@ enum Command {
         /// The line to continue on.
         name: String,
     },
+    /// Put working-tree paths into a change.
+    Assign {
+        /// The change to add to. Defaults to the current one — and with no
+        /// current one, starts a change. Never creates the change it names.
+        #[arg(long = "to", value_name = "CHANGE")]
+        to: Option<String>,
+        /// What to assign. A directory assigns everything under it.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
+    /// Work with changes.
+    #[command(subcommand)]
+    Change(ChangeCmd),
     /// Work with lines.
     #[command(subcommand)]
     Line(LineCmd),
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
     Internals(Internals),
+}
+
+#[derive(Subcommand)]
+enum ChangeCmd {
+    /// Show every change open on this line.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -411,6 +430,76 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Assign { to, paths } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.assign(paths, to.as_deref())?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        // A refusal is reported, not raised: this exits 0 with
+                        // `refused` populated. G1.4 counts a non-zero exit as a
+                        // failure across ~10,000 draws of `assign .`, and a
+                        // path that cannot be taken is not a failed command.
+                        "ok": true,
+                        "change": out.change, "short": out.short,
+                        "created": out.created, "line": out.line,
+                        "assigned": out.assigned, "refused": out.refused,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    let mut text = if out.created {
+                        format!(
+                            "started change {} with {} path(s)",
+                            out.short,
+                            out.assigned.len()
+                        )
+                    } else {
+                        format!(
+                            "assigned {} path(s) to change {}",
+                            out.assigned.len(),
+                            out.short
+                        )
+                    };
+                    for r in &out.refused {
+                        text.push_str(&format!("\n  not assigned: {} — {}", r.path, r.reason));
+                    }
+                    text
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Change(ChangeCmd::List) => {
+            let repo = Repo::discover(&cwd)?;
+            let changes = repo.changes()?;
+            emit(
+                cli,
+                // No timestamp, no counter, no op-log position — so this
+                // document is invariant under apply-a-batch-then-undo-all,
+                // which is what G1.3 compares it for.
+                || serde_json::json!({ "ok": true, "version": 1, "changes": changes }),
+                || {
+                    if changes.is_empty() {
+                        return "no changes open".to_string();
+                    }
+                    let mut out = String::new();
+                    for c in &changes {
+                        let mark = if c.current { "*" } else { " " };
+                        out.push_str(&format!(
+                            "{mark} {}  {} path(s)\n",
+                            c.short,
+                            c.assigned.len()
+                        ));
+                    }
+                    out.trim_end().to_string()
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Line(LineCmd::List) => {
             let repo = Repo::discover(&cwd)?;
             let state = repo.lines()?;
@@ -464,6 +553,13 @@ fn run(cli: &Cli) -> Result<u8> {
                     // self-switch that counts coverage without testing anything.
                     { "name": "start", "state_changing": true, "undoable": true, "sample_args": ["probe-line"] },
                     { "name": "switch", "state_changing": true, "undoable": true, "sample_args": ["main"] },
+                    // `seed.txt` is the one path G1.3's batches guarantee
+                    // exists. The emission counter increments before the
+                    // return code is checked, so args naming a path that does
+                    // not exist would satisfy the coverage bar while testing
+                    // nothing (ADR-17 §6).
+                    { "name": "assign", "state_changing": true, "undoable": true, "sample_args": ["seed.txt"] },
+                    { "name": "change list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "line list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },
