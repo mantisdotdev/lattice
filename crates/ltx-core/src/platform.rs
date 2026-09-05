@@ -208,6 +208,50 @@ pub fn remove_file_or_symlink(path: &Path) -> Result<()> {
     }
 }
 
+/// Take an exclusive lock on `path`, waiting up to `wait` for it.
+///
+/// The returned file owns the lock: dropping it releases it, and so does the
+/// process exiting for any reason, including a kill. That is the property that
+/// matters — a lock a crashed process could strand is a repository nobody can
+/// open again, which is worse than the contention it was guarding.
+///
+/// `std::fs::File::lock` blocks with no deadline, so this polls `try_lock`
+/// instead. A caller that waits forever cannot tell a busy repository from a
+/// deadlocked one, and "every retry has a cap and backoff" is the house rule.
+///
+/// Portable by construction: `flock(LOCK_EX)` on Unix, `LockFileEx` on
+/// Windows, both through std, so no dependency is added for it and G1.12 gets
+/// the same behaviour on all three platforms.
+pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<fs::File> {
+    use std::time::{Duration, Instant};
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    let deadline = Instant::now() + wait;
+    // Backoff doubles to a ceiling rather than spinning: eight contenders
+    // polling a held lock is eight cores doing nothing.
+    let mut backoff = Duration::from_millis(1);
+    const MAX_BACKOFF: Duration = Duration::from_millis(50);
+    loop {
+        if file.try_lock().is_ok() {
+            return Ok(file);
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::error::Error::Busy(format!(
+                "another command has held this repository for longer than {} \
+                 seconds",
+                wait.as_secs()
+            )));
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
 /// Human-readable name for the current platform, for reports.
 pub fn platform_name() -> &'static str {
     if cfg!(windows) {
@@ -224,6 +268,28 @@ pub fn platform_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_exclusive_lock_waits_and_then_reports_the_repository_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let held = lock_exclusive(&path, std::time::Duration::from_secs(5)).unwrap();
+
+        let started = std::time::Instant::now();
+        let second = lock_exclusive(&path, std::time::Duration::from_millis(120));
+
+        let err = second.expect_err("the lock is held, so this cannot succeed");
+        assert_eq!(err.category(), crate::error::Category::Busy);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(100),
+            "it must WAIT for the lock rather than fail on first sight — that \
+             is the whole difference from redb's non-blocking one"
+        );
+
+        drop(held);
+        lock_exclusive(&path, std::time::Duration::from_millis(500))
+            .expect("dropping the holder releases it");
+    }
 
     #[test]
     fn names_round_trip_through_bytes() {
