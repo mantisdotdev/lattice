@@ -336,8 +336,19 @@ a consumed one resurrects it as pending while its content is already
 checkpointed, which is the same contradiction from the other side.
 
 `ltx undo` then reports `nothing_to_undo` with the assignment still standing,
-which is honest only if `change list` reports that change as *consumed* rather
-than *pending* — so it does.
+which is honest only if nothing goes on calling that change *pending*.
+
+Implementation reached that by removal rather than by a second state. A save
+consumes its change by taking it out of the line record, so `change list` — a
+list of what is OPEN — does not show it at all, and there is no window in which
+one command calls a change pending while another refuses to reverse it. A
+`consumed` row was the first design and is rejected: it grows without bound as
+partial saves accumulate, and it puts history into a view whose entire job is
+to answer "what is still open". Where a checkpointed change IS named is where
+the question is about a checkpoint rather than about open work: `ltx status`
+qualifies a head that holds one, `ltx verify` counts them, and `assign --to`
+against one refuses by saying it is already checkpointed rather than that it
+never existed.
 
 The rejected alternative was splitting `Save`'s eligibility per effect (tip
 floored, change not), which would produce a change that is simultaneously

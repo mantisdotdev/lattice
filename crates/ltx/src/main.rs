@@ -226,14 +226,27 @@ fn run(cli: &Cli) -> Result<u8> {
                 cli,
                 || serde_json::json!({ "ok": true, "status": s }),
                 || match (&s.head, &s.head_message) {
-                    (Some(h), Some(m)) => format!(
-                        "{} — {} checkpoints, {} operations\ncurrent: {} — {}",
-                        s.root,
-                        s.checkpoints,
-                        s.operations,
-                        ltx_core::short_id(h),
-                        m
-                    ),
+                    (Some(h), Some(m)) => {
+                        let mut out = format!(
+                            "{} — {} checkpoints, {} operations\ncurrent: {} — {}",
+                            s.root,
+                            s.checkpoints,
+                            s.operations,
+                            ltx_core::short_id(h),
+                            m
+                        );
+                        // A head written by a partial save does not hold the
+                        // whole working state, and this is where a user looks
+                        // before `switch` or `undo` replaces their bytes.
+                        if let Some(change) = &s.head_change {
+                            out.push_str(&format!(
+                                "\n  this checkpoint holds change {} only; the rest of \
+                                 your working state is not in it",
+                                ltx_core::short_id(change)
+                            ));
+                        }
+                        out
+                    }
                     _ => format!("{} — nothing saved yet", s.root),
                 },
             );
@@ -303,9 +316,23 @@ fn run(cli: &Cli) -> Result<u8> {
                         }
                         return out;
                     }
+                    // Not damage: a partial checkpoint is exactly what was
+                    // asked for. It is said out loud because "verified" reads
+                    // as "everything I have is safe in history", which after a
+                    // partial save is not what the word can mean.
+                    let partial = if report.checkpoints_partial > 0 {
+                        format!(
+                            "\n{} checkpoint(s) hold only part of the working state that \
+                             stood when they were written; `ltx status` says whether the \
+                             current one does",
+                            report.checkpoints_partial
+                        )
+                    } else {
+                        String::new()
+                    };
                     if *complete {
                         format!(
-                            "verified {} checkpoints and {} chunks; {} operations chained",
+                            "verified {} checkpoints and {} chunks; {} operations chained{partial}",
                             report.checkpoints, report.chunks_verified, report.oplog_entries
                         )
                     } else {
@@ -313,7 +340,8 @@ fn run(cli: &Cli) -> Result<u8> {
                         // than claiming completeness.
                         format!(
                             "verified history structure; content verified for {} chunks; \
-                         {} not present locally\nrun `ltx verify --complete` for the full check",
+                         {} not present locally{partial}\nrun `ltx verify --complete` for \
+                         the full check",
                             report.chunks_verified, report.chunks_absent
                         )
                     }

@@ -71,6 +71,14 @@ pub struct VerifyReport {
     pub structure_verified: bool,
     pub chunks_verified: u64,
     pub chunks_absent: u64,
+    /// How many checkpoints record only part of the working state that stood
+    /// when they were written.
+    ///
+    /// Not damage, and not an error — these checkpoints are exactly what was
+    /// asked for. It is here because "verified" reads as "everything I have is
+    /// safe in history", and after a partial save that is not what the word
+    /// can mean (ADR-17, consequences).
+    pub checkpoints_partial: u64,
     pub checkpoints: u64,
     pub oplog_entries: u64,
     pub complete: bool,
@@ -492,6 +500,22 @@ impl Repo {
     /// the authoritative back-reference; it is never stored in the blob.
     fn oplog_seq_for(&self, checkpoint_id: &str) -> Result<Option<u64>> {
         self.oplog.save_seq(checkpoint_id)
+    }
+
+    /// The change a checkpoint took, when it took only one.
+    ///
+    /// Resolved from the `Save` entry at read time, exactly as `oplog_seq` is:
+    /// the association is provenance recorded by an operation, not content, so
+    /// the checkpoint blob carries no field for it and its address does not
+    /// depend on it (ADR-17 §7).
+    fn change_a_checkpoint_took(&self, checkpoint_id: &str) -> Result<Option<String>> {
+        let Some(seq) = self.oplog.save_seq(checkpoint_id)? else {
+            return Ok(None);
+        };
+        Ok(self.oplog.entry(seq)?.and_then(|e| match e.operation {
+            Operation::Save { change, .. } => change.map(|c| c.id),
+            _ => None,
+        }))
     }
 
     /// Every checkpoint, newest first.
@@ -1953,6 +1977,7 @@ impl Repo {
             structure_verified: true,
             chunks_verified: 0,
             chunks_absent: 0,
+            checkpoints_partial: 0,
             checkpoints: 0,
             oplog_entries: self.oplog.len()?,
             complete,
@@ -1969,6 +1994,9 @@ impl Repo {
             checkpoints.iter().map(|c| c.id.as_str()).collect();
         for cp in &checkpoints {
             report.checkpoints += 1;
+            if self.change_a_checkpoint_took(&cp.id)?.is_some() {
+                report.checkpoints_partial += 1;
+            }
             if let Err(e) = self.verify_tree(&cp.tree, &mut report) {
                 report.structure_verified = false;
                 report
@@ -2104,10 +2132,15 @@ impl Repo {
     /// Metadata about the working state, without changing it.
     pub fn status(&self) -> Result<Status> {
         let head = self.head_checkpoint()?;
+        let head_change = match head.as_ref() {
+            Some(cp) => self.change_a_checkpoint_took(&cp.id)?,
+            None => None,
+        };
         Ok(Status {
             root: self.root.display().to_string(),
             head: head.as_ref().map(|c| c.id.clone()),
             head_message: head.as_ref().map(|c| c.message.clone()),
+            head_change,
             checkpoints: self.checkpoints()?.len() as u64,
             operations: self.oplog.len()?,
             chunks: self.store.chunk_count() as u64,
@@ -2477,6 +2510,14 @@ pub struct Status {
     pub root: String,
     pub head: Option<String>,
     pub head_message: Option<String>,
+    /// The change the current checkpoint took, when it took only one.
+    ///
+    /// Present exactly when the head was written by a partial save, and so
+    /// records only part of the working state that stood at the time. This is
+    /// where a user looks before `switch` or `undo` replaces their bytes, and
+    /// printing a head with no qualifier after a partial save is a claim the
+    /// engine can no longer support (ADR-17, consequences).
+    pub head_change: Option<String>,
     pub checkpoints: u64,
     pub operations: u64,
     pub chunks: u64,
@@ -3248,6 +3289,35 @@ mod tests {
             b"not checkpointed",
             "and it refused before touching anything"
         );
+    }
+
+    #[test]
+    fn status_and_verify_say_when_a_checkpoint_holds_only_part_of_the_working_state() {
+        // `status` is where a user looks before an operation that replaces
+        // their bytes, and after a partial save a head printed with no
+        // qualifier — or a verify that just says "verified" — is a claim the
+        // engine can no longer support (ADR-17, consequences).
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        repo.save("seed", None).unwrap();
+        assert_eq!(
+            repo.status().unwrap().head_change,
+            None,
+            "a whole-working-state save carries no qualifier"
+        );
+
+        let assigned = repo.assign(&[dir.path().join("a.txt")], None).unwrap();
+        repo.save("partial", Some(&assigned.short)).unwrap();
+
+        assert_eq!(
+            repo.status().unwrap().head_change.as_deref(),
+            Some(assigned.change.as_str()),
+            "the head holds one change, and says which"
+        );
+        let report = repo.verify(true).unwrap();
+        assert!(report.errors.is_empty(), "and this is not damage");
+        assert_eq!(report.checkpoints_partial, 1);
     }
 
     #[test]

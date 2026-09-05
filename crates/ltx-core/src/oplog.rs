@@ -707,6 +707,19 @@ impl OpLog {
         Ok(table.get(checkpoint)?.map(|v| v.value()))
     }
 
+    /// One entry by sequence, or `None` if there is none at that position.
+    ///
+    /// An indexed read, so a caller asking about a single operation does not
+    /// pay for loading the whole log.
+    pub fn entry(&self, seq: u64) -> Result<Option<Entry>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ENTRIES)?;
+        match table.get(seq)? {
+            Some(v) => Ok(Some(serde_json::from_slice(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
     /// The published line state, or `None` for a repository that has none.
     pub fn line_state(&self) -> Result<Option<LineState>> {
         let tx = self.db.begin_read()?;
