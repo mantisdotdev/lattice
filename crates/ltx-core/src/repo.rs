@@ -1175,6 +1175,26 @@ impl Repo {
             .collect())
     }
 
+    /// The repository root, in the form other paths are compared against.
+    ///
+    /// `canonicalize`, not `resolve_as_far_as_it_exists`: the root always
+    /// exists, so walking its components until one does is a roundabout way to
+    /// the same answer — and on Windows it is a WRONG one. `Repo::discover`
+    /// canonicalizes, which on Windows yields a verbatim path
+    /// (`\\?\D:\...`), whose first component is the bare prefix `\\?\D:`.
+    /// Canonicalizing that alone is not a directory lookup, and Windows
+    /// answers ERROR_INVALID_FUNCTION — "Incorrect function. (os error 1)" —
+    /// which is neither of the two "not there yet" kinds that walk tolerates,
+    /// so it propagated and the command failed.
+    ///
+    /// It stayed invisible because the library tests build a repository from a
+    /// plain path with `init`; only `discover`, which is how the CLI reaches
+    /// one, makes the root verbatim. So the tests that guard this come in
+    /// through `discover`.
+    fn canonical_root(&self) -> Result<PathBuf> {
+        Ok(fs::canonicalize(&self.root)?)
+    }
+
     /// Expand what the user named into working-tree paths, with a reason for
     /// each one that cannot be taken.
     ///
@@ -1182,7 +1202,7 @@ impl Repo {
     /// and no symlink is followed while walking — both the same rules
     /// `snapshot_dir` follows, because these are the paths a tree will name.
     fn locate(&self, given: &[PathBuf]) -> Result<(Vec<Vec<u8>>, Vec<Refusal>)> {
-        let root = resolve_as_far_as_it_exists(&self.root)?;
+        let root = self.canonical_root()?;
         let mut found: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
         let mut refused = Vec::new();
         for path in given {
@@ -1757,7 +1777,7 @@ impl Repo {
         // working state IN PLACE is a different operation, with the capture
         // obligation that implies, and it does not exist yet — refusing keeps
         // that door open instead of silently doing it wrong.
-        let root = resolve_as_far_as_it_exists(&self.root)?;
+        let root = self.canonical_root()?;
         if resolve_as_far_as_it_exists(dest)?.starts_with(&root) {
             return Err(Error::Invalid(format!(
                 "{} is inside the repository; checkout writes over what it finds \
@@ -3369,6 +3389,54 @@ mod tests {
             repo.changes().unwrap().is_empty(),
             "and undo takes it away again"
         );
+    }
+
+    /// A repository opened the way the CLI opens one.
+    ///
+    /// `discover` canonicalizes; `init` does not. That difference is invisible
+    /// on Unix and decisive on Windows, where canonicalizing produces a
+    /// verbatim path — so a test that only ever builds a repository with
+    /// `init` cannot see a defect that lives in the root's form. Every CLI
+    /// `assign` on Windows failed on exactly that, and nothing in this module
+    /// could have caught it.
+    fn discovered(dir: &tempfile::TempDir) -> Repo {
+        Repo::discover(dir.path()).expect("the repository is here")
+    }
+
+    #[test]
+    fn assign_works_on_a_repository_opened_the_way_the_cli_opens_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            repo.save("seed", None).unwrap();
+        }
+
+        let mut repo = discovered(&dir);
+        let out = repo.assign(&[dir.path().join("a.txt")], None).unwrap();
+
+        assert_eq!(out.assigned, vec!["a.txt".to_string()]);
+        assert!(out.refused.is_empty());
+    }
+
+    #[test]
+    fn checkout_works_on_a_repository_opened_the_way_the_cli_opens_one() {
+        // The same defect, one call site over: `checkout --into` resolved the
+        // root the same way and would have failed identically through the CLI
+        // on Windows. It was never measured there, so it never showed.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        let (_holder, dest) = outside("discovered");
+
+        let repo = discovered(&dir);
+        let report = repo.checkout_into(None, &dest).unwrap();
+
+        assert_eq!(report.entries_written, 1);
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"a");
     }
 
     #[test]
