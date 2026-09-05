@@ -96,7 +96,18 @@ impl std::fmt::Debug for Repo {
 }
 
 pub struct Repo {
+    /// The working tree this handle addresses.
+    ///
+    /// For a repository opened at its own root this is the directory holding
+    /// `.lattice`. For a workspace it is somewhere else entirely, which is what
+    /// a workspace IS (ADR-7) — so this and `repository` below are two facts,
+    /// not one derived from the other.
     root: PathBuf,
+    /// The `.lattice` directory: packs, op-log, HEAD, and the lock.
+    ///
+    /// Derived from `root` until a workspace could exist, and stored since,
+    /// because eight working trees share one of these.
+    repository: PathBuf,
     store: Store,
     oplog: OpLog,
     change_id_bits: ChangeIdBits,
@@ -203,6 +214,7 @@ impl Repo {
         platform::sync_dir(root)?;
         Ok(Repo {
             root: root.to_path_buf(),
+            repository: dir,
             store,
             oplog,
             change_id_bits: Box::new(os_change_id_bits),
@@ -268,6 +280,7 @@ impl Repo {
         let oplog = OpLog::open(&meta)?;
         Ok(Repo {
             root: root.to_path_buf(),
+            repository: dir,
             store,
             oplog,
             change_id_bits: Box::new(os_change_id_bits),
@@ -435,7 +448,7 @@ impl Repo {
     }
 
     fn head_pointer_path(&self) -> PathBuf {
-        Self::repo_dir(&self.root).join("HEAD")
+        self.repository.join("HEAD")
     }
 
     fn write_head_pointer(&self, checkpoint_id: &str) -> Result<()> {
@@ -456,7 +469,7 @@ impl Repo {
         // durable — a rename is only committed once the containing directory
         // is fsynced, which is the barrier G1.1's replayer models.
         fs::rename(&tmp, &path)?;
-        platform::sync_dir(&Self::repo_dir(&self.root))?;
+        platform::sync_dir(&self.repository)?;
         Ok(())
     }
 
