@@ -99,8 +99,9 @@ enum Command {
     },
     /// Put working-tree paths into a change.
     Assign {
-        /// The change to add to. Defaults to the current one — and with no
-        /// current one, starts a change. Never creates the change it names.
+        /// The change to add to. It must already be open: this never creates
+        /// one, so a mistyped id cannot mint a change. Without it, paths go
+        /// to the current change, and a line with none starts one.
         #[arg(long = "to", value_name = "CHANGE")]
         to: Option<String>,
         /// What to assign. A directory assigns everything under it.
