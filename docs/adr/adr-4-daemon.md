@@ -68,9 +68,20 @@ durable append costs ~4.7 ms with true media-flush durability, and that this cos
 is irreducible per flush but amortises ~25× under group commit. Therefore: the
 daemonless path takes the full ~5 ms per command (acceptable — 5% of G1.5's
 100 ms budget, 2% of G1.6's 250 ms), and the daemon's op-log performs **group
-commit** across concurrent workspaces. This is what makes G1.4 tractable at all:
-8 workspaces × 10,000 operations at 4.7 ms of unamortised flush each would be
-6.3 hours of pure fsync. This constraint is handed to ADR-6 (op-log concurrency
+commit** across concurrent workspaces. 8 workspaces × 10,000 operations at
+4.7 ms of unamortised flush each is **376 seconds — about 6.3 minutes** — of
+pure fsync, from the `append + F_FULLFSYNC` p50 of 4,688 µs in the table below.
+
+> **Corrected 2026-09-05.** This paragraph read "6.3 hours" and called group
+> commit "what makes G1.4 tractable at all". The figure was wrong by a factor
+> of 60, and the claim resting on it was therefore much stronger than the
+> arithmetic supports: 6.3 minutes of flush spread across an 80,000-operation
+> gate is affordable without amortisation. Group commit is still worth having
+> for the reason ADR-3 gives — per-command flushing is untenable under
+> concurrency — but it is not what makes that gate possible. Found in review of
+> ADR-6, which had quoted the error forward.
+
+This constraint is handed to ADR-6 (op-log concurrency
 control), which must specify group-commit semantics that preserve linearizability.
 
 ## Evidence

@@ -100,7 +100,30 @@ pub struct Repo {
     store: Store,
     oplog: OpLog,
     change_id_bits: ChangeIdBits,
+    /// Exclusive access to this repository, held for as long as it is open.
+    ///
+    /// redb takes a NON-BLOCKING exclusive lock on its own file, so a second
+    /// process opening the same repository failed outright with "Database
+    /// already open. Cannot acquire lock." — seven of eight concurrent
+    /// commands, in a gate whose target is zero failures. This lock is taken
+    /// first and WAITS, so contention becomes a queue rather than an error and
+    /// redb's own lock never contends.
+    ///
+    /// Never read after construction; it exists to be dropped. The file is
+    /// closed when this struct is, and the operating system releases the lock
+    /// then — including when the process dies without unwinding, which is what
+    /// keeps a killed command from stranding a repository forever.
+    _lock: fs::File,
 }
+
+/// How long a command waits for a repository another command is using.
+///
+/// Bounded, because a caller that waits forever cannot tell a busy repository
+/// from a deadlocked one. Chosen to sit well inside the per-operation timeouts
+/// callers impose — typically two minutes — so a queue that has genuinely
+/// stalled is reported here as `Busy` with a way forward, rather than being
+/// killed from outside and recorded as a deadlock it is not.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Where a new change id gets its 128 bits (ADR-17 §3).
 ///
@@ -138,7 +161,14 @@ impl Repo {
     /// Create a repository here.
     pub fn init(root: &Path) -> Result<Self> {
         let dir = Self::repo_dir(root);
-        if dir.exists() {
+        // The lock comes FIRST, before the probe below and before anything
+        // opens the store or the log. The probe opens the database, so two
+        // concurrent inits used to contend on redb's own non-blocking lock and
+        // one would fail — the exact failure this lock exists to remove,
+        // reappearing in the one command that runs before a repository exists.
+        fs::create_dir_all(&dir)?;
+        let lock = platform::lock_exclusive(&dir.join("lock"), LOCK_WAIT)?;
+        if dir.join("meta.redb").exists() {
             // An existing `.lattice` that records NO operation is an init that
             // was interrupted before it could commit — not a repository. Left
             // alone it is a directory with no way forward, since `open` refuses
@@ -176,6 +206,7 @@ impl Repo {
             store,
             oplog,
             change_id_bits: Box::new(os_change_id_bits),
+            _lock: lock,
         })
     }
 
@@ -199,6 +230,9 @@ impl Repo {
         if !dir.is_dir() {
             return Err(Error::NotARepository(root.to_path_buf()));
         }
+        // First, and before the format probe opens the database: everything
+        // below this line assumes exclusive access.
+        let lock = platform::lock_exclusive(&dir.join("lock"), LOCK_WAIT)?;
         let store = Store::open(&dir.join("packs"))?;
         let meta = dir.join("meta.redb");
         // The gate runs BEFORE an OpLog is built over the database, because
@@ -237,6 +271,7 @@ impl Repo {
             store,
             oplog,
             change_id_bits: Box::new(os_change_id_bits),
+            _lock: lock,
         })
     }
 
@@ -2641,6 +2676,41 @@ mod tests {
     }
 
     #[test]
+    fn init_takes_the_lock_before_it_probes_for_an_existing_repository() {
+        // The probe OPENS the database. While it ran before the lock, a second
+        // init walked straight into redb's own non-blocking lock and failed —
+        // the exact failure the repository lock exists to remove, surviving in
+        // the one command that runs before a repository exists.
+        //
+        // The setup is the state an init is genuinely in mid-flight: holding
+        // the repository lock AND the log. A first version of this test held
+        // only the lock, which meant the probe found no database to collide
+        // with — it passed with the fix reverted, and so was testing nothing.
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let lattice = dir.path().join(".lattice");
+        fs::create_dir_all(&lattice).unwrap();
+        let held_lock =
+            platform::lock_exclusive(&lattice.join("lock"), Duration::from_secs(5)).unwrap();
+        let held_log = OpLog::open(&lattice.join("meta.redb")).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            drop(held_log);
+            drop(held_lock);
+        });
+
+        let started = Instant::now();
+        let repo = Repo::init(dir.path());
+
+        releaser.join().expect("the releasing thread finishes");
+        repo.expect("init queues for the lock rather than failing on the database under it");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "and it genuinely waited: it returned before the other init let go"
+        );
+    }
+
+    #[test]
     fn init_twice_is_refused_with_a_recovery_action() {
         let dir = tempfile::tempdir().unwrap();
         Repo::init(dir.path()).unwrap();
@@ -3504,6 +3574,35 @@ mod tests {
         let walked = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
         assert!(walked.assigned.contains(&"inside.txt".to_string()));
         assert!(walked.assigned.contains(&"escape.txt".to_string()));
+    }
+
+    #[test]
+    fn an_open_repository_holds_its_lock_and_gives_it_back_when_dropped() {
+        // Exclusive access is what everything below `Repo::open` assumes. redb
+        // takes its own lock but NON-BLOCKING, so a second process failed
+        // outright — 184 of 200 operations, in a gate whose target is zero
+        // failures (ADR-6). This one is taken first and waits, so contention
+        // becomes a queue.
+        //
+        // Asserted against the lock file rather than by opening a second
+        // `Repo`, which would take the full wait to report what this shows in
+        // milliseconds.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(".lattice/lock");
+        let repo = Repo::init(dir.path()).unwrap();
+
+        let while_open = platform::lock_exclusive(&lock, std::time::Duration::from_millis(50));
+        assert_eq!(
+            while_open.map(|_| ()).unwrap_err().category(),
+            crate::error::Category::Busy,
+            "an open repository holds its lock"
+        );
+
+        drop(repo);
+        platform::lock_exclusive(&lock, std::time::Duration::from_millis(500)).expect(
+            "closing the repository releases it — including on a kill, \
+                     since the OS owns the release",
+        );
     }
 
     #[test]

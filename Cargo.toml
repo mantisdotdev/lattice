@@ -5,7 +5,12 @@ members = ["crates/ltx-core", "crates/ltx", "crates/ltx-daemon", "crates/undo-pr
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+# 1.89 stabilised `File::lock`/`try_lock`/`unlock`, which ADR-6 uses to give a
+# repository an exclusive lock without adding a dependency for it. Raised
+# deliberately: the alternative was a third-party locking crate, and a version
+# floor is the cheaper of the two costs. CI pins 1.96 (rust-toolchain.toml);
+# this is the floor the code actually needs, not the toolchain it is built with.
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/mantisdotdev/lattice"
 

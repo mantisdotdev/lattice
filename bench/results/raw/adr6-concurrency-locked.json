@@ -1,0 +1,25 @@
+{
+  "probe": "concurrency",
+  "workers": 8,
+  "ops_per_worker": 25,
+  "ops_attempted": 200,
+  "ops_succeeded": 200,
+  "failures": 0,
+  "failure_sample": [],
+  "linearizability_violations": 0,
+  "violation_sample": [],
+  "unsequenced_operations": 0,
+  "verify_errors": 0,
+  "verify_exit_code": 0,
+  "repository_intact": true,
+  "counts": {
+    "assign .": 43,
+    "switch main": 33,
+    "save concurrent edit": 47,
+    "undo": 34,
+    "start line": 43
+  },
+  "wall_clock_s": 10.944,
+  "ops_per_s": 18.3,
+  "seed": 20260905
+}

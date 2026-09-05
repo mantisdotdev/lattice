@@ -24,6 +24,10 @@ pub enum Category {
     Io,
     /// The caller asked for something the model does not allow.
     Invalid,
+    /// Nothing is wrong; the repository was in use. Its own category because
+    /// it is the only one where the answer is to try the SAME command again,
+    /// and a caller told `invalid` would rightly not.
+    Busy,
 }
 
 /// The §4.2 concept an error is about. Kept to the seven nouns, plus `None`
@@ -88,6 +92,14 @@ pub enum Error {
     #[error("{0}")]
     ChangeHoldsNothing(String),
 
+    /// Another command holds the repository and did not let go in time.
+    ///
+    /// Its own variant because the way back is unlike any other: nothing is
+    /// wrong, nothing is damaged, and the answer is to let the other command
+    /// finish rather than to inspect or repair anything.
+    #[error("{0}")]
+    Busy(String),
+
     /// The repository was written in an on-disk format this build cannot read.
     #[error("{0}")]
     UnsupportedFormat(String),
@@ -112,6 +124,10 @@ impl Error {
                 Category::Invalid
             }
             Error::NoSuchLine(_) | Error::NoSuchChange(_) => Category::NotFound,
+            // Neither `Io` nor `Invalid`: nothing failed, and the command was
+            // not wrong. The repository was in use, which is a state the model
+            // allows — and the only one where retrying unchanged is right.
+            Error::Busy(_) => Category::Busy,
             Error::InvalidChange(_)
             | Error::ChangeAlreadyCheckpointed(_)
             | Error::ChangeHoldsNothing(_) => Category::Invalid,
@@ -130,7 +146,7 @@ impl Error {
             | Error::InvalidChange(_)
             | Error::ChangeAlreadyCheckpointed(_)
             | Error::ChangeHoldsNothing(_) => Concept::Change,
-            Error::UnsupportedFormat(_) => Concept::Workspace,
+            Error::Busy(_) | Error::UnsupportedFormat(_) => Concept::Workspace,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
         }
     }
@@ -168,6 +184,10 @@ impl Error {
             Error::ChangeHoldsNothing(_) => {
                 "run `ltx assign <path>` to put something in it, or `ltx save \
                  \"<message>\"` to checkpoint the whole working state"
+            }
+            Error::Busy(_) => {
+                "another command is using this repository; run `ltx status` once \
+                 it finishes, or find the process still holding it"
             }
             Error::UnsupportedFormat(_) => {
                 "this repository predates the current on-disk format; start a fresh \
@@ -240,6 +260,22 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_repository_is_neither_a_failure_nor_a_bad_command() {
+        // The category is what a caller reads to decide whether to retry, and
+        // it is the whole reason this variant is not folded into Io or
+        // Invalid: nothing failed, and the command was right. Retrying it
+        // unchanged is the correct response, and no other category means that.
+        let busy = Error::Busy("held".into());
+        assert_eq!(busy.category(), Category::Busy);
+        assert_eq!(busy.concept(), Concept::Workspace);
+        assert!(
+            !busy.recovery().contains("verify"),
+            "nothing is damaged, so the way back is not an inspection: {}",
+            busy.recovery()
+        );
+    }
+
+    #[test]
     fn recovery_actions_name_only_implemented_commands() {
         // A user who runs the suggested command must not hit "unrecognized
         // subcommand". This keeps the advice tracking the actual CLI surface,
@@ -260,6 +296,7 @@ mod tests {
             Error::InvalidChange("x".into()),
             Error::ChangeAlreadyCheckpointed("x".into()),
             Error::ChangeHoldsNothing("x".into()),
+            Error::Busy("x".into()),
             Error::UnsupportedFormat("x".into()),
             Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
         ];
