@@ -180,7 +180,8 @@ fn run(cli: &Cli) -> Result<u8> {
 
         Command::Save { message } => {
             let mut repo = Repo::discover(&cwd)?;
-            let cp = repo.save(message)?;
+            let out = repo.save(message)?;
+            let cp = &out.checkpoint;
             emit(
                 cli,
                 || {
@@ -191,6 +192,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         "message": cp.message,
                         "parent": cp.parent,
                         "oplog_seq": cp.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
                     })
                 },
                 || format!("saved {} — {}", ltx_core::short_id(&cp.id), cp.message),

@@ -23,7 +23,10 @@ pub use change::Resolution;
 pub use chunk::{Chunk, ChunkId};
 pub use error::{Category, Concept, Error, Result};
 pub use oplog::{Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE};
-pub use repo::{Checkpoint, LineOutcome, Repo, Status, UndoOutcome, VerifyReport};
+pub use repo::{
+    AssignOutcome, ChangeView, Checkpoint, LineOutcome, Refusal, Repo, SaveOutcome, Status,
+    UndoOutcome, VerifyReport,
+};
 pub use store::Store;
 pub use tree::{Node, Tree};
 

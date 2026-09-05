@@ -256,8 +256,8 @@ impl Repo {
     /// One step. §4.3 makes that an invariant — there is no staging area to
     /// pass through, and the partial-save capability the index existed to serve
     /// is a property of *changes*, not a gate every save must pass.
-    pub fn save(&mut self, message: &str) -> Result<Checkpoint> {
-        self.complete_pending_switch()?;
+    pub fn save(&mut self, message: &str) -> Result<SaveOutcome> {
+        let rescued = self.complete_pending_switch()?;
         let mut packer = PackWriter::new();
         let tree_id = self.snapshot_dir(&self.root.clone(), &mut packer)?;
 
@@ -313,7 +313,10 @@ impl Repo {
         // The caller's copy carries the real sequence; reads resolve the same
         // value from the op-log, so the stored blob's 0 is never observed.
         checkpoint.oplog_seq = entry.seq;
-        Ok(checkpoint)
+        Ok(SaveOutcome {
+            checkpoint,
+            rescued_working_state: rescued,
+        })
     }
 
     fn head_pointer_path(&self) -> PathBuf {
@@ -2013,6 +2016,22 @@ pub struct LineOutcome {
     pub rescued_working_state: Option<String>,
 }
 
+/// What `save` did.
+///
+/// A struct rather than a bare `Checkpoint` because a save can also finish a
+/// switch an earlier command left half-applied, and the work it sets aside
+/// while doing so has to be NAMED (ADR-16 §6). `save` was the one caller of
+/// `complete_pending_switch` that dropped that address on the floor: the work
+/// was durable in the store and referenced by nothing a user could reach.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SaveOutcome {
+    pub checkpoint: Checkpoint,
+    /// Work set aside while completing a switch an earlier command left
+    /// unfinished. Durable and content-addressed, so naming it here is what
+    /// makes it retrievable rather than merely stored.
+    pub rescued_working_state: Option<String>,
+}
+
 /// What `assign` did.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssignOutcome {
@@ -2293,7 +2312,7 @@ mod tests {
         fs::write(dir.path().join("sub/b.bin"), [0u8, 1, 2, 0xff, 0xfe]).unwrap();
         fs::write(dir.path().join("empty.txt"), b"").unwrap();
 
-        let cp = repo.save("first").unwrap();
+        let cp = repo.save("first").unwrap().checkpoint;
         let (_hold, out) = outside("restored");
         repo.checkout(&cp.id, &out).unwrap();
 
@@ -2311,7 +2330,7 @@ mod tests {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("crlf.txt"), b"a\r\nb\r").unwrap();
         fs::write(dir.path().join("bad.bin"), [0x41, 0xC3, 0x28, 0xA0]).unwrap();
-        let cp = repo.save("adversarial").unwrap();
+        let cp = repo.save("adversarial").unwrap().checkpoint;
         let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         assert_eq!(fs::read(out.join("crlf.txt")).unwrap(), b"a\r\nb\r");
@@ -2331,7 +2350,7 @@ mod tests {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("target.txt"), b"x").unwrap();
         std::os::unix::fs::symlink("target.txt", dir.path().join("link")).unwrap();
-        let cp = repo.save("with a link").unwrap();
+        let cp = repo.save("with a link").unwrap().checkpoint;
         let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         let meta = fs::symlink_metadata(out.join("link")).unwrap();
@@ -2354,7 +2373,7 @@ mod tests {
     fn a_dangling_symlink_round_trips() {
         let (dir, mut repo) = repo();
         std::os::unix::fs::symlink("/nowhere/at/all", dir.path().join("dangling")).unwrap();
-        let cp = repo.save("dangling").unwrap();
+        let cp = repo.save("dangling").unwrap().checkpoint;
         let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         assert!(fs::symlink_metadata(out.join("dangling"))
@@ -2372,7 +2391,7 @@ mod tests {
         let script = dir.path().join("run.sh");
         fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
         crate::platform::set_file_mode(&script, 0o755).unwrap();
-        let cp = repo.save("executable").unwrap();
+        let cp = repo.save("executable").unwrap().checkpoint;
         let (_hold, out) = outside("out");
         repo.checkout(&cp.id, &out).unwrap();
         let mode = crate::platform::file_mode(&fs::metadata(out.join("run.sh")).unwrap());
@@ -2459,7 +2478,7 @@ mod tests {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("a.txt"), b"one").unwrap();
         fs::write(dir.path().join("b.txt"), b"two").unwrap();
-        let cp = repo.save("two files").unwrap();
+        let cp = repo.save("two files").unwrap().checkpoint;
 
         let (_hold, out) = outside("dest");
         fs::create_dir_all(&out).unwrap();
@@ -3039,7 +3058,7 @@ mod tests {
             )
             .unwrap();
 
-        let checkpoint = repo.save("x").unwrap();
+        let checkpoint = repo.save("x").unwrap().checkpoint;
         assert!(
             checkpoint.parent.is_none(),
             "the premise: this checkpoint is at the root floor"
@@ -3129,7 +3148,7 @@ mod tests {
             )
             .unwrap();
 
-        let checkpoint = repo.save("x").unwrap();
+        let checkpoint = repo.save("x").unwrap().checkpoint;
         assert!(
             checkpoint.parent.is_none(),
             "the premise: this checkpoint is at the root floor, so undo scans past it"
@@ -3170,7 +3189,7 @@ mod tests {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("a.txt"), b"work").unwrap();
         repo.save("seed").unwrap();
-        let checkpoint = repo.save("second").unwrap();
+        let checkpoint = repo.save("second").unwrap().checkpoint;
         assert!(
             checkpoint.parent.is_some(),
             "so the save is above the floor"
@@ -3243,7 +3262,7 @@ mod tests {
         // exited 0 reporting success. The bytes below exist nowhere else.
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("a.txt"), b"checkpointed").unwrap();
-        let cp = repo.save("one").unwrap();
+        let cp = repo.save("one").unwrap().checkpoint;
         fs::write(dir.path().join("a.txt"), b"UNSAVED WORK").unwrap();
 
         let err = repo.checkout(&cp.id, dir.path()).unwrap_err();
@@ -3293,7 +3312,7 @@ mod tests {
     fn checkout_refuses_a_symlinked_destination() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f.txt"), b"x").unwrap();
-        let cp = repo.save("one").unwrap();
+        let cp = repo.save("one").unwrap().checkpoint;
         // Both the link and its target sit outside the repository, so the
         // only guard that can fire here is the symlink one this test is for.
         let (hold, dest) = outside("dest_link");
@@ -3315,7 +3334,7 @@ mod tests {
         let (dir, mut repo) = repo();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/f.txt"), b"safe").unwrap();
-        let cp = repo.save("one").unwrap();
+        let cp = repo.save("one").unwrap().checkpoint;
 
         // Destination pre-seeded with a symlink "sub" pointing OUTSIDE dest.
         let (hold, out) = outside("dest");
@@ -3348,7 +3367,7 @@ mod tests {
         let (dir, mut repo) = repo();
         fs::create_dir_all(dir.path().join("sub/.lattice")).unwrap();
         fs::write(dir.path().join("sub/.lattice/config"), b"nested").unwrap();
-        let cp = repo.save("nested dot-lattice").unwrap();
+        let cp = repo.save("nested dot-lattice").unwrap().checkpoint;
         let (_hold, out) = outside("dest");
         repo.checkout(&cp.id, &out).unwrap();
         assert_eq!(
@@ -3414,9 +3433,9 @@ mod tests {
     fn a_second_save_links_to_the_first() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f"), b"1").unwrap();
-        let a = repo.save("one").unwrap();
+        let a = repo.save("one").unwrap().checkpoint;
         fs::write(dir.path().join("f"), b"2").unwrap();
-        let b = repo.save("two").unwrap();
+        let b = repo.save("two").unwrap().checkpoint;
         assert_eq!(b.parent.as_deref(), Some(a.id.as_str()));
         assert_ne!(
             a.tree, b.tree,
@@ -3460,11 +3479,11 @@ mod tests {
     fn undo_moves_the_head_to_the_parent_and_stops_at_the_root() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f"), b"1").unwrap();
-        let a = repo.save("one").unwrap(); // root: parent is None
+        let a = repo.save("one").unwrap().checkpoint; // root: parent is None
         fs::write(dir.path().join("f"), b"2").unwrap();
-        let b = repo.save("two").unwrap();
+        let b = repo.save("two").unwrap().checkpoint;
         fs::write(dir.path().join("f"), b"3").unwrap();
-        let c = repo.save("three").unwrap();
+        let c = repo.save("three").unwrap().checkpoint;
 
         let ids = |r: &Repo| {
             r.reachable_checkpoints()
@@ -3506,9 +3525,9 @@ mod tests {
     fn a_stale_head_file_does_not_override_the_durable_redb_state() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f"), b"1").unwrap();
-        let a = repo.save("one").unwrap();
+        let a = repo.save("one").unwrap().checkpoint;
         fs::write(dir.path().join("f"), b"2").unwrap();
-        let b = repo.save("two").unwrap();
+        let b = repo.save("two").unwrap().checkpoint;
 
         // The residue of a crash mid-undo: the durable redb line state moved
         // back to `a`, but the HEAD file still names `b` because the cache
@@ -3568,7 +3587,7 @@ mod tests {
     fn start_creates_a_line_and_makes_it_current() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f"), b"1").unwrap();
-        let seed = repo.save("seed").unwrap();
+        let seed = repo.save("seed").unwrap().checkpoint;
 
         let out = repo.start_line("feature").unwrap();
         assert!(out.created);
@@ -3667,12 +3686,18 @@ mod tests {
         }
 
         fs::write(dir.path().join("URGENT.txt"), b"urgent").unwrap();
-        repo.save("later").unwrap();
+        let out = repo.save("later").unwrap();
 
         assert!(
             repo.store().contains(ChunkId::of(b"urgent")),
             "work written after an interrupted switch must be captured before \
              the switch is completed over it"
+        );
+        assert!(
+            out.rescued_working_state.is_some(),
+            "and the address must be NAMED in the result, not merely stored: \
+             content nothing refers to is content a user cannot reach \
+             (ADR-16 §6). `save` was the one caller that dropped it"
         );
     }
 
@@ -3765,7 +3790,7 @@ mod tests {
         let (dir, mut repo) = repo();
         repo.start_line("solo").unwrap();
         fs::write(dir.path().join("f"), b"1").unwrap();
-        let cp = repo.save("only on solo").unwrap();
+        let cp = repo.save("only on solo").unwrap().checkpoint;
 
         let out = repo.undo().unwrap();
         assert!(
@@ -3826,13 +3851,13 @@ mod tests {
         // the newest checkpoints, so name order and recency disagree.
         repo.start_line("aaa").unwrap();
         fs::write(dir.path().join("f"), b"1").unwrap();
-        let a1 = repo.save("older line").unwrap();
+        let a1 = repo.save("older line").unwrap().checkpoint;
         repo.switch_line(DEFAULT_LINE).unwrap();
         repo.start_line("zzz").unwrap();
         fs::write(dir.path().join("f"), b"2").unwrap();
-        let z1 = repo.save("newer line").unwrap();
+        let z1 = repo.save("newer line").unwrap().checkpoint;
         fs::write(dir.path().join("f"), b"3").unwrap();
-        let z2 = repo.save("newest").unwrap();
+        let z2 = repo.save("newest").unwrap().checkpoint;
 
         let ids: Vec<String> = repo
             .log_view(true, Some(2))
@@ -3908,7 +3933,7 @@ mod tests {
         // to the seed.
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("seed.txt"), b"seed\n").unwrap();
-        let seed = repo.save("seed").unwrap();
+        let seed = repo.save("seed").unwrap().checkpoint;
         let before: Vec<String> = repo
             .reachable_checkpoints()
             .unwrap()
@@ -3940,8 +3965,8 @@ mod tests {
     fn unchanged_content_reuses_the_same_tree_address() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f"), b"stable").unwrap();
-        let a = repo.save("one").unwrap();
-        let b = repo.save("two").unwrap();
+        let a = repo.save("one").unwrap().checkpoint;
+        let b = repo.save("two").unwrap().checkpoint;
         assert_eq!(a.tree, b.tree, "identical content must hash identically");
     }
 
@@ -3949,7 +3974,7 @@ mod tests {
     fn a_file_that_looks_like_a_checkpoint_cannot_impersonate_one() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("real.txt"), b"real").unwrap();
-        let real = repo.save("real").unwrap();
+        let real = repo.save("real").unwrap().checkpoint;
 
         // A working file whose bytes ARE a Checkpoint JSON claiming the real
         // id but pointing at an attacker-chosen tree. Saving stores it as
@@ -3978,7 +4003,7 @@ mod tests {
     fn a_torn_head_file_recovers_from_the_durable_oplog() {
         let (dir, mut repo) = repo();
         fs::write(dir.path().join("f.txt"), b"content").unwrap();
-        let cp = repo.save("one").unwrap();
+        let cp = repo.save("one").unwrap().checkpoint;
 
         // The residue a crash mid-publish leaves: HEAD present but zero-length.
         // The durable op-log head must recover the committed checkpoint rather
