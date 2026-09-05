@@ -256,6 +256,10 @@ impl Repo {
                 message: message.to_string(),
                 checkpoint: checkpoint.id.clone(),
                 line: current,
+                // A save of the whole working state consumes no change.
+                // Assignment is a labelling, never a gate, so plain `save`
+                // leaves the labels exactly where it found them (ADR-17 §5).
+                change: None,
             },
             Some(lines),
         )?;
@@ -615,12 +619,27 @@ impl Repo {
                 _ => None,
             })
             .collect();
+        // Changes a standing save has already checkpointed, per line — a
+        // change id can exist on two lines at once, since `start` copies the
+        // open changes along with the bytes they label.
+        let consumed: std::collections::HashSet<(&str, &str)> = entries
+            .iter()
+            .filter(|e| !undone.contains(&e.seq))
+            .filter_map(|e| match &e.operation {
+                Operation::Save {
+                    line,
+                    change: Some(c),
+                    ..
+                } => Some((line.as_str(), c.id.as_str())),
+                _ => None,
+            })
+            .collect();
         let lines = self.line_state()?;
         for entry in entries.iter().rev() {
             if !entry.operation.is_undoable() || undone.contains(&entry.seq) {
                 continue;
             }
-            if self.is_eligible(&entry.operation, &lines)? {
+            if self.is_eligible(&entry.operation, &lines, &consumed)? {
                 return Ok(Some(entry.clone()));
             }
         }
@@ -632,7 +651,12 @@ impl Repo {
     /// Depends only on immutable data. A save at the root of its line has no
     /// parent to return to — that is the floor ADR-15 established, expressed
     /// per-candidate rather than against the mutable head.
-    fn is_eligible(&self, op: &Operation, lines: &LineState) -> Result<bool> {
+    fn is_eligible(
+        &self,
+        op: &Operation,
+        lines: &LineState,
+        consumed: &std::collections::HashSet<(&str, &str)>,
+    ) -> Result<bool> {
         Ok(match op {
             Operation::Save { checkpoint, .. } => match self.checkpoint(checkpoint)? {
                 Some(cp) => cp.parent.is_some(),
@@ -653,6 +677,33 @@ impl Repo {
                 tip == origin
             }
             Operation::StartLine { .. } | Operation::Switch { .. } => true,
+            // An assign is ineligible once a standing save has checkpointed a
+            // change its inverse would write to (ADR-17 §8). `next_undo_target`
+            // scans PAST an ineligible entry, and a save at the root of its
+            // line is permanently ineligible for having no parent to return to
+            // — so without this, `init; assign a.txt; save "x" --change c;
+            // undo` reverses the assign underneath the standing checkpoint that
+            // consumed it, and the change loses the assignments the line tip is
+            // derived from. G1.3 cannot catch it: the harness always seeds a
+            // save first, so every later checkpoint has a parent. Users hit it
+            // on their first repository.
+            //
+            // The displaced changes are covered too, not just the target: the
+            // inverse puts those paths BACK into the changes they came from,
+            // and doing that to a change a save has consumed would resurrect it
+            // as pending — leaving it simultaneously checkpointed and pending,
+            // the ambiguity §4.2's noun collapse exists to remove.
+            Operation::Assign {
+                change,
+                line,
+                displaced,
+                ..
+            } => {
+                !consumed.contains(&(line.as_str(), change.as_str()))
+                    && !displaced
+                        .iter()
+                        .any(|(_, owner)| consumed.contains(&(line.as_str(), owner.as_str())))
+            }
             // Everything else has no defined inverse. `Adopt` is also marked
             // non-undoable at the source so a core caller cannot append one and
             // have undo skip it in silence; defining its inverse belongs to the
@@ -691,7 +742,10 @@ impl Repo {
 
         match &entry.operation {
             Operation::Save {
-                checkpoint, line, ..
+                checkpoint,
+                line,
+                change,
+                ..
             } => {
                 let cp = self.checkpoint(checkpoint)?.ok_or_else(|| {
                     Error::Corrupt(format!(
@@ -702,7 +756,18 @@ impl Repo {
                 })?;
                 // Save never touched the working tree, so neither does its
                 // inverse: this is pure tip movement.
-                lines.lines.entry(line.clone()).or_default().tip = cp.parent.clone();
+                let rec = lines.lines.entry(line.clone()).or_default();
+                rec.tip = cp.parent.clone();
+                // A partial save consumed a change, which took it out of the
+                // line state entirely. The entry is the only place its
+                // assignments survive, so the inverse reads them from there.
+                if let Some(consumed) = change {
+                    rec.changes
+                        .insert(consumed.id.clone(), consumed.record.clone());
+                    if consumed.was_current {
+                        rec.current_change = Some(consumed.id.clone());
+                    }
+                }
                 outcome.undone_checkpoint = Some(cp.id.clone());
                 outcome.now_at = cp.parent.clone();
             }
@@ -738,11 +803,55 @@ impl Repo {
                 }
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
-            other => {
+            Operation::Assign {
+                change,
+                line,
+                paths,
+                created,
+                from_current,
+                displaced,
+            } => {
+                // Assign wrote no byte of working state, so its inverse writes
+                // none either (ADR-17 §2): there is no capture to take and
+                // nothing to materialise, only labels to put back.
+                let rec = lines.lines.entry(line.clone()).or_default();
+                if *created {
+                    rec.changes.remove(change);
+                } else if let Some(record) = rec.changes.get_mut(change) {
+                    for path in paths {
+                        record.assigned.remove(path);
+                    }
+                }
+                for (path, owner) in displaced {
+                    // `entry` rather than `get_mut`: eligibility has already
+                    // established that no standing save consumed this change,
+                    // so this inserts into one that is there. Were it somehow
+                    // not, restoring the assignment beats dropping it — undo
+                    // must not fail here, because undo-all breaks on an error
+                    // and would silently truncate.
+                    rec.changes
+                        .entry(owner.clone())
+                        .or_default()
+                        .assigned
+                        .insert(path.clone());
+                }
+                rec.current_change = from_current.clone();
+                outcome.now_at = rec.tip.clone();
+            }
+            // Listed rather than caught by `_`, so the exhaustiveness this
+            // doc comment claims is real: a new undoable variant arriving with
+            // an eligibility arm and no inverse would otherwise compile, and
+            // `ltx undo` would exit non-zero on it — which breaks undo-all
+            // mid-way rather than reporting nothing to undo (ADR-17 §8).
+            Operation::Init
+            | Operation::Undo { .. }
+            | Operation::Adopt { .. }
+            | Operation::Redact { .. }
+            | Operation::Thin { .. } => {
                 return Err(Error::Invalid(format!(
                     "operation {} ({}) has no inverse",
                     entry.seq,
-                    other.name()
+                    entry.operation.name()
                 )))
             }
         }
@@ -2083,6 +2192,387 @@ mod tests {
         assert!(
             after.lines[DEFAULT_LINE].changes.contains_key("7f3a"),
             "and the line started FROM keeps its own copy"
+        );
+    }
+
+    /// A change holding exactly these paths.
+    fn change_of(paths: &[&[u8]]) -> crate::oplog::ChangeRecord {
+        crate::oplog::ChangeRecord {
+            assigned: paths.iter().map(|p| p.to_vec()).collect(),
+        }
+    }
+
+    #[test]
+    fn undoing_an_assign_removes_the_change_it_created_and_leaves_the_bytes_alone() {
+        // The entry and the line state beside it are built by hand because
+        // `assign` has not shipped: this is exactly the pair that command will
+        // append. Building them here rather than waiting means the inverse
+        // exists before the operation that needs it — an operation shipped
+        // without its inverse is what silently truncates undo-all.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+        repo.save("seed").unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.insert("c1".into(), change_of(&[b"a.txt"]));
+        rec.current_change = Some("c1".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c1".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec()],
+                    created: true,
+                    from_current: None,
+                    displaced: Vec::new(),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let out = repo.undo().unwrap();
+        assert!(!out.nothing_to_undo, "the assign was there to undo");
+
+        let after = repo.line_state().unwrap();
+        let rec = &after.lines[DEFAULT_LINE];
+        assert!(
+            rec.changes.is_empty(),
+            "the change this assign created must go with it"
+        );
+        assert_eq!(rec.current_change, None, "and nothing is current again");
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            b"work",
+            "and not a byte of working state moved: assign labels, it does not write"
+        );
+    }
+
+    #[test]
+    fn undoing_an_assign_returns_each_path_to_the_change_it_was_taken_from() {
+        // Without the displaced record, undoing `assign --to c2 f` after
+        // `assign --to c1 f` leaves `f` in no change at all rather than back
+        // in c1 — the class of bug `StartLine::created` exists to prevent, one
+        // level down.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+        repo.save("seed").unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.insert("c1".into(), change_of(&[b"a.txt"]));
+        rec.current_change = Some("c1".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c1".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec()],
+                    created: true,
+                    from_current: None,
+                    displaced: Vec::new(),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.get_mut("c1").unwrap().assigned.clear();
+        rec.changes.insert("c2".into(), change_of(&[b"a.txt"]));
+        rec.current_change = Some("c2".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c2".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec()],
+                    created: true,
+                    from_current: Some("c1".into()),
+                    displaced: vec![(b"a.txt".to_vec(), "c1".into())],
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        repo.undo().unwrap();
+
+        let after = repo.line_state().unwrap();
+        let rec = &after.lines[DEFAULT_LINE];
+        assert_eq!(
+            rec.changes.get("c1").map(|c| &c.assigned),
+            Some(&change_of(&[b"a.txt"]).assigned),
+            "the path must go back to the change it was taken from"
+        );
+        assert!(
+            !rec.changes.contains_key("c2"),
+            "and c2 went with its assign"
+        );
+        assert_eq!(
+            rec.current_change.as_deref(),
+            Some("c1"),
+            "and the change that was current before is current again"
+        );
+    }
+
+    #[test]
+    fn undoing_an_assign_into_a_standing_change_leaves_the_change_itself_alone() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+        fs::write(dir.path().join("b.txt"), b"more").unwrap();
+        repo.save("seed").unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.insert("c1".into(), change_of(&[b"a.txt"]));
+        rec.current_change = Some("c1".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c1".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec()],
+                    created: true,
+                    from_current: None,
+                    displaced: Vec::new(),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes
+            .insert("c1".into(), change_of(&[b"a.txt", b"b.txt"]));
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c1".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"b.txt".to_vec()],
+                    created: false,
+                    from_current: Some("c1".into()),
+                    displaced: Vec::new(),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        repo.undo().unwrap();
+
+        let after = repo.line_state().unwrap();
+        let rec = &after.lines[DEFAULT_LINE];
+        assert_eq!(
+            rec.changes.get("c1").map(|c| &c.assigned),
+            Some(&change_of(&[b"a.txt"]).assigned),
+            "only the second assign's path leaves; the change the FIRST assign \
+             created stands, with what that one put in it"
+        );
+    }
+
+    #[test]
+    fn an_assign_a_standing_checkpoint_consumed_is_not_undone_underneath_it() {
+        // ADR-17 §8, and G1.3 structurally cannot catch it: the harness always
+        // seeds a save first, so every checkpoint it makes has a parent. Here
+        // there is no seed save, so the checkpoint sits at the root floor and
+        // is permanently ineligible — and `next_undo_target` scans PAST an
+        // ineligible entry. Without the guard, undo reaches the assign and
+        // reverses it underneath the standing checkpoint that consumed it: the
+        // change loses the assignments the line tip was derived from.
+        //
+        // The checkpoint is made by a plain save and the entry that consumes
+        // the change is appended by hand, because `save --change` has not
+        // shipped; that entry is what it will append.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.insert("c1".into(), change_of(&[b"a.txt"]));
+        rec.current_change = Some("c1".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c1".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec()],
+                    created: true,
+                    from_current: None,
+                    displaced: Vec::new(),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let checkpoint = repo.save("x").unwrap();
+        assert!(
+            checkpoint.parent.is_none(),
+            "the premise: this checkpoint is at the root floor"
+        );
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        let consumed = rec.changes.remove("c1").unwrap();
+        rec.current_change = None;
+        repo.oplog
+            .commit(
+                Operation::Save {
+                    message: "x".into(),
+                    checkpoint: checkpoint.id.clone(),
+                    line: DEFAULT_LINE.into(),
+                    change: Some(crate::oplog::CheckpointedChange {
+                        id: "c1".into(),
+                        record: consumed,
+                        was_current: true,
+                    }),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let out = repo.undo().unwrap();
+
+        assert!(
+            out.nothing_to_undo,
+            "at the root floor there is nothing left to undo, and saying so is \
+             the honest answer"
+        );
+        assert!(
+            repo.line_state().unwrap().lines[DEFAULT_LINE]
+                .changes
+                .is_empty(),
+            "the assignment stays consumed by the checkpoint that took it"
+        );
+    }
+
+    #[test]
+    fn an_assign_is_not_undone_back_into_a_change_a_standing_checkpoint_consumed() {
+        // The other half of the same floor (ADR-17 §8 states the rule for the
+        // assign's own change; this is its displaced owners). Reversing this
+        // assign would put a.txt back into c1 — but a standing checkpoint has
+        // consumed c1, so it would come back as pending while its content is
+        // already checkpointed: a change simultaneously checkpointed and
+        // pending, which is the ambiguity §4.2's noun collapse removes.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+        fs::write(dir.path().join("b.txt"), b"more").unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes
+            .insert("c1".into(), change_of(&[b"a.txt", b"b.txt"]));
+        rec.current_change = Some("c1".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c1".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec(), b"b.txt".to_vec()],
+                    created: true,
+                    from_current: None,
+                    displaced: Vec::new(),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.changes.insert("c1".into(), change_of(&[b"b.txt"]));
+        rec.changes.insert("c2".into(), change_of(&[b"a.txt"]));
+        rec.current_change = Some("c2".into());
+        repo.oplog
+            .commit(
+                Operation::Assign {
+                    change: "c2".into(),
+                    line: DEFAULT_LINE.into(),
+                    paths: vec![b"a.txt".to_vec()],
+                    created: true,
+                    from_current: Some("c1".into()),
+                    displaced: vec![(b"a.txt".to_vec(), "c1".into())],
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let checkpoint = repo.save("x").unwrap();
+        assert!(
+            checkpoint.parent.is_none(),
+            "the premise: this checkpoint is at the root floor, so undo scans past it"
+        );
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        let consumed = rec.changes.remove("c1").unwrap();
+        repo.oplog
+            .commit(
+                Operation::Save {
+                    message: "x".into(),
+                    checkpoint: checkpoint.id.clone(),
+                    line: DEFAULT_LINE.into(),
+                    change: Some(crate::oplog::CheckpointedChange {
+                        id: "c1".into(),
+                        record: consumed,
+                        was_current: false,
+                    }),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        let out = repo.undo().unwrap();
+
+        assert!(out.nothing_to_undo, "everything left is below the floor");
+        let after = repo.line_state().unwrap();
+        assert!(
+            !after.lines[DEFAULT_LINE].changes.contains_key("c1"),
+            "the consumed change must not come back as pending"
+        );
+    }
+
+    #[test]
+    fn undoing_a_partial_save_gives_back_the_change_it_consumed() {
+        // The consumed change is removed from the line state, so the save's
+        // own entry is the only place its assignments survive.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"work").unwrap();
+        repo.save("seed").unwrap();
+        let checkpoint = repo.save("second").unwrap();
+        assert!(
+            checkpoint.parent.is_some(),
+            "so the save is above the floor"
+        );
+
+        let mut lines = repo.line_state().unwrap();
+        let rec = lines.lines.get_mut(DEFAULT_LINE).unwrap();
+        rec.current_change = None;
+        repo.oplog
+            .commit(
+                Operation::Save {
+                    message: "second".into(),
+                    checkpoint: checkpoint.id.clone(),
+                    line: DEFAULT_LINE.into(),
+                    change: Some(crate::oplog::CheckpointedChange {
+                        id: "c1".into(),
+                        record: change_of(&[b"a.txt"]),
+                        was_current: true,
+                    }),
+                },
+                Some(lines),
+            )
+            .unwrap();
+
+        repo.undo().unwrap();
+
+        let after = repo.line_state().unwrap();
+        let rec = &after.lines[DEFAULT_LINE];
+        assert_eq!(
+            rec.changes.get("c1").map(|c| &c.assigned),
+            Some(&change_of(&[b"a.txt"]).assigned),
+            "the change comes back exactly as the save took it"
+        );
+        assert_eq!(
+            rec.current_change.as_deref(),
+            Some("c1"),
+            "including its having been the current one"
         );
     }
 

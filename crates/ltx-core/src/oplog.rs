@@ -88,6 +88,26 @@ pub struct ChangeRecord {
     pub assigned: std::collections::BTreeSet<Vec<u8>>,
 }
 
+/// A change that a `save --change` checkpointed, carried in that save's entry.
+///
+/// The whole record travels, not just the id: consuming a change removes it
+/// from the line state, so its assignments then exist nowhere else and the
+/// inverse would have nothing to put back (ADR-17 §7).
+///
+/// `Checkpoint` gains no field for this. Adding one would change `body_id` and
+/// re-address every checkpoint in every repository, and the association is
+/// provenance recorded by an operation rather than content — so it follows
+/// `oplog_seq` exactly: a back-reference resolved at read time from here.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckpointedChange {
+    pub id: String,
+    pub record: ChangeRecord,
+    /// Whether it was the current change. A save consumes the change it
+    /// checkpoints, so a bare `assign` afterwards must not go on adding to
+    /// something already checkpointed — and the inverse must put that back.
+    pub was_current: bool,
+}
+
 /// One line of work: where it points, the working state held for it while it
 /// is not current, and the changes open on it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +194,12 @@ pub enum Operation {
         /// The line whose tip this save advanced — undo must move that line's
         /// tip back, not whichever line happens to be current later.
         line: String,
+        /// The change this save consumed and the assignment set it took, so
+        /// the inverse restores it exactly. `None` for a save of the whole
+        /// working state, which consumes nothing: assignment is a labelling,
+        /// never a gate (ADR-17 §5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<CheckpointedChange>,
     },
     StartLine {
         name: String,
@@ -184,6 +210,41 @@ pub enum Operation {
         /// record says what happened and the inverse reads it — otherwise undo
         /// would delete a line the FIRST start created.
         created: bool,
+    },
+    /// Route working-tree paths into a change.
+    ///
+    /// Records an intent and touches no byte on disk, and neither does its
+    /// inverse (ADR-17 §2) — which is why every field here is a label rather
+    /// than an address, and why there is no capture to take.
+    ///
+    /// One call appends exactly ONE entry however many paths it moved. G1.3's
+    /// undo budget is `applied * 3 + 8`, so an assign over k paths decomposing
+    /// into k entries would exhaust it (ADR-17 §6).
+    Assign {
+        change: String,
+        /// The line the change lives on. Changes are per-line, so the inverse
+        /// puts the paths back where they were taken from rather than onto
+        /// whichever line happens to be current by then.
+        line: String,
+        /// The paths this call actually moved — not the ones named on the
+        /// command line, which may include paths already in the change or ones
+        /// it refused. The inverse reverses what happened, not what was asked.
+        paths: Vec<Vec<u8>>,
+        /// Whether this call created the change. The same role
+        /// `StartLine::created` plays: without it, `assign c f; assign c g;
+        /// undo` would delete a change the FIRST assign created.
+        created: bool,
+        /// The change that was current before, so the inverse restores it.
+        from_current: Option<String>,
+        /// For the paths that were already in another change, the change they
+        /// came from. Without this, undoing `assign --to c2 f` after `assign
+        /// --to c1 f` would leave `f` unowned rather than owned by c1 — the
+        /// class of bug `StartLine::created` exists to prevent, one level down.
+        ///
+        /// Paths that had no previous owner are absent rather than carried as
+        /// null: `paths` already names them, and one authoritative home per
+        /// fact is what keeps the two lists from ever disagreeing.
+        displaced: Vec<(Vec<u8>, String)>,
     },
     Switch {
         from: String,
@@ -245,6 +306,7 @@ impl Operation {
             Operation::Init => "init",
             Operation::Save { .. } => "save",
             Operation::StartLine { .. } => "start",
+            Operation::Assign { .. } => "assign",
             Operation::Switch { .. } => "switch",
             Operation::Undo { .. } => "undo",
             Operation::Adopt { .. } => "adopt",
@@ -871,6 +933,7 @@ mod tests {
             message: "first".into(),
             checkpoint: "abc".into(),
             line: "main".into(),
+            change: None,
         })
         .unwrap();
         assert!(log.verify_chain().unwrap().is_none());
@@ -888,6 +951,7 @@ mod tests {
                     message: "tampered".into(),
                     checkpoint: "abc".into(),
                     line: "main".into(),
+                    change: None,
                 };
                 let bytes = serde_json::to_vec(&entry).unwrap();
                 table.insert(2u64, bytes.as_slice()).unwrap();
@@ -916,8 +980,21 @@ mod tests {
             message: "m".into(),
             checkpoint: "c".into(),
             line: "main".into(),
+            change: None,
         }
         .is_undoable());
+        assert!(
+            Operation::Assign {
+                change: "c1".into(),
+                line: "main".into(),
+                paths: vec![b"a.txt".to_vec()],
+                created: true,
+                from_current: None,
+                displaced: Vec::new(),
+            }
+            .is_undoable(),
+            "assign is a state-changing command, so §4.3 promises it reverses"
+        );
         assert!(
             !Operation::Undo { undone_seq: 1 }.is_undoable(),
             "undo is monotonic toward the root; reversing it (redo) is a \

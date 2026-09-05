@@ -255,11 +255,17 @@ Assign {
     created: bool,
     /// The change that was current before, so the inverse restores it.
     from_current: Option<String>,
-    /// For each path, the change that owned it before, if any. Without this,
-    /// undoing `assign --to c2 f` after `assign --to c1 f` would leave `f`
-    /// unowned rather than owned by c1 — the same class of bug that
-    /// StartLine::created exists to prevent, one level down.
-    displaced: Vec<(Vec<u8>, Option<String>)>,
+    /// For the paths that were already in another change, the change they
+    /// came from. Without this, undoing `assign --to c2 f` after
+    /// `assign --to c1 f` would leave `f` unowned rather than owned by c1 —
+    /// the same class of bug that StartLine::created exists to prevent, one
+    /// level down.
+    ///
+    /// Paths with no previous owner are ABSENT rather than carried as a null
+    /// owner. Implementation narrowed this from one entry per assigned path:
+    /// `paths` already names every path, so an entry per path made the two
+    /// lists restatements of each other that a tampered log could set at odds.
+    displaced: Vec<(Vec<u8>, String)>,
 },
 Save {
     message: String,
@@ -322,10 +328,16 @@ removes an entry from the eligible set just as effectively.
 G1.3 does not catch it — the harness always seeds a save first, so every later
 checkpoint has a parent. Users hit it on their first repository.
 
-**Rule:** an `Assign` is ineligible while a standing `Save` has consumed its
-change. `ltx undo` then reports `nothing_to_undo` with the assignment still
-standing, which is honest only if `change list` reports that change as
-*consumed* rather than *pending* — so it does.
+**Rule:** an `Assign` is ineligible while a standing `Save` has consumed a
+change its inverse would write to — the change it targeted, and equally any
+change it displaced paths *from*. Implementation added the second half: the
+inverse puts displaced paths back into their previous change, and doing that to
+a consumed one resurrects it as pending while its content is already
+checkpointed, which is the same contradiction from the other side.
+
+`ltx undo` then reports `nothing_to_undo` with the assignment still standing,
+which is honest only if `change list` reports that change as *consumed* rather
+than *pending* — so it does.
 
 The rejected alternative was splitting `Save`'s eligibility per effect (tip
 floored, change not), which would produce a change that is simultaneously
