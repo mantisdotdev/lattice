@@ -10,7 +10,8 @@
   "violation_sample": [],
   "unsequenced_operations": 0,
   "verify_errors": 0,
-  "verify_complete": true,
+  "verify_exit_code": 0,
+  "repository_intact": true,
   "counts": {
     "assign .": 43,
     "switch main": 33,
@@ -18,7 +19,7 @@
     "undo": 34,
     "start line": 43
   },
-  "wall_clock_s": 10.64,
-  "ops_per_s": 18.8,
+  "wall_clock_s": 10.295,
+  "ops_per_s": 19.4,
   "seed": 20260905
 }

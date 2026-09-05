@@ -237,8 +237,15 @@ pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<fs::File
     let mut backoff = Duration::from_millis(1);
     const MAX_BACKOFF: Duration = Duration::from_millis(50);
     loop {
-        if file.try_lock().is_ok() {
-            return Ok(file);
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            // Contended, which is exactly what the wait is for.
+            Err(fs::TryLockError::WouldBlock) => {}
+            // The lock itself failed — a filesystem that cannot lock, a
+            // vanished file. Waiting cannot fix that, and reporting it as
+            // `Busy` would tell the caller to retry something that will never
+            // succeed. It propagates as the I/O failure it is.
+            Err(fs::TryLockError::Error(e)) => return Err(e.into()),
         }
         if Instant::now() >= deadline {
             return Err(crate::error::Error::Busy(format!(

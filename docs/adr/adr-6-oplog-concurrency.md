@@ -31,31 +31,22 @@ file, so the second process fails immediately:
 Group commit never engages across processes, because the processes never get
 far enough to commit. G1.4 draws 8 concurrent workspaces × 10,000 operations
 against a target of **0 failures**; measured on the implemented half of its
-pool, 186 of 200 operations failed on the lock:
+pool, the overwhelming majority of 200 operations failed on the lock, and every
+one of them failed with the message above.
 
-```json
-{
-  "workers": 8,
-  "ops_attempted": 200,
-  "ops_succeeded": 14,
-  "failures": 186,
-  "linearizability_violations": 0,
-  "verify_errors": 0
-}
-```
-
-That is `bench/results/raw/adr6-concurrency-unlocked.json`, produced by
+`bench/results/raw/adr6-concurrency-unlocked.json` is that run, produced by
 `scripts/probe_concurrency.py` — a bounded diagnostic beside G1.4, never a
 substitute for it, and weaker in four stated ways.
 
-**That count is not reproducible, and nothing here rests on its exact value.**
-It is a race: how many processes happen to hold the lock at a moment when no
-other holds it varies from run to run, and an earlier run of the same command
-recorded 16 and 184. What is stable across runs is the shape — the
-overwhelming majority fail, every failure is the same lock error, and no amount
-of retrying by the harness would change it, because nothing is contended for a
-bounded time; the second process simply is not allowed in. The locked arm below
-is the reproducible one.
+**No count from that arm is quoted here, deliberately.** It is a race: how many
+processes happen to find the lock free varies from run to run, and three
+successive runs of the identical command recorded 184, 186 and 193 failures out
+of 200. Pinning any of them in this document would dress a coin toss as a
+measurement — and would make the ADR wrong again the next time the probe is
+run. What is stable is the shape, and the shape is what the argument needs: the
+second process is not contended out for a bounded time, it is not admitted at
+all, so no amount of retrying changes the outcome. The locked arm below is the
+reproducible one, and it is the one carrying weight.
 
 This was found while designing the `workspace` slice, and it is why that slice
 stopped: eight working trees that cannot be used concurrently would be the
@@ -144,9 +135,10 @@ not a hypothetical.
   several processes may address, and needs to answer only what a workspace *is*
   — not whether concurrent access works at all.
 - **Throughput is serial, and unmeasured at scale.** 200 operations across 8
-  workers took 10.9 s wall clock on the reference machine, against 0.5 s for
-  the unlocked arm that did almost none of the work — so the two numbers are
-  not comparable and no speed claim is made from them. G1.4's real shape is
+  workers took 10.3 s wall clock on the reference machine (`wall_clock_s` in the
+  locked artifact). The unlocked arm is far quicker only because it did almost
+  none of the work, so the two are not comparable and no speed claim is made
+  from them. G1.4's real shape is
   80,000 operations over a tree that grows to ~80,000 files, where each `save`
   walks and hashes the whole tree; **whether that fits any time budget is not
   answered here and must be measured before G1.4 is claimed.** ADR-4's 6.3-hour

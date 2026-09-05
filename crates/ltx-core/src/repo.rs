@@ -119,10 +119,10 @@ pub struct Repo {
 /// How long a command waits for a repository another command is using.
 ///
 /// Bounded, because a caller that waits forever cannot tell a busy repository
-/// from a deadlocked one. Well under G1.4's 120-second per-operation watchdog,
-/// so a queue that has genuinely stalled is reported by the engine as `Busy`
-/// with a way forward, rather than being killed from outside and recorded as a
-/// deadlock it is not.
+/// from a deadlocked one. Chosen to sit well inside the per-operation timeouts
+/// callers impose — typically two minutes — so a queue that has genuinely
+/// stalled is reported here as `Busy` with a way forward, rather than being
+/// killed from outside and recorded as a deadlock it is not.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Where a new change id gets its 128 bits (ADR-17 §3).
@@ -161,7 +161,14 @@ impl Repo {
     /// Create a repository here.
     pub fn init(root: &Path) -> Result<Self> {
         let dir = Self::repo_dir(root);
-        if dir.exists() {
+        // The lock comes FIRST, before the probe below and before anything
+        // opens the store or the log. The probe opens the database, so two
+        // concurrent inits used to contend on redb's own non-blocking lock and
+        // one would fail — the exact failure this lock exists to remove,
+        // reappearing in the one command that runs before a repository exists.
+        fs::create_dir_all(&dir)?;
+        let lock = platform::lock_exclusive(&dir.join("lock"), LOCK_WAIT)?;
+        if dir.join("meta.redb").exists() {
             // An existing `.lattice` that records NO operation is an init that
             // was interrupted before it could commit — not a repository. Left
             // alone it is a directory with no way forward, since `open` refuses
@@ -177,9 +184,6 @@ impl Repo {
             drop(probe);
         }
         fs::create_dir_all(dir.join("packs"))?;
-        // Before anything opens the store or the log, so two concurrent inits
-        // of the same directory queue rather than race.
-        let lock = platform::lock_exclusive(&dir.join("lock"), LOCK_WAIT)?;
         let store = Store::open(&dir.join("packs"))?;
         let oplog = OpLog::open(&dir.join("meta.redb"))?;
         // The Init entry, the default line and the format version land in ONE
@@ -2668,6 +2672,41 @@ mod tests {
         assert_eq!(
             repo.oplog().head().unwrap().unwrap().operation,
             Operation::Init
+        );
+    }
+
+    #[test]
+    fn init_takes_the_lock_before_it_probes_for_an_existing_repository() {
+        // The probe OPENS the database. While it ran before the lock, a second
+        // init walked straight into redb's own non-blocking lock and failed —
+        // the exact failure the repository lock exists to remove, surviving in
+        // the one command that runs before a repository exists.
+        //
+        // The setup is the state an init is genuinely in mid-flight: holding
+        // the repository lock AND the log. A first version of this test held
+        // only the lock, which meant the probe found no database to collide
+        // with — it passed with the fix reverted, and so was testing nothing.
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let lattice = dir.path().join(".lattice");
+        fs::create_dir_all(&lattice).unwrap();
+        let held_lock =
+            platform::lock_exclusive(&lattice.join("lock"), Duration::from_secs(5)).unwrap();
+        let held_log = OpLog::open(&lattice.join("meta.redb")).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            drop(held_log);
+            drop(held_lock);
+        });
+
+        let started = Instant::now();
+        let repo = Repo::init(dir.path());
+
+        releaser.join().expect("the releasing thread finishes");
+        repo.expect("init queues for the lock rather than failing on the database under it");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "and it genuinely waited: it returned before the other init let go"
         );
     }
 

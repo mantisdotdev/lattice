@@ -136,10 +136,19 @@ def main() -> int:
 
     work = Path(tempfile.mkdtemp(prefix="ltx-concurrency-probe-"))
     try:
-        subprocess.run([str(LTX), "init"], cwd=work, capture_output=True, timeout=60)
-        (work / "seed.txt").write_text("seed\n")
-        subprocess.run([str(LTX), "save", "seed"], cwd=work,
-                       capture_output=True, timeout=60)
+        # Setup failures are failures. Discarding these return codes let the
+        # probe report a clean run over a repository that was never seeded,
+        # which is the "silence is not success" trap this file exists to avoid.
+        for step in (["init"], ["save", "seed"]):
+            if step[0] == "save":
+                (work / "seed.txt").write_text("seed\n")
+            r = subprocess.run([str(LTX), *step], cwd=work, capture_output=True,
+                               text=True, errors="replace", timeout=60)
+            if r.returncode != 0:
+                print(json.dumps({"probe": "concurrency", "error": f"setup step "
+                                  f"`ltx {' '.join(step)}` failed",
+                                  "detail": (r.stdout + r.stderr).strip()[:300]}))
+                return 1
 
         started = time.monotonic()
         with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -165,6 +174,9 @@ def main() -> int:
             report = json.loads(verify.stdout)
         except json.JSONDecodeError:
             report = {"errors": ["verify emitted unparseable JSON"]}
+        # `complete` echoes the flag that was REQUESTED, so it says nothing
+        # about health. The exit code and the error list do.
+        intact = verify.returncode == 0 and not report.get("errors")
 
         out = {
             "probe": "concurrency",
@@ -178,7 +190,8 @@ def main() -> int:
             "violation_sample": violations[:3],
             "unsequenced_operations": len(unsequenced),
             "verify_errors": len(report.get("errors", [])),
-            "verify_complete": bool(report.get("complete")),
+            "verify_exit_code": verify.returncode,
+            "repository_intact": intact,
             "counts": counts,
             "wall_clock_s": round(elapsed, 3),
             "ops_per_s": round(len(events) / elapsed, 1) if elapsed else None,
@@ -188,7 +201,12 @@ def main() -> int:
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(out, indent=2) + "\n")
-        return 0 if not failures and not violations else 1
+        # Everything that would make this run meaningless is in the predicate.
+        # `unsequenced` especially: an operation that succeeded without
+        # reporting its position is not a pass, it is a missing measurement,
+        # and excluding it would let an engine pass by omitting a field.
+        healthy = not failures and not violations and not unsequenced and intact
+        return 0 if healthy else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
