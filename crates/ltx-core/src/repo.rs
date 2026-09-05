@@ -280,7 +280,7 @@ impl Repo {
                 let id = resolve_change(typed, record, &current, &self.oplog)?;
                 let held = record.changes.get(&id).cloned().unwrap_or_default();
                 if held.assigned.is_empty() {
-                    return Err(Error::InvalidChange(format!(
+                    return Err(Error::ChangeHoldsNothing(format!(
                         "change {} holds no paths, so there is nothing of it to \
                          checkpoint",
                         change::abbreviate(
@@ -1105,6 +1105,15 @@ impl Repo {
                 .insert(path.clone());
             moved.push(path);
             room -= 1;
+        }
+        if created {
+            // Present even when every path was refused. `created` in the entry
+            // says a change exists, `current_change` points at it, and this is
+            // what makes those true: without it a bare assign whose paths were
+            // all refused would leave a current change that `change list` did
+            // not show and `--to` called nonexistent. Empty is a coherent
+            // state, and `undo` removes it.
+            record.changes.entry(change.clone()).or_default();
         }
         record.current_change = Some(change.clone());
         let short = change::abbreviate(
@@ -2388,7 +2397,7 @@ fn resolve_change(typed: &str, record: &LineRecord, line: &str, oplog: &OpLog) -
             )))
         }
         change::Resolution::Unknown => match checkpointed_change(typed, line, oplog)? {
-            Some(id) => Err(Error::InvalidChange(format!(
+            Some(id) => Err(Error::ChangeAlreadyCheckpointed(format!(
                 "change {} is already checkpointed, and reopening one is not in v1",
                 crate::short_id(&id)
             ))),
@@ -3205,7 +3214,12 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.concept(), crate::error::Concept::Change);
-        assert!(!err.recovery().is_empty());
+        assert!(
+            err.recovery().contains("ltx assign"),
+            "the change is open and unambiguous — it just holds nothing, so the \
+             way back is to put something in it: {}",
+            err.recovery()
+        );
         assert_eq!(
             repo.oplog().len().unwrap(),
             before,
@@ -3235,6 +3249,13 @@ mod tests {
         );
         assert_eq!(err.category(), crate::error::Category::Invalid);
         assert_eq!(err.concept(), crate::error::Concept::Change);
+        assert!(
+            !err.recovery().contains("change list"),
+            "the change is not in that list, which is the whole point — sending \
+             a user to a list that cannot contain what they asked for is the \
+             dead end §4.3 forbids: {}",
+            err.recovery()
+        );
     }
 
     #[test]
@@ -3318,6 +3339,36 @@ mod tests {
         let report = repo.verify(true).unwrap();
         assert!(report.errors.is_empty(), "and this is not damage");
         assert_eq!(report.checkpoints_partial, 1);
+    }
+
+    #[test]
+    fn an_assign_whose_every_path_is_refused_still_starts_a_change_that_every_view_agrees_on() {
+        // The three views of a change have to say the same thing. `created` in
+        // the op-log entry, `current_change`, and `change list` all describe
+        // one fact, and a bare assign that refused everything used to set the
+        // second without the third — leaving a current change the list did not
+        // show and `--to` called nonexistent.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        let out = repo.assign(&[dir.path().join("gone.txt")], None).unwrap();
+
+        assert!(out.created);
+        assert!(out.assigned.is_empty());
+        let open = repo.changes().unwrap();
+        assert_eq!(open.len(), 1, "the change the entry claims to have created");
+        assert!(open[0].current, "and it is the one a bare assign adds to");
+        assert!(
+            open[0].assigned.is_empty(),
+            "holding nothing, which is honest"
+        );
+
+        repo.undo().unwrap();
+        assert!(
+            repo.changes().unwrap().is_empty(),
+            "and undo takes it away again"
+        );
     }
 
     #[test]
