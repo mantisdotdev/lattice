@@ -10,6 +10,7 @@
 //! reference to a harness, bench path, or test-mode environment variable in
 //! this crate.
 
+pub mod change;
 pub mod chunk;
 pub mod error;
 pub mod oplog;
@@ -18,6 +19,7 @@ pub mod repo;
 pub mod store;
 pub mod tree;
 
+pub use change::Resolution;
 pub use chunk::{Chunk, ChunkId};
 pub use error::{Category, Concept, Error, Result};
 pub use oplog::{Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE};
