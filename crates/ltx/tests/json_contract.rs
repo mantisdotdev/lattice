@@ -25,11 +25,17 @@ fn ltx(repo: &Path, args: &[&str]) -> serde_json::Value {
         .current_dir(repo)
         .output()
         .expect("ltx runs");
+    // BOTH streams. Under `--json` the CLI puts its error document on STDOUT
+    // and leaves stderr empty, so reporting stderr alone made every failure
+    // here read as "failed: " with no reason — the same silence this file was
+    // written to stop.
     assert!(
         out.status.success(),
-        "`ltx {}` failed: {}",
+        "`ltx {} --json` failed ({}).\n  stdout: {}\n  stderr: {}",
         args.join(" "),
-        String::from_utf8_lossy(&out.stderr)
+        out.status,
+        String::from_utf8_lossy(&out.stdout).trim(),
+        String::from_utf8_lossy(&out.stderr).trim()
     );
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
