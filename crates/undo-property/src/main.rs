@@ -133,7 +133,7 @@ fn run_sequence(base: Option<&Path>, rng: &mut Rng, emitted: &mut BTreeMap<Strin
     std::fs::write(root.join("seed.txt"), b"seed\n").expect("seed write");
 
     let mut repo = Repo::init(root).expect("init");
-    repo.save("seed").expect("seed save");
+    repo.save("seed", None).expect("seed save");
     let initial = snapshot(root, &repo);
 
     // Apply a random batch across the surface that exists today.
@@ -166,7 +166,7 @@ fn run_sequence(base: Option<&Path>, rng: &mut Rng, emitted: &mut BTreeMap<Strin
             }
             _ => {
                 *emitted.entry("save".into()).or_default() += 1;
-                repo.save("probe").expect("save");
+                repo.save("probe", None).expect("save");
             }
         }
         applied += 1;

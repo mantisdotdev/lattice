@@ -49,6 +49,11 @@ enum Command {
     Save {
         /// What this checkpoint is for.
         message: String,
+        /// Checkpoint only the paths assigned to this change, and consume it.
+        /// Without it, the whole working state is saved — plain `save` never
+        /// becomes implicitly partial.
+        #[arg(long = "change", value_name = "CHANGE")]
+        change: Option<String>,
     },
     /// Show what is here and what has happened.
     Status,
@@ -178,9 +183,9 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
-        Command::Save { message } => {
+        Command::Save { message, change } => {
             let mut repo = Repo::discover(&cwd)?;
-            let out = repo.save(message)?;
+            let out = repo.save(message, change.as_deref())?;
             let cp = &out.checkpoint;
             emit(
                 cli,
@@ -192,10 +197,24 @@ fn run(cli: &Cli) -> Result<u8> {
                         "message": cp.message,
                         "parent": cp.parent,
                         "oplog_seq": cp.oplog_seq,
+                        // The change this consumed, if it was a partial save,
+                        // and the address of the WHOLE working tree — which
+                        // for a partial save is the only durable name the
+                        // unsaved remainder has.
+                        "change": out.change,
+                        "working_state": out.working_state,
                         "rescued_working_state": out.rescued_working_state,
                     })
                 },
-                || format!("saved {} — {}", ltx_core::short_id(&cp.id), cp.message),
+                || match &out.change {
+                    Some(id) => format!(
+                        "saved change {} as {} — {}",
+                        ltx_core::short_id(id),
+                        ltx_core::short_id(&cp.id),
+                        cp.message
+                    ),
+                    None => format!("saved {} — {}", ltx_core::short_id(&cp.id), cp.message),
+                },
             );
             Ok(EXIT_OK)
         }

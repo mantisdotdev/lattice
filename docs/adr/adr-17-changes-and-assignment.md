@@ -406,10 +406,24 @@ migration.
 1. **`save --change` selects content after a repair materialisation.** `save`
    calls `complete_pending_switch` before snapshotting, and that repair rewrites
    files. An assignment made against the pre-repair bytes would then be resolved
-   against bytes the user never saw. Either selection happens before any repair,
-   or `save --change` refuses while a pending marker exists. Resolved in
-   implementation; recorded here because it is a correctness constraint on
-   ordering that no type enforces.
+   against bytes the user never saw.
+
+   **Resolved by neither of the two options first written here** — selecting
+   before the repair, or refusing while a marker stands — because the hazard
+   turns out to be narrower than either. The repair restores the CURRENT line's
+   preserved tree, and changes are per-line, so the assignments being resolved
+   and the bytes being restored belong to the same line and the same moment:
+   the tree the repair writes is the one those assignments were made against.
+   The one gap is bytes written between the interruption and the repair, and
+   `complete_pending_switch` already captures those before materialising over
+   them — now named in `SaveOutcome.rescued_working_state`, since `save` was
+   the caller that used to drop the address.
+
+   Refusing was the tempting option and is rejected: a marker is cleared only
+   by a state-changing command, so refusing would leave `save --change`
+   unusable until the user found one to run — a trap, which §4.3 forbids
+   outright. Selecting before the repair is worse still: it would checkpoint
+   bytes the repair is about to replace, and the repair would then run anyway.
 2. **Undo scope under concurrency** (inherited from ADR-16, open conflict 2):
    `assign .` runs in G1.4's 8 concurrent workspaces, where the (I2) LIFO lemma
    does not hold. This bites at the workspace slice, not this one, but `assign`
