@@ -200,7 +200,14 @@ impl Repo {
             return Err(Error::NotARepository(root.to_path_buf()));
         }
         let store = Store::open(&dir.join("packs"))?;
-        let oplog = OpLog::open(&dir.join("meta.redb"))?;
+        let meta = dir.join("meta.redb");
+        // The gate runs BEFORE an OpLog is built over the database, because
+        // building one deserialises the newest entry to recover the chain
+        // head — and an entry written at a format this build cannot read need
+        // not have this build's shape. Reading it first turned a refusal that
+        // names the way forward into "missing field `format`", whose recovery
+        // text says this is probably a bug in Lattice.
+        //
         // A RANGE, not an exact match. Formats 1 and 2 predate the per-entry
         // format tag, so their entries' original serialisation cannot be
         // reproduced and `verify_chain` could only report phantom tampering —
@@ -211,7 +218,7 @@ impl Repo {
         // A format NEWER than this build is refused too: its entries may use
         // variants this build cannot parse, and guessing at them is how a
         // reader corrupts a repository it did not understand.
-        match oplog.format_version()? {
+        match OpLog::format_version_at(&meta)? {
             Some(v) if (MIN_READABLE_FORMAT..=FORMAT_VERSION).contains(&v) => {}
             other => {
                 return Err(Error::UnsupportedFormat(format!(
@@ -224,6 +231,7 @@ impl Repo {
                 )))
             }
         }
+        let oplog = OpLog::open(&meta)?;
         Ok(Repo {
             root: root.to_path_buf(),
             store,
@@ -3792,6 +3800,55 @@ mod tests {
         assert!(
             !repo.changes().unwrap().iter().any(|c| c.id == first.change),
             "the consumed change must not come back as pending"
+        );
+    }
+
+    #[test]
+    fn a_repository_whose_entries_predate_this_build_is_refused_not_reported_as_a_bug() {
+        // The version above sets a format tag but leaves THIS build's entries
+        // in place, so it never reached the case it was written for: a real
+        // older repository also has older ENTRIES. A format-2 entry has no
+        // `format` field, and `OpLog::open` deserialises the newest entry to
+        // recover the chain head — so the read failed first and the user was
+        // told "missing field `format`", with a recovery line saying this is
+        // probably a bug in Lattice. The gate has to run before that read.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let repo = Repo::init(dir.path()).unwrap();
+            repo.oplog
+                .set_format_version(MIN_READABLE_FORMAT - 1)
+                .unwrap();
+        }
+        // Strip the field that build would not have written.
+        let meta = dir.path().join(".lattice/meta.redb");
+        {
+            use redb::ReadableTable;
+            let db = redb::Database::create(&meta).unwrap();
+            let table_def: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("oplog");
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(table_def).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut doc: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                doc.as_object_mut().unwrap().remove("format");
+                let bytes = serde_json::to_vec(&doc).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let err = Repo::open(dir.path()).unwrap_err();
+
+        assert_eq!(
+            err.category(),
+            crate::error::Category::Invalid,
+            "an unreadable format is refused, not reported as a serde failure: {err}"
+        );
+        assert!(
+            err.recovery().contains("ltx init"),
+            "and the way forward is a fresh repository, not `this is a bug in \
+             Lattice`: {}",
+            err.recovery()
         );
     }
 

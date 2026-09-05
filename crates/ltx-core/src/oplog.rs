@@ -748,6 +748,33 @@ impl OpLog {
         self.get_head(FORMAT_KEY)
     }
 
+    /// The format recorded in the database at `path`, without building an
+    /// `OpLog` over it.
+    ///
+    /// The gate has to run BEFORE anything deserialises an entry, and building
+    /// an `OpLog` deserialises the newest one to recover the chain head. An
+    /// entry written at a format this build cannot read need not have this
+    /// build's shape — a format-2 entry has no `format` field at all, and a
+    /// format-1 `Save` has no `line` — so that read fails with a serde error
+    /// and the user is told "missing field `format`" and that this is probably
+    /// a bug in Lattice. What they should be told is which formats this build
+    /// reads and to start a fresh repository, which is what the gate says.
+    ///
+    /// Reads through the same accessor as `format_version`, so there is one
+    /// answer to "what format is this" rather than two that can drift.
+    pub fn format_version_at(path: &std::path::Path) -> Result<Option<u64>> {
+        let db = Database::create(path)?;
+        let tx = db.begin_read()?;
+        // A database with no `heads` table has never recorded a format, which
+        // is the unversioned format 1 — not an error.
+        let table = match tx.open_table(HEADS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(table.get(FORMAT_KEY)?.map(|v| v.value()))
+    }
+
     /// Publish line state without appending an operation.
     ///
     /// Used only by `init`, which must create the default line below the undo
@@ -794,13 +821,29 @@ impl OpLog {
             }
             // Hashed by the rule of the format the entry was written at, not
             // by this build's, so a chain that spans a format change verifies.
-            let recomputed = Entry::compute_id(
+            //
+            // A tag this build cannot hash is REPORTED, not raised. An entry
+            // whose format was edited to an unhashable value is exactly the
+            // damage this function exists to describe, and raising would leave
+            // `ltx verify` unable to produce a report at all — the one thing it
+            // must always do. Same doctrine as `short` above: never fail on the
+            // field you are inspecting.
+            let recomputed = match Entry::compute_id(
                 entry.seq,
                 &entry.prev,
                 entry.at_unix_ms,
                 &entry.operation,
                 entry.format,
-            )?;
+            ) {
+                Ok(id) => id,
+                Err(Error::UnsupportedFormat(why)) => {
+                    return Ok(Some(format!(
+                        "operation {} cannot be authenticated: {why}",
+                        entry.seq
+                    )))
+                }
+                Err(other) => return Err(other),
+            };
             if recomputed != entry.id {
                 return Ok(Some(format!(
                     "operation {} has been altered: its content hashes to {} \
@@ -977,6 +1020,43 @@ mod tests {
         let broken = log.verify_chain().unwrap();
         assert!(broken.is_some(), "an altered entry must break the chain");
         assert!(broken.unwrap().contains("altered"));
+    }
+
+    #[test]
+    fn an_entry_whose_format_tag_cannot_be_hashed_is_reported_not_raised() {
+        // `verify` exists to describe damage, so an entry whose format tag has
+        // been edited to a value this build cannot hash has to come back as a
+        // chain break. Raising instead left `ltx verify` unable to produce a
+        // report at all — the one thing it must always do.
+        let (dir, log) = log();
+        log.append(Operation::Init).unwrap();
+        drop(log);
+
+        let db = Database::create(dir.path().join("oplog.redb")).unwrap();
+        {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(ENTRIES).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut entry: Entry = serde_json::from_slice(&raw).unwrap();
+                entry.format = 99;
+                let bytes = serde_json::to_vec(&entry).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        drop(db);
+
+        let log = OpLog::open(&dir.path().join("oplog.redb")).unwrap();
+        let broken = log
+            .verify_chain()
+            .expect("an unhashable tag is damage to report, not an error to raise");
+        assert!(
+            broken
+                .unwrap_or_default()
+                .contains("cannot be authenticated"),
+            "and the report says which operation and why"
+        );
     }
 
     #[test]

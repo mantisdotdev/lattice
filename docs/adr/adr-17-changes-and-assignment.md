@@ -29,8 +29,13 @@ they were read before anything was designed:
   positional *messages* to `save` (`"trial checkpoint"`, `"concurrent edit"`)
   and require exit 0.
 
-All three match their `harness/FREEZE.json` hashes. §0.3 makes them
-unamendable, so they are inputs to this decision, not consequences of it.
+All three are pinned in `harness/FREEZE.json`, and §0.3 makes them unamendable
+— so they are inputs to this decision, not consequences of it. That is enforced
+continuously rather than asserted here: `scripts/gauntlet` compares each
+harness file against its recorded sha256 before measuring, and a file whose
+bytes have changed reverts every gate it touches to FAIL(stale) until it is
+re-measured. A design that needed one of them edited would show up as a failing
+scorecard, not as a passing one.
 
 ## Decision
 
@@ -164,7 +169,7 @@ pattern `working` already uses — rather than growing this key.
 
 ### 5. One `save`, with a scope flag
 
-```
+```console
 ltx save "<message>"                     # the whole working state (unchanged)
 ltx save "<message>" --change <id>       # only that change's assigned paths
 ```
@@ -206,7 +211,7 @@ The batch can reach it via `assign c f; undo; save --change c`.
 
 ### 6. The command surface the frozen harnesses require
 
-```
+```console
 ltx assign <path>...                 # to the current change, creating one if absent
 ltx assign --to <id> <path>...       # to a named existing change
 ltx change list                      # every live change on the current line
@@ -311,7 +316,7 @@ review. `next_undo_target` **keeps scanning past an ineligible entry**. A `save`
 at the root of its line is permanently ineligible (no parent to return to).
 So:
 
-```
+```console
 ltx init                     # no seed save
 printf 'A\n' > a.txt
 ltx assign a.txt             # seq 2
