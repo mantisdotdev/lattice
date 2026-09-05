@@ -1103,8 +1103,12 @@ impl Repo {
                     self.collect_under(&resolved, &root, &mut found, &mut refused)?;
                 }
                 Ok(_) => {
-                    if let Ok(relative) = resolved.strip_prefix(&root) {
-                        found.insert(relative.as_os_str().as_encoded_bytes().to_vec());
+                    if let Some(relative) = resolved
+                        .strip_prefix(&root)
+                        .ok()
+                        .and_then(relative_path_bytes)
+                    {
+                        found.insert(relative);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1145,8 +1149,10 @@ impl Repo {
             let meta = fs::symlink_metadata(&path)?;
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 self.collect_under(&path, root, found, refused)?;
-            } else if let Ok(relative) = path.strip_prefix(root) {
-                found.insert(relative.as_os_str().as_encoded_bytes().to_vec());
+            } else if let Some(relative) =
+                path.strip_prefix(root).ok().and_then(relative_path_bytes)
+            {
+                found.insert(relative);
             }
         }
         Ok(())
@@ -2113,6 +2119,32 @@ pub struct ChangeView {
     pub current: bool,
 }
 
+/// A path relative to the root, as its components joined by `/`.
+///
+/// NOT `as_os_str().as_encoded_bytes()` over the whole path: that carries the
+/// platform's separator, so the same assignment would read `sub/a.txt` on one
+/// machine and `sub\a.txt` on another, and splitting it again would need to
+/// know which machine wrote it. Neither platform allows a separator inside a
+/// single component, so `/` is a lossless join everywhere — and it is what a
+/// tree walk splits on, since a tree entry name IS one component.
+///
+/// `None` for anything that is not a plain relative path. Nothing else can
+/// come out of `strip_prefix` against the root, and guessing at one would put
+/// a `..` into a path a checkpoint later writes.
+fn relative_path_bytes(relative: &Path) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return None;
+        };
+        if !out.is_empty() {
+            out.push(b'/');
+        }
+        out.extend_from_slice(name.as_encoded_bytes());
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// A working-tree path as a human reads it.
 ///
 /// Lossy, because a path is raw bytes and JSON is text. The bytes stay exact
@@ -2581,11 +2613,10 @@ mod tests {
         assert!(out.created, "there was no change open, so this started one");
         assert_eq!(
             out.assigned,
-            vec![
-                "a.txt".to_string(),
-                format!("sub{}b.txt", std::path::MAIN_SEPARATOR)
-            ],
-            "a directory assigns what is under it, and .lattice is not content"
+            vec!["a.txt".to_string(), "sub/b.txt".to_string()],
+            "a directory assigns what is under it, and .lattice is not content; \
+             the separator is `/` on every platform, since a change record has \
+             to read the same wherever it was written"
         );
         assert!(out.refused.is_empty());
     }
