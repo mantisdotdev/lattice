@@ -385,6 +385,17 @@ migration.
 
 - Development repositories must be recreated once more, and this is the last
   time that is true.
+- **Only one change is open at a time in this slice, and that is a gap in §6's
+  surface rather than a decision.** A bare `assign` reuses the current change,
+  and `--to` never creates, so nothing opens a *second* one: a change is closed
+  by `save --change`, which clears the current one, and only then does the next
+  bare assign start another. §3 argues the ergonomics from "several changes
+  open at once", which this surface cannot reach — so §3's justification runs
+  ahead of what ships. The second creation path is owed, and it is a verb
+  (`change new`, or an `assign --new`) rather than a widening of `--to`, whose
+  refusal to create is what keeps a typo from minting a change. Until it lands,
+  `--to` can only name the change that is already current, and the ambiguous
+  branch of prefix resolution is reachable only from tests.
 - `ltx status` and `VerifyReport` must gain an explicit "working state not
   represented in any checkpoint" field. After partial save, a status that
   prints a head with no qualifier, or a verify that says "verified", is a claim
