@@ -223,12 +223,23 @@ impl Repo {
     }
 
     /// Find the repository containing `start`, walking upward.
+    ///
+    /// `.lattice` as a DIRECTORY is a repository. `.lattice` as a FILE is a
+    /// workspace, and names the repository whose directory holds the content
+    /// (ADR-7 §1). One name in two forms, so this walk learns one new thing
+    /// rather than searching for a second marker — which every ignore file and
+    /// every "am I in a repository" check would otherwise have to learn too.
     pub fn discover(start: &Path) -> Result<Self> {
         let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
         let mut cursor = start.as_path();
         loop {
-            if Self::repo_dir(cursor).is_dir() {
+            let marker = Self::repo_dir(cursor);
+            if marker.is_dir() {
                 return Self::open(cursor);
+            }
+            if marker.is_file() {
+                let repository = read_workspace_marker(&marker)?;
+                return Self::open_workspace(cursor, &repository);
             }
             match cursor.parent() {
                 Some(p) => cursor = p,
@@ -238,7 +249,22 @@ impl Repo {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
-        let dir = Self::repo_dir(root);
+        Self::open_at(root, &Self::repo_dir(root))
+    }
+
+    /// Open the repository at `repository`, working in the tree at `root`.
+    ///
+    /// The workspace half of `discover`. Separate from `open` only in that the
+    /// two directories are given rather than derived from each other.
+    fn open_workspace(root: &Path, repository: &Path) -> Result<Self> {
+        if !repository.is_dir() {
+            return Err(Error::NotARepository(repository.to_path_buf()));
+        }
+        Self::open_at(root, repository)
+    }
+
+    fn open_at(root: &Path, dir: &Path) -> Result<Self> {
+        let dir = dir.to_path_buf();
         if !dir.is_dir() {
             return Err(Error::NotARepository(root.to_path_buf()));
         }
@@ -2433,6 +2459,43 @@ pub struct ChangeView {
     pub current: bool,
 }
 
+/// The first line of a workspace marker, naming the repository it belongs to.
+///
+/// One `key: value` line rather than a bare path, so a file that is not a
+/// marker is REFUSED rather than read as a path: `.lattice` is a name a user
+/// might create for their own reasons, and treating any file of that name as a
+/// pointer would send commands at whatever it happened to contain.
+const MARKER_KEY: &str = "repository: ";
+
+fn read_workspace_marker(marker: &Path) -> Result<PathBuf> {
+    // Bounded, per "nothing from outside is unbounded": a marker is one short
+    // line, and a caller who points this at a large file should not have it
+    // read into memory.
+    const MAX_MARKER_BYTES: u64 = 8 * 1024;
+    let size = fs::metadata(marker)?.len();
+    if size > MAX_MARKER_BYTES {
+        return Err(Error::Invalid(format!(
+            "{} is {size} bytes, too large to be a workspace marker",
+            marker.display()
+        )));
+    }
+    let text = fs::read_to_string(marker)?;
+    let Some(path) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(MARKER_KEY))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Err(Error::Invalid(format!(
+            "{} is not a workspace: a workspace marker's first line reads \
+             `{MARKER_KEY}<path>`",
+            marker.display()
+        )));
+    };
+    Ok(PathBuf::from(path))
+}
+
 /// A path relative to the root, as its components joined by `/`.
 ///
 /// NOT `as_os_str().as_encoded_bytes()` over the whole path: that carries the
@@ -3616,6 +3679,59 @@ mod tests {
             "closing the repository releases it — including on a kill, \
                      since the OS owns the release",
         );
+    }
+
+    #[test]
+    fn a_marker_file_points_commands_at_the_repository_it_names() {
+        // `.lattice` as a directory is a repository; as a FILE it is a
+        // workspace naming one (ADR-7 §1). Written by hand here because
+        // `workspace new` has not shipped — the same reason the assign
+        // inverses were built before the command that appends them.
+        let repo_dir = tempfile::tempdir().unwrap();
+        fs::write(repo_dir.path().join("a.txt"), b"in the repository").unwrap();
+        {
+            let mut repo = Repo::init(repo_dir.path()).unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        let space = tempfile::tempdir().unwrap();
+        fs::write(
+            space.path().join(".lattice"),
+            format!(
+                "repository: {}\n",
+                repo_dir.path().join(".lattice").display()
+            ),
+        )
+        .unwrap();
+
+        let found = Repo::discover(space.path()).expect("the marker names a repository");
+
+        assert_eq!(
+            found.head_checkpoint().unwrap().map(|c| c.message),
+            Some("seed".to_string()),
+            "commands run in a workspace address the repository's history"
+        );
+        assert_eq!(
+            found.root().canonicalize().unwrap(),
+            space.path().canonicalize().unwrap(),
+            "and work in the workspace's own tree, not the repository's"
+        );
+    }
+
+    #[test]
+    fn a_file_named_lattice_that_is_not_a_marker_is_refused_rather_than_followed() {
+        // `.lattice` is a name a user might create for their own reasons.
+        // Reading any file of that name as a path would send commands at
+        // whatever it happened to contain.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".lattice"), b"notes to self\n").unwrap();
+
+        let err = Repo::discover(dir.path()).map(|_| ()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("not a workspace"),
+            "it says what the file is not, and what a marker looks like: {err}"
+        );
+        assert!(!err.recovery().is_empty());
     }
 
     #[test]

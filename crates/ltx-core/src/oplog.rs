@@ -151,11 +151,39 @@ pub struct LineRecord {
     pub current_change: Option<String>,
 }
 
+/// One working tree over a repository (§4.2, noun 6).
+///
+/// The repository's own root is a workspace too, not a special case: eight
+/// workspaces and none differ only in how many rows this table has.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRecord {
+    /// Where this workspace's working tree is, absolute, as raw bytes.
+    ///
+    /// Bytes rather than a `String`, following the doctrine tree entry names
+    /// follow: a path need not be valid UTF-8, and a workspace whose directory
+    /// this engine could not name would be one it could not find again.
+    pub root: Vec<u8>,
+}
+
 /// Which lines exist and which one is current.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineState {
     pub current: String,
     pub lines: std::collections::BTreeMap<String, LineRecord>,
+    /// Working trees over this repository, by opaque id.
+    ///
+    /// In the same key as the lines, for ADR-16 §7's reason unchanged: a switch
+    /// mutates several facts at once and they must move together or not at all.
+    /// Eight workspaces rewriting one document is affordable precisely because
+    /// ADR-6 made them take turns.
+    ///
+    /// Additive, so no on-disk format break: the line state is a published
+    /// document, not hashed content — `Entry::compute_id` covers the operation
+    /// and nothing else — so a document written before this field existed reads
+    /// back with an empty map. The break comes later, when `current` moves in
+    /// here and stops being one field meaning eight things (ADR-7 §3).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub workspaces: std::collections::BTreeMap<String, WorkspaceRecord>,
 }
 
 /// The line every repository starts on. G1.1 and G1.4 both run `switch main`
@@ -171,6 +199,7 @@ impl LineState {
         LineState {
             current: DEFAULT_LINE.to_string(),
             lines,
+            workspaces: std::collections::BTreeMap::new(),
         }
     }
 }
