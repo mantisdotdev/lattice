@@ -64,6 +64,30 @@ pub enum Error {
     #[error("{0}")]
     InvalidLine(String),
 
+    /// A change that is not open on this line. Distinct from NotFound so the
+    /// §4.2 concept G2.4 reports is `change` rather than `checkpoint` — and
+    /// `Concept::Change` had no error variant producing it until now, so no
+    /// change-concept error path had ever been measured.
+    #[error("{0}")]
+    NoSuchChange(String),
+
+    /// A change reference that names several open changes at once.
+    #[error("{0}")]
+    InvalidChange(String),
+
+    /// A change a checkpoint has already taken. Its own variant because the
+    /// way back is different in kind: there is nothing to list and nothing to
+    /// disambiguate — that unit of work is closed, and further work starts a
+    /// new one.
+    #[error("{0}")]
+    ChangeAlreadyCheckpointed(String),
+
+    /// A change with no paths in it, asked to be checkpointed. Again its own
+    /// variant for its own way back: the change is open and unambiguous, it
+    /// simply has nothing in it yet.
+    #[error("{0}")]
+    ChangeHoldsNothing(String),
+
     /// The repository was written in an on-disk format this build cannot read.
     #[error("{0}")]
     UnsupportedFormat(String),
@@ -87,7 +111,10 @@ impl Error {
             Error::Invalid(_) | Error::InvalidLine(_) | Error::UnsupportedFormat(_) => {
                 Category::Invalid
             }
-            Error::NoSuchLine(_) => Category::NotFound,
+            Error::NoSuchLine(_) | Error::NoSuchChange(_) => Category::NotFound,
+            Error::InvalidChange(_)
+            | Error::ChangeAlreadyCheckpointed(_)
+            | Error::ChangeHoldsNothing(_) => Category::Invalid,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Category::Io,
         }
     }
@@ -99,6 +126,10 @@ impl Error {
             Error::Corrupt(_) => Concept::Checkpoint,
             Error::Invalid(_) => Concept::WorkingState,
             Error::NoSuchLine(_) | Error::InvalidLine(_) => Concept::Line,
+            Error::NoSuchChange(_)
+            | Error::InvalidChange(_)
+            | Error::ChangeAlreadyCheckpointed(_)
+            | Error::ChangeHoldsNothing(_) => Concept::Change,
             Error::UnsupportedFormat(_) => Concept::Workspace,
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
         }
@@ -122,6 +153,22 @@ impl Error {
                  with a valid argument"
             }
             Error::NoSuchLine(_) => "run `ltx line list` to see which lines exist",
+            Error::NoSuchChange(_) => "run `ltx change list` to see which changes are open",
+            Error::InvalidChange(_) => {
+                "run `ltx change list` and name enough characters to pick out the \
+                 one you mean"
+            }
+            // NOT "run `ltx change list`": the change is not in it, which is
+            // the whole point, and sending a user to a list that cannot
+            // contain what they asked for is the dead end §4.3 forbids.
+            Error::ChangeAlreadyCheckpointed(_) => {
+                "that unit of work is checkpointed; run `ltx assign <path>` to \
+                 start a new change for what comes next"
+            }
+            Error::ChangeHoldsNothing(_) => {
+                "run `ltx assign <path>` to put something in it, or `ltx save \
+                 \"<message>\"` to checkpoint the whole working state"
+            }
             Error::UnsupportedFormat(_) => {
                 "this repository predates the current on-disk format; start a fresh \
                  one with `ltx init` and re-save your work into it"
@@ -199,7 +246,7 @@ mod tests {
         // so adopt/sync/undo cannot be advertised before they are built.
         const IMPLEMENTED: &[&str] = &[
             "init", "save", "status", "log", "verify", "checkout", "undo", "start", "switch",
-            "line",
+            "line", "assign", "change",
         ];
         let cases: Vec<Error> = vec![
             Error::NotARepository(PathBuf::from("/tmp")),
@@ -209,6 +256,10 @@ mod tests {
             Error::Io(std::io::Error::other("x")),
             Error::NoSuchLine("x".into()),
             Error::InvalidLine("x".into()),
+            Error::NoSuchChange("x".into()),
+            Error::InvalidChange("x".into()),
+            Error::ChangeAlreadyCheckpointed("x".into()),
+            Error::ChangeHoldsNothing("x".into()),
             Error::UnsupportedFormat("x".into()),
             Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
         ];

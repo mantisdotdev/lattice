@@ -49,6 +49,11 @@ enum Command {
     Save {
         /// What this checkpoint is for.
         message: String,
+        /// Checkpoint only the paths assigned to this change, and consume it.
+        /// Without it, the whole working state is saved — plain `save` never
+        /// becomes implicitly partial.
+        #[arg(long = "change", value_name = "CHANGE")]
+        change: Option<String>,
     },
     /// Show what is here and what has happened.
     Status,
@@ -92,12 +97,32 @@ enum Command {
         /// The line to continue on.
         name: String,
     },
+    /// Put working-tree paths into a change.
+    Assign {
+        /// The change to add to. It must already be open: this never creates
+        /// one, so a mistyped id cannot mint a change. Without it, paths go
+        /// to the current change, and a line with none starts one.
+        #[arg(long = "to", value_name = "CHANGE")]
+        to: Option<String>,
+        /// What to assign. A directory assigns everything under it.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
+    /// Work with changes.
+    #[command(subcommand)]
+    Change(ChangeCmd),
     /// Work with lines.
     #[command(subcommand)]
     Line(LineCmd),
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
     Internals(Internals),
+}
+
+#[derive(Subcommand)]
+enum ChangeCmd {
+    /// Show every change open on this line.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -159,9 +184,10 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
-        Command::Save { message } => {
+        Command::Save { message, change } => {
             let mut repo = Repo::discover(&cwd)?;
-            let cp = repo.save(message)?;
+            let out = repo.save(message, change.as_deref())?;
+            let cp = &out.checkpoint;
             emit(
                 cli,
                 || {
@@ -172,9 +198,24 @@ fn run(cli: &Cli) -> Result<u8> {
                         "message": cp.message,
                         "parent": cp.parent,
                         "oplog_seq": cp.oplog_seq,
+                        // The change this consumed, if it was a partial save,
+                        // and the address of the WHOLE working tree — which
+                        // for a partial save is the only durable name the
+                        // unsaved remainder has.
+                        "change": out.change,
+                        "working_state": out.working_state,
+                        "rescued_working_state": out.rescued_working_state,
                     })
                 },
-                || format!("saved {} — {}", ltx_core::short_id(&cp.id), cp.message),
+                || match &out.change {
+                    Some(id) => format!(
+                        "saved change {} as {} — {}",
+                        ltx_core::short_id(id),
+                        ltx_core::short_id(&cp.id),
+                        cp.message
+                    ),
+                    None => format!("saved {} — {}", ltx_core::short_id(&cp.id), cp.message),
+                },
             );
             Ok(EXIT_OK)
         }
@@ -186,14 +227,27 @@ fn run(cli: &Cli) -> Result<u8> {
                 cli,
                 || serde_json::json!({ "ok": true, "status": s }),
                 || match (&s.head, &s.head_message) {
-                    (Some(h), Some(m)) => format!(
-                        "{} — {} checkpoints, {} operations\ncurrent: {} — {}",
-                        s.root,
-                        s.checkpoints,
-                        s.operations,
-                        ltx_core::short_id(h),
-                        m
-                    ),
+                    (Some(h), Some(m)) => {
+                        let mut out = format!(
+                            "{} — {} checkpoints, {} operations\ncurrent: {} — {}",
+                            s.root,
+                            s.checkpoints,
+                            s.operations,
+                            ltx_core::short_id(h),
+                            m
+                        );
+                        // A head written by a partial save does not hold the
+                        // whole working state, and this is where a user looks
+                        // before `switch` or `undo` replaces their bytes.
+                        if let Some(change) = &s.head_change {
+                            out.push_str(&format!(
+                                "\n  this checkpoint holds change {} only; the rest of \
+                                 your working state is not in it",
+                                ltx_core::short_id(change)
+                            ));
+                        }
+                        out
+                    }
                     _ => format!("{} — nothing saved yet", s.root),
                 },
             );
@@ -263,9 +317,23 @@ fn run(cli: &Cli) -> Result<u8> {
                         }
                         return out;
                     }
+                    // Not damage: a partial checkpoint is exactly what was
+                    // asked for. It is said out loud because "verified" reads
+                    // as "everything I have is safe in history", which after a
+                    // partial save is not what the word can mean.
+                    let partial = if report.checkpoints_partial > 0 {
+                        format!(
+                            "\n{} checkpoint(s) hold only part of the working state that \
+                             stood when they were written; `ltx status` says whether the \
+                             current one does",
+                            report.checkpoints_partial
+                        )
+                    } else {
+                        String::new()
+                    };
                     if *complete {
                         format!(
-                            "verified {} checkpoints and {} chunks; {} operations chained",
+                            "verified {} checkpoints and {} chunks; {} operations chained{partial}",
                             report.checkpoints, report.chunks_verified, report.oplog_entries
                         )
                     } else {
@@ -273,7 +341,8 @@ fn run(cli: &Cli) -> Result<u8> {
                         // than claiming completeness.
                         format!(
                             "verified history structure; content verified for {} chunks; \
-                         {} not present locally\nrun `ltx verify --complete` for the full check",
+                         {} not present locally{partial}\nrun `ltx verify --complete` for \
+                         the full check",
                             report.chunks_verified, report.chunks_absent
                         )
                     }
@@ -411,6 +480,76 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Assign { to, paths } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.assign(paths, to.as_deref())?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        // A refusal is reported, not raised: this exits 0 with
+                        // `refused` populated. G1.4 counts a non-zero exit as a
+                        // failure across ~10,000 draws of `assign .`, and a
+                        // path that cannot be taken is not a failed command.
+                        "ok": true,
+                        "change": out.change, "short": out.short,
+                        "created": out.created, "line": out.line,
+                        "assigned": out.assigned, "refused": out.refused,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    let mut text = if out.created {
+                        format!(
+                            "started change {} with {} path(s)",
+                            out.short,
+                            out.assigned.len()
+                        )
+                    } else {
+                        format!(
+                            "assigned {} path(s) to change {}",
+                            out.assigned.len(),
+                            out.short
+                        )
+                    };
+                    for r in &out.refused {
+                        text.push_str(&format!("\n  not assigned: {} — {}", r.path, r.reason));
+                    }
+                    text
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Change(ChangeCmd::List) => {
+            let repo = Repo::discover(&cwd)?;
+            let changes = repo.changes()?;
+            emit(
+                cli,
+                // No timestamp, no counter, no op-log position — so this
+                // document is invariant under apply-a-batch-then-undo-all,
+                // which is what G1.3 compares it for.
+                || serde_json::json!({ "ok": true, "version": 1, "changes": changes }),
+                || {
+                    if changes.is_empty() {
+                        return "no changes open".to_string();
+                    }
+                    let mut out = String::new();
+                    for c in &changes {
+                        let mark = if c.current { "*" } else { " " };
+                        out.push_str(&format!(
+                            "{mark} {}  {} path(s)\n",
+                            c.short,
+                            c.assigned.len()
+                        ));
+                    }
+                    out.trim_end().to_string()
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Line(LineCmd::List) => {
             let repo = Repo::discover(&cwd)?;
             let state = repo.lines()?;
@@ -464,6 +603,13 @@ fn run(cli: &Cli) -> Result<u8> {
                     // self-switch that counts coverage without testing anything.
                     { "name": "start", "state_changing": true, "undoable": true, "sample_args": ["probe-line"] },
                     { "name": "switch", "state_changing": true, "undoable": true, "sample_args": ["main"] },
+                    // `seed.txt` is the one path G1.3's batches guarantee
+                    // exists. The emission counter increments before the
+                    // return code is checked, so args naming a path that does
+                    // not exist would satisfy the coverage bar while testing
+                    // nothing (ADR-17 §6).
+                    { "name": "assign", "state_changing": true, "undoable": true, "sample_args": ["seed.txt"] },
+                    { "name": "change list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "line list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },

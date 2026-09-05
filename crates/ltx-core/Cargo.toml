@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
+getrandom.workspace = true
 fastcdc.workspace = true
 zstd.workspace = true
 redb.workspace = true

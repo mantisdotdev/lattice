@@ -2,14 +2,18 @@
 //!
 //! For each of N seeded sequences: initialise a fresh repository, save a seed,
 //! snapshot the user-visible state, apply a random batch of state-changing
-//! operations from the surface that exists today (save, undo, start, switch),
-//! undo everything, and assert the user-visible state returns exactly to the
-//! seed snapshot.
+//! operations from the surface that exists today (save, undo, start, switch,
+//! assign, and the partial save that consumes a change), undo everything, and
+//! assert the user-visible state returns exactly to the seed snapshot.
 //!
 //! The equality domain is the one the gate names — working-tree bytes, the
-//! checkpoint graph, and the lines — explicitly EXCLUDING the op-log, which
-//! grows on every operation including undo, and the preserved working state,
-//! which is the ephemeral tier the gate omits.
+//! checkpoint graph, the lines, and the open changes — explicitly EXCLUDING the
+//! op-log, which grows on every operation including undo, and the preserved
+//! working state, which is the ephemeral tier the gate omits.
+//!
+//! The changes are in that domain because G1.3 puts `change list` in it. Left
+//! out here, an undo that lost every change would round-trip cleanly through
+//! this runner and the gate would bless it.
 //!
 //! A file is written after a line is CREATED, never on the default line before
 //! any line exists. That is deliberate: it makes the lines diverge, so `switch`
@@ -59,6 +63,10 @@ struct Snapshot {
     /// Line name -> tip. The preserved working state is deliberately absent:
     /// it is the ephemeral tier the gate's equality domain excludes.
     lines: BTreeMap<String, Option<String>>,
+    /// Change id -> (is it the current one, what it holds), for the current
+    /// line. Ids are minted from this sequence's counter, so they are stable
+    /// across a rerun of the same seed.
+    changes: BTreeMap<String, (bool, Vec<String>)>,
 }
 
 fn snapshot(root: &Path, repo: &Repo) -> Snapshot {
@@ -73,11 +81,18 @@ fn snapshot(root: &Path, repo: &Repo) -> Snapshot {
         .iter()
         .map(|(k, v)| (k.clone(), v.tip.clone()))
         .collect();
+    let changes = repo
+        .changes()
+        .expect("changes must not fail on a healthy repo")
+        .into_iter()
+        .map(|c| (c.id, (c.current, c.assigned)))
+        .collect();
     Snapshot {
         tree,
         checkpoints,
         current_line: state.current,
         lines,
+        changes,
     }
 }
 
@@ -132,15 +147,30 @@ fn run_sequence(base: Option<&Path>, rng: &mut Rng, emitted: &mut BTreeMap<Strin
     let root = dir.path();
     std::fs::write(root.join("seed.txt"), b"seed\n").expect("seed write");
 
-    let mut repo = Repo::init(root).expect("init");
-    repo.save("seed").expect("seed save");
+    // Change ids come from a counter seeded by this sequence's draw rather
+    // than from the machine's entropy, so a failure reproduces from `--seed`
+    // alone. This is the seam ADR-17 §3 put at the `Repo` boundary; the engine
+    // still never reaches for randomness itself, and takes the same code path
+    // here as in production.
+    let id_seed = rng.next_u64();
+    let mut minted: u64 = 0;
+    let mut repo = Repo::init(root)
+        .expect("init")
+        .with_change_id_bits(move || {
+            minted += 1;
+            let mut bits = [0u8; 16];
+            bits[..8].copy_from_slice(&id_seed.to_le_bytes());
+            bits[8..].copy_from_slice(&minted.to_le_bytes());
+            Ok(bits)
+        });
+    repo.save("seed", None).expect("seed save");
     let initial = snapshot(root, &repo);
 
     // Apply a random batch across the surface that exists today.
     let length = 1 + rng.below(12);
     let mut applied = 0u64;
     for i in 0..length {
-        match rng.below(4) {
+        match rng.below(5) {
             0 => {
                 *emitted.entry("undo".into()).or_default() += 1;
                 // A `nothing_to_undo` here is still a legitimate emission.
@@ -164,9 +194,37 @@ fn run_sequence(base: Option<&Path>, rng: &mut Rng, emitted: &mut BTreeMap<Strin
                 let pick = names[(rng.below(names.len() as u64)) as usize].clone();
                 repo.switch_line(&pick).expect("switch");
             }
+            3 => {
+                *emitted.entry("assign".into()).or_default() += 1;
+                // Never writes a new file first: a write not covered by a
+                // start/switch capture would legitimately survive undo-all,
+                // which is why this runner makes none. The whole tree and a
+                // single path are both drawn — the first is what G1.4 draws,
+                // the second leaves a remainder so a partial save is genuinely
+                // partial.
+                let target = if rng.below(2) == 0 {
+                    root.to_path_buf()
+                } else {
+                    root.join("seed.txt")
+                };
+                repo.assign(&[target], None).expect("assign");
+            }
             _ => {
                 *emitted.entry("save".into()).or_default() += 1;
-                repo.save("probe").expect("save");
+                // A partial save when there is a change holding something,
+                // half the time. It counts as a `save` emission because that
+                // is the command: `--change` narrows its scope, it is not a
+                // second verb.
+                let holding = repo
+                    .changes()
+                    .expect("changes")
+                    .into_iter()
+                    .find(|c| !c.assigned.is_empty())
+                    .map(|c| c.id);
+                match holding.filter(|_| rng.below(2) == 0) {
+                    Some(id) => repo.save("probe", Some(&id)).expect("partial save"),
+                    None => repo.save("probe", None).expect("save"),
+                };
             }
         }
         applied += 1;

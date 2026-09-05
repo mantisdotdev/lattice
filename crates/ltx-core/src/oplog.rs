@@ -50,16 +50,66 @@ const LINES_KEY: &str = "state";
 /// the Save itself so the two can never disagree.
 const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 
-/// On-disk format version. Bumped to 2 when lines were added: `Save` and
-/// `StartLine` gained fields, which changes what `Entry::compute_id`
-/// re-serialises, so an older log would report every entry as "altered"
-/// (ADR-16 §9). `Repo::open` refuses an older database with a recovery action
-/// rather than reporting phantom tampering.
-pub const FORMAT_VERSION: u64 = 2;
+/// On-disk format version, and the format new entries are written at.
+///
+/// 2 added lines: `Save` and `StartLine` gained fields, which changes what
+/// `Entry::compute_id` re-serialises, so an older log reported every entry as
+/// "altered" (ADR-16 §9). 3 adds changes and assignment (ADR-17 §9), and with
+/// them the per-entry `format` tag that makes this the LAST break requiring a
+/// repository to be recreated: from here, `compute_id` dispatches on the
+/// format an entry was WRITTEN at, so entries written by an older build keep
+/// hashing the way that build hashed them and the Merkle chain stays
+/// continuous across a format change.
+///
+/// An in-place migration is impossible by construction — rewriting entries to
+/// a new shape changes their ids, which is what the chain exists to detect —
+/// so the tag is the only mechanism that can work, and it can only be
+/// introduced AT a break.
+pub const FORMAT_VERSION: u64 = 3;
+
+/// The oldest format this build can read. Below this the per-entry tag does
+/// not exist, so an entry's original serialisation cannot be reproduced and
+/// `verify_chain` could only report phantom tampering.
+pub const MIN_READABLE_FORMAT: u64 = 3;
+
 const FORMAT_KEY: &str = "format";
 
-/// One line of work: where it points, and the working state held for it while
-/// it is not current.
+/// A change: a logical unit of work that has not been checkpointed yet
+/// (§4.2, noun 2).
+///
+/// Holds a selection over the working tree, not content. The bytes stay on
+/// disk and remain the truth while their line is current (ADR-16 §1); this
+/// records only which of them a user has claimed for this unit of work.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangeRecord {
+    /// Working-tree paths assigned to this change, relative to the root, as
+    /// raw bytes — the same doctrine tree entry names follow, so a path that
+    /// is not valid UTF-8 is assignable like any other.
+    pub assigned: std::collections::BTreeSet<Vec<u8>>,
+}
+
+/// A change that a `save --change` checkpointed, carried in that save's entry.
+///
+/// The whole record travels, not just the id: consuming a change removes it
+/// from the line state, so its assignments then exist nowhere else and the
+/// inverse would have nothing to put back (ADR-17 §7).
+///
+/// `Checkpoint` gains no field for this. Adding one would change `body_id` and
+/// re-address every checkpoint in every repository, and the association is
+/// provenance recorded by an operation rather than content — so it follows
+/// `oplog_seq` exactly: a back-reference resolved at read time from here.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckpointedChange {
+    pub id: String,
+    pub record: ChangeRecord,
+    /// Whether it was the current change. A save consumes the change it
+    /// checkpoints, so a bare `assign` afterwards must not go on adding to
+    /// something already checkpointed — and the inverse must put that back.
+    pub was_current: bool,
+}
+
+/// One line of work: where it points, the working state held for it while it
+/// is not current, and the changes open on it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineRecord {
     /// Checkpoint id this line points at, if it has one.
@@ -74,6 +124,31 @@ pub struct LineRecord {
     /// the bytes on disk are the truth. Every undo inverse is exact and
     /// mechanical only because of this invariant (ADR-16 §1).
     pub working: Option<String>,
+    /// Live, un-checkpointed changes on this line, by id.
+    ///
+    /// Here rather than in a table of their own (ADR-17 §4): a switch already
+    /// mutates the source line's preserved state, the target's, and `current`
+    /// in one write, and an assignment is a selection over exactly those
+    /// working-tree bytes. Sharing the key makes it atomic by construction
+    /// instead of by a second write that has to be kept in step.
+    ///
+    /// Per-line, not repository-global, and that is not a close call: a switch
+    /// replaces the working tree wholesale, so a global change set would name
+    /// paths holding another line's content the instant it happened.
+    ///
+    /// `BTreeMap` so the serialised form and `change list` are canonical
+    /// rather than creation-ordered — `change list` sits in G1.3's equality
+    /// domain, where an unstable order would fail undo-all for a reason that
+    /// has nothing to do with undo.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub changes: std::collections::BTreeMap<String, ChangeRecord>,
+    /// The change a bare `ltx assign` adds to. `None` until the first assign.
+    ///
+    /// A current change exists because G1.4's frozen pool draws `assign .`
+    /// with no change named, ten thousand times; without one, each draw would
+    /// either fail or mint a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_change: Option<String>,
 }
 
 /// Which lines exist and which one is current.
@@ -119,6 +194,12 @@ pub enum Operation {
         /// The line whose tip this save advanced — undo must move that line's
         /// tip back, not whichever line happens to be current later.
         line: String,
+        /// The change this save consumed and the assignment set it took, so
+        /// the inverse restores it exactly. `None` for a save of the whole
+        /// working state, which consumes nothing: assignment is a labelling,
+        /// never a gate (ADR-17 §5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<CheckpointedChange>,
     },
     StartLine {
         name: String,
@@ -129,6 +210,41 @@ pub enum Operation {
         /// record says what happened and the inverse reads it — otherwise undo
         /// would delete a line the FIRST start created.
         created: bool,
+    },
+    /// Route working-tree paths into a change.
+    ///
+    /// Records an intent and touches no byte on disk, and neither does its
+    /// inverse (ADR-17 §2) — which is why every field here is a label rather
+    /// than an address, and why there is no capture to take.
+    ///
+    /// One call appends exactly ONE entry however many paths it moved. G1.3's
+    /// undo budget is `applied * 3 + 8`, so an assign over k paths decomposing
+    /// into k entries would exhaust it (ADR-17 §6).
+    Assign {
+        change: String,
+        /// The line the change lives on. Changes are per-line, so the inverse
+        /// puts the paths back where they were taken from rather than onto
+        /// whichever line happens to be current by then.
+        line: String,
+        /// The paths this call actually moved — not the ones named on the
+        /// command line, which may include paths already in the change or ones
+        /// it refused. The inverse reverses what happened, not what was asked.
+        paths: Vec<Vec<u8>>,
+        /// Whether this call created the change. The same role
+        /// `StartLine::created` plays: without it, `assign c f; assign c g;
+        /// undo` would delete a change the FIRST assign created.
+        created: bool,
+        /// The change that was current before, so the inverse restores it.
+        from_current: Option<String>,
+        /// For the paths that were already in another change, the change they
+        /// came from. Without this, undoing `assign --to c2 f` after `assign
+        /// --to c1 f` would leave `f` unowned rather than owned by c1 — the
+        /// class of bug `StartLine::created` exists to prevent, one level down.
+        ///
+        /// Paths that had no previous owner are absent rather than carried as
+        /// null: `paths` already names them, and one authoritative home per
+        /// fact is what keeps the two lists from ever disagreeing.
+        displaced: Vec<(Vec<u8>, String)>,
     },
     Switch {
         from: String,
@@ -190,6 +306,7 @@ impl Operation {
             Operation::Init => "init",
             Operation::Save { .. } => "save",
             Operation::StartLine { .. } => "start",
+            Operation::Assign { .. } => "assign",
             Operation::Switch { .. } => "switch",
             Operation::Undo { .. } => "undo",
             Operation::Adopt { .. } => "adopt",
@@ -210,13 +327,38 @@ pub struct Entry {
     pub id: String,
     pub at_unix_ms: u64,
     pub operation: Operation,
+    /// The on-disk format this entry was WRITTEN at, which fixes how its id is
+    /// computed for the rest of the entry's life (ADR-17 §9).
+    ///
+    /// Without this, a build that changed an `Operation` variant could not
+    /// re-derive the ids of entries an older build wrote, so every one of them
+    /// would verify as tampered — which is why formats 1 and 2 could only be
+    /// refused outright rather than migrated.
+    pub format: u64,
 }
 
 impl Entry {
     /// Content hash over everything but `id`, so `id` can be recomputed and
     /// checked without a separate canonical form to keep in sync.
-    fn compute_id(seq: u64, prev: &str, at: u64, op: &Operation) -> Result<String> {
-        let payload = serde_json::to_vec(&(seq, prev, at, op))?;
+    ///
+    /// Dispatches on `format`, so an entry written by an older build hashes
+    /// the way that build hashed it. When a future version changes an
+    /// `Operation` variant it adds an arm here and leaves the existing ones
+    /// untouched; existing entries keep verifying.
+    ///
+    /// `format` is itself inside the payload. It has to be: if it were not
+    /// authenticated, editing the tag on a stored entry would change the rule
+    /// used to check that entry, which is a downgrade attack against the chain
+    /// rather than a version field.
+    fn compute_id(seq: u64, prev: &str, at: u64, op: &Operation, format: u64) -> Result<String> {
+        let payload = match format {
+            3 => serde_json::to_vec(&(seq, prev, at, op, format))?,
+            other => {
+                return Err(Error::UnsupportedFormat(format!(
+                    "entry {seq} records on-disk format {other}, which this build cannot hash"
+                )))
+            }
+        };
         Ok(ChunkId::of(&payload).to_hex())
     }
 }
@@ -414,13 +556,16 @@ impl OpLog {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let id = Entry::compute_id(seq, &prev, at, &operation)?;
+            // New entries are always written at the current format; the tag
+            // records that so a future build can still reproduce this hash.
+            let id = Entry::compute_id(seq, &prev, at, &operation, FORMAT_VERSION)?;
             let entry = Entry {
                 seq,
                 prev,
                 id: id.clone(),
                 at_unix_ms: at,
                 operation,
+                format: FORMAT_VERSION,
             };
             state.last_id = Some(id);
             state.pending.push((entry.clone(), lines, format));
@@ -562,6 +707,19 @@ impl OpLog {
         Ok(table.get(checkpoint)?.map(|v| v.value()))
     }
 
+    /// One entry by sequence, or `None` if there is none at that position.
+    ///
+    /// An indexed read, so a caller asking about a single operation does not
+    /// pay for loading the whole log.
+    pub fn entry(&self, seq: u64) -> Result<Option<Entry>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ENTRIES)?;
+        match table.get(seq)? {
+            Some(v) => Ok(Some(serde_json::from_slice(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
     /// The published line state, or `None` for a repository that has none.
     pub fn line_state(&self) -> Result<Option<LineState>> {
         let tx = self.db.begin_read()?;
@@ -588,6 +746,33 @@ impl OpLog {
     /// versions were recorded.
     pub fn format_version(&self) -> Result<Option<u64>> {
         self.get_head(FORMAT_KEY)
+    }
+
+    /// The format recorded in the database at `path`, without building an
+    /// `OpLog` over it.
+    ///
+    /// The gate has to run BEFORE anything deserialises an entry, and building
+    /// an `OpLog` deserialises the newest one to recover the chain head. An
+    /// entry written at a format this build cannot read need not have this
+    /// build's shape — a format-2 entry has no `format` field at all, and a
+    /// format-1 `Save` has no `line` — so that read fails with a serde error
+    /// and the user is told "missing field `format`" and that this is probably
+    /// a bug in Lattice. What they should be told is which formats this build
+    /// reads and to start a fresh repository, which is what the gate says.
+    ///
+    /// Reads through the same accessor as `format_version`, so there is one
+    /// answer to "what format is this" rather than two that can drift.
+    pub fn format_version_at(path: &std::path::Path) -> Result<Option<u64>> {
+        let db = Database::create(path)?;
+        let tx = db.begin_read()?;
+        // A database with no `heads` table has never recorded a format, which
+        // is the unversioned format 1 — not an error.
+        let table = match tx.open_table(HEADS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(table.get(FORMAT_KEY)?.map(|v| v.value()))
     }
 
     /// Publish line state without appending an operation.
@@ -634,8 +819,31 @@ impl OpLog {
                     short(&expected_prev)
                 )));
             }
-            let recomputed =
-                Entry::compute_id(entry.seq, &entry.prev, entry.at_unix_ms, &entry.operation)?;
+            // Hashed by the rule of the format the entry was written at, not
+            // by this build's, so a chain that spans a format change verifies.
+            //
+            // A tag this build cannot hash is REPORTED, not raised. An entry
+            // whose format was edited to an unhashable value is exactly the
+            // damage this function exists to describe, and raising would leave
+            // `ltx verify` unable to produce a report at all — the one thing it
+            // must always do. Same doctrine as `short` above: never fail on the
+            // field you are inspecting.
+            let recomputed = match Entry::compute_id(
+                entry.seq,
+                &entry.prev,
+                entry.at_unix_ms,
+                &entry.operation,
+                entry.format,
+            ) {
+                Ok(id) => id,
+                Err(Error::UnsupportedFormat(why)) => {
+                    return Ok(Some(format!(
+                        "operation {} cannot be authenticated: {why}",
+                        entry.seq
+                    )))
+                }
+                Err(other) => return Err(other),
+            };
             if recomputed != entry.id {
                 return Ok(Some(format!(
                     "operation {} has been altered: its content hashes to {} \
@@ -781,6 +989,7 @@ mod tests {
             message: "first".into(),
             checkpoint: "abc".into(),
             line: "main".into(),
+            change: None,
         })
         .unwrap();
         assert!(log.verify_chain().unwrap().is_none());
@@ -798,6 +1007,7 @@ mod tests {
                     message: "tampered".into(),
                     checkpoint: "abc".into(),
                     line: "main".into(),
+                    change: None,
                 };
                 let bytes = serde_json::to_vec(&entry).unwrap();
                 table.insert(2u64, bytes.as_slice()).unwrap();
@@ -810,6 +1020,43 @@ mod tests {
         let broken = log.verify_chain().unwrap();
         assert!(broken.is_some(), "an altered entry must break the chain");
         assert!(broken.unwrap().contains("altered"));
+    }
+
+    #[test]
+    fn an_entry_whose_format_tag_cannot_be_hashed_is_reported_not_raised() {
+        // `verify` exists to describe damage, so an entry whose format tag has
+        // been edited to a value this build cannot hash has to come back as a
+        // chain break. Raising instead left `ltx verify` unable to produce a
+        // report at all — the one thing it must always do.
+        let (dir, log) = log();
+        log.append(Operation::Init).unwrap();
+        drop(log);
+
+        let db = Database::create(dir.path().join("oplog.redb")).unwrap();
+        {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(ENTRIES).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut entry: Entry = serde_json::from_slice(&raw).unwrap();
+                entry.format = 99;
+                let bytes = serde_json::to_vec(&entry).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        drop(db);
+
+        let log = OpLog::open(&dir.path().join("oplog.redb")).unwrap();
+        let broken = log
+            .verify_chain()
+            .expect("an unhashable tag is damage to report, not an error to raise");
+        assert!(
+            broken
+                .unwrap_or_default()
+                .contains("cannot be authenticated"),
+            "and the report says which operation and why"
+        );
     }
 
     #[test]
@@ -826,8 +1073,21 @@ mod tests {
             message: "m".into(),
             checkpoint: "c".into(),
             line: "main".into(),
+            change: None,
         }
         .is_undoable());
+        assert!(
+            Operation::Assign {
+                change: "c1".into(),
+                line: "main".into(),
+                paths: vec![b"a.txt".to_vec()],
+                created: true,
+                from_current: None,
+                displaced: Vec::new(),
+            }
+            .is_undoable(),
+            "assign is a state-changing command, so §4.3 promises it reverses"
+        );
         assert!(
             !Operation::Undo { undone_seq: 1 }.is_undoable(),
             "undo is monotonic toward the root; reversing it (redo) is a \
@@ -934,6 +1194,57 @@ mod tests {
         assert!(
             broken.is_some(),
             "a tampered entry must be reported, not panicked on"
+        );
+    }
+
+    #[test]
+    fn new_entries_record_the_format_they_were_written_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = OpLog::open(&dir.path().join("oplog.redb")).unwrap();
+        log.append(Operation::Init).unwrap();
+        let entries = log.entries().unwrap();
+        assert_eq!(entries[0].format, FORMAT_VERSION);
+        assert!(
+            log.verify_chain().unwrap().is_none(),
+            "an entry must verify under the format it recorded"
+        );
+    }
+
+    #[test]
+    fn retagging_an_entry_to_another_format_is_refused_not_accepted() {
+        // The tag decides which rule authenticates the entry, so it must not
+        // be editable into a rule that would accept different content — that
+        // is a downgrade attack against the chain, not a version field. It is
+        // inside the hashed payload for exactly this reason, which is also why
+        // it had to be introduced AT a break rather than added later.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oplog.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+            assert!(log.verify_chain().unwrap().is_none());
+        }
+        let db = Database::create(&path).unwrap();
+        {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(ENTRIES).unwrap();
+                let raw = table.get(1u64).unwrap().unwrap().value().to_vec();
+                let mut e: Entry = serde_json::from_slice(&raw).unwrap();
+                e.format = FORMAT_VERSION + 1;
+                let bytes = serde_json::to_vec(&e).unwrap();
+                table.insert(1u64, bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        drop(db);
+
+        let log = OpLog::open(&path).unwrap();
+        // Reported as altered, or refused as unhashable — either is a refusal.
+        // What must NOT happen is a clean pass.
+        assert!(
+            !matches!(log.verify_chain(), Ok(None)),
+            "a re-tagged entry must never verify clean"
         );
     }
 
