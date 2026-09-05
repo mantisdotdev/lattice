@@ -1206,11 +1206,28 @@ impl Repo {
         let mut found: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
         let mut refused = Vec::new();
         for path in given {
-            // A named symlink resolves to what it points at, so `assign link`
-            // assigns the file rather than the link. Walking a DIRECTORY does
-            // not resolve: symlinks found inside are assigned as themselves,
-            // exactly as a tree records them.
-            let resolved = resolve_as_far_as_it_exists(path)?;
+            // Resolve the PARENT and keep the final component as typed. A
+            // symlink is content at its own path — a tree records the link,
+            // never what it points at — so naming one must assign the same
+            // thing walking to it does. Resolving the whole path instead
+            // assigned a DIFFERENT path than the one typed, and refused a link
+            // out of the repository that `assign .` assigned quite happily.
+            //
+            // Intermediate components still resolve, which is what keeps the
+            // containment check honest: `..` and a symlinked directory both
+            // have to be followed before the answer means anything.
+            let resolved = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => {
+                    let parent = if parent.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        parent
+                    };
+                    resolve_as_far_as_it_exists(parent)?.join(name)
+                }
+                // `.`, `..` or a root: no final component to hold back.
+                _ => resolve_as_far_as_it_exists(path)?,
+            };
             if !resolved.starts_with(&root) {
                 refused.push(Refusal::outside(path));
                 continue;
@@ -3437,6 +3454,48 @@ mod tests {
 
         assert_eq!(report.entries_written, 1);
         assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn naming_a_symlink_assigns_the_link_itself_exactly_as_walking_to_it_does() {
+        // A tree records a symlink as a symlink — the target string, never the
+        // bytes it points at — so the assignable thing at that path IS the
+        // link. Resolving a named path all the way through therefore assigned
+        // a DIFFERENT path than the one typed, and refused as "outside the
+        // working state" a link that `assign .` assigned quite happily. The
+        // two routes to one path have to agree.
+        use std::os::unix::fs::symlink;
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        symlink("a.txt", dir.path().join("inside.txt")).unwrap();
+        symlink("../elsewhere.txt", dir.path().join("escape.txt")).unwrap();
+        repo.save("seed", None).unwrap();
+
+        let named = repo
+            .assign(
+                &[dir.path().join("inside.txt"), dir.path().join("escape.txt")],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            named.assigned,
+            vec!["escape.txt".to_string(), "inside.txt".to_string()],
+            "the links themselves, not `a.txt` and not a refusal"
+        );
+        assert!(
+            named.refused.is_empty(),
+            "a link whose TARGET leaves the repository still lives inside it: \
+             {:?}",
+            named.refused
+        );
+
+        // And the walk agrees, which is the whole point.
+        repo.undo().unwrap();
+        let walked = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+        assert!(walked.assigned.contains(&"inside.txt".to_string()));
+        assert!(walked.assigned.contains(&"escape.txt".to_string()));
     }
 
     #[test]
