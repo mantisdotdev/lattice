@@ -31,14 +31,14 @@ file, so the second process fails immediately:
 Group commit never engages across processes, because the processes never get
 far enough to commit. G1.4 draws 8 concurrent workspaces × 10,000 operations
 against a target of **0 failures**; measured on the implemented half of its
-pool, 184 of 200 operations failed on the lock:
+pool, 186 of 200 operations failed on the lock:
 
 ```json
 {
   "workers": 8,
   "ops_attempted": 200,
-  "ops_succeeded": 16,
-  "failures": 184,
+  "ops_succeeded": 14,
+  "failures": 186,
   "linearizability_violations": 0,
   "verify_errors": 0
 }
@@ -47,6 +47,15 @@ pool, 184 of 200 operations failed on the lock:
 That is `bench/results/raw/adr6-concurrency-unlocked.json`, produced by
 `scripts/probe_concurrency.py` — a bounded diagnostic beside G1.4, never a
 substitute for it, and weaker in four stated ways.
+
+**That count is not reproducible, and nothing here rests on its exact value.**
+It is a race: how many processes happen to hold the lock at a moment when no
+other holds it varies from run to run, and an earlier run of the same command
+recorded 16 and 184. What is stable across runs is the shape — the
+overwhelming majority fail, every failure is the same lock error, and no amount
+of retrying by the harness would change it, because nothing is contended for a
+bounded time; the second process simply is not allowed in. The locked arm below
+is the reproducible one.
 
 This was found while designing the `workspace` slice, and it is why that slice
 stopped: eight working trees that cannot be used concurrently would be the

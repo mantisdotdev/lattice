@@ -22,9 +22,13 @@ of which may be read back into the gate:
   * the operation count is a small multiple of the workers, not 10,000 each;
   * no deadlock watchdog beyond the subprocess timeout.
 
-Linearizability is checked the way G1.4 checks it, and for the same reason: if
-A finished before B started, A must precede B in the op-log. That is checkable
-directly from the intervals because the op-log gives the candidate order.
+Linearizability is checked with G1.4's algorithm, line for line, and for the
+same reason: if A finished before B started, A must precede B in the op-log.
+That is checkable directly from the intervals because the op-log gives the
+candidate order. Copied rather than reimplemented — a diagnostic that claims to
+mirror a frozen gate and then differs from it is worse than one that makes no
+claim, and the first version of this file sorted by op-log position where the
+gate sorts by end time.
 
     python3 scripts/probe_concurrency.py --workers 8 --ops 25
 """
@@ -98,15 +102,23 @@ def linearizability_violations(events: list[dict]) -> tuple[list[dict], list[dic
     """
     unsequenced = [e for e in events if e.get("oplog_seq") is None]
     ordered = sorted((e for e in events if e.get("oplog_seq") is not None),
-                     key=lambda e: e["oplog_seq"])
+                     key=lambda e: e["end"])
     violations = []
     for i, a in enumerate(ordered):
         for b in ordered[i + 1:]:
-            if b["end"] < a["start"]:
+            if b["start"] < a["end"]:
+                # Overlapping: any order is permitted for THIS pair, but a
+                # later non-overlapping pair may still violate, so continue
+                # rather than break.
+                continue
+            if b["oplog_seq"] <= a["oplog_seq"]:
                 violations.append({
-                    "earlier_in_log": {k: a[k] for k in ("worker", "op", "oplog_seq")},
-                    "later_in_log": {k: b[k] for k in ("worker", "op", "oplog_seq")},
+                    "earlier": {k: a[k] for k in ("worker", "op", "oplog_seq")},
+                    "later": {k: b[k] for k in ("worker", "op", "oplog_seq")},
+                    "why": "op that finished later has an earlier op-log position",
                 })
+                if len(violations) >= 50:
+                    return violations, unsequenced
     return violations, unsequenced
 
 

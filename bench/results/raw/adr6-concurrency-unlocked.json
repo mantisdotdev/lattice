@@ -3,8 +3,8 @@
   "workers": 8,
   "ops_per_worker": 25,
   "ops_attempted": 200,
-  "ops_succeeded": 16,
-  "failures": 184,
+  "ops_succeeded": 14,
+  "failures": 186,
   "failure_sample": [
     {
       "worker": 0,
@@ -18,17 +18,17 @@
     },
     {
       "worker": 0,
-      "op": "save concurrent edit",
-      "why": "{\"category\":\"io\",\"concept\":\"none\",\"error\":\"Database already open. Cannot acquire lock.\",\"ok\":false,\"recovery\":\"run `ltx verify` to check the repository for dama"
-    },
-    {
-      "worker": 0,
       "op": "assign .",
       "why": "{\"category\":\"io\",\"concept\":\"none\",\"error\":\"Database already open. Cannot acquire lock.\",\"ok\":false,\"recovery\":\"run `ltx verify` to check the repository for dama"
     },
     {
       "worker": 0,
       "op": "assign .",
+      "why": "{\"category\":\"io\",\"concept\":\"none\",\"error\":\"Database already open. Cannot acquire lock.\",\"ok\":false,\"recovery\":\"run `ltx verify` to check the repository for dama"
+    },
+    {
+      "worker": 0,
+      "op": "switch main",
       "why": "{\"category\":\"io\",\"concept\":\"none\",\"error\":\"Database already open. Cannot acquire lock.\",\"ok\":false,\"recovery\":\"run `ltx verify` to check the repository for dama"
     }
   ],
@@ -44,7 +44,7 @@
     "undo": 34,
     "start line": 43
   },
-  "wall_clock_s": 0.795,
-  "ops_per_s": 20.1,
+  "wall_clock_s": 1.093,
+  "ops_per_s": 12.8,
   "seed": 20260905
 }
