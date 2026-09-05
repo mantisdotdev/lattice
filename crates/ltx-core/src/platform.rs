@@ -231,7 +231,15 @@ pub fn lock_exclusive(path: &Path, wait: std::time::Duration) -> Result<fs::File
         .create(true)
         .truncate(false)
         .open(path)?;
-    let deadline = Instant::now() + wait;
+    // `Instant + Duration` PANICS when the result is not representable, and
+    // this is a library function taking a caller's duration. A panic where a
+    // `Result` is already being returned is never the right answer.
+    let deadline = Instant::now().checked_add(wait).ok_or_else(|| {
+        crate::error::Error::Invalid(format!(
+            "a lock wait of {} seconds is longer than this machine can measure",
+            wait.as_secs()
+        ))
+    })?;
     // Backoff doubles to a ceiling rather than spinning: eight contenders
     // polling a held lock is eight cores doing nothing.
     let mut backoff = Duration::from_millis(1);
@@ -275,6 +283,18 @@ pub fn platform_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_wait_too_long_to_measure_is_refused_rather_than_panicking() {
+        // `Instant + Duration` panics when the sum is not representable, and
+        // this function already returns a `Result`. A library that panics on
+        // its own argument gives a caller nothing to handle.
+        let dir = tempfile::tempdir().unwrap();
+        let err = lock_exclusive(&dir.path().join("lock"), std::time::Duration::MAX)
+            .map(|_| ())
+            .expect_err("an unrepresentable deadline is refused");
+        assert_eq!(err.category(), crate::error::Category::Invalid);
+    }
 
     #[test]
     fn a_second_exclusive_lock_waits_and_then_reports_the_repository_busy() {

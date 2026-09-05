@@ -134,6 +134,18 @@ def main() -> int:
         print(json.dumps({"error": "target/release/ltx is not built"}))
         return 1
 
+    # A run of no operations leaves the repository intact and every other
+    # condition trivially satisfied, so it would report success having
+    # demonstrated nothing. A probe that can pass without measuring is worse
+    # than no probe.
+    if args.workers < 1 or args.ops < 1:
+        print(json.dumps({
+            "probe": "concurrency",
+            "error": "--workers and --ops must each be at least 1",
+            "detail": f"got workers={args.workers}, ops={args.ops}; a run of zero "
+                      f"operations cannot demonstrate anything about concurrency"}))
+        return 1
+
     work = Path(tempfile.mkdtemp(prefix="ltx-concurrency-probe-"))
     try:
         # Setup failures are failures. Discarding these return codes let the
@@ -205,7 +217,15 @@ def main() -> int:
         # `unsequenced` especially: an operation that succeeded without
         # reporting its position is not a pass, it is a missing measurement,
         # and excluding it would let an engine pass by omitting a field.
-        healthy = not failures and not violations and not unsequenced and intact
+        # `ops_succeeded` must be positive for the same reason the argument
+        # check above exists: an empty run satisfies every other clause.
+        healthy = (
+            bool(events)
+            and not failures
+            and not violations
+            and not unsequenced
+            and intact
+        )
         return 0 if healthy else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
