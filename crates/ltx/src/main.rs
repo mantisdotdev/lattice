@@ -111,12 +111,26 @@ enum Command {
     /// Work with changes.
     #[command(subcommand)]
     Change(ChangeCmd),
+    /// Work with workspaces.
+    #[command(subcommand)]
+    Workspace(WorkspaceCmd),
     /// Work with lines.
     #[command(subcommand)]
     Line(LineCmd),
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
     Internals(Internals),
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// Create another working tree over this repository.
+    New {
+        /// Where to put it. A new or empty directory.
+        path: PathBuf,
+    },
+    /// Show every working tree over this repository.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -522,6 +536,57 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Workspace(WorkspaceCmd::New { path }) => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.new_workspace(path)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "workspace": out.id, "root": out.root,
+                        "entries": out.entries_written,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    format!(
+                        "new workspace at {} — {} entries",
+                        out.root, out.entries_written
+                    )
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Workspace(WorkspaceCmd::List) => {
+            let repo = Repo::discover(&cwd)?;
+            let spaces = repo.workspaces()?;
+            emit(
+                cli,
+                // No timestamp and no counter, so this document is invariant
+                // under apply-a-batch-then-undo-all, as `line list` and
+                // `change list` are.
+                || serde_json::json!({ "ok": true, "version": 1, "workspaces": spaces }),
+                || {
+                    if spaces.is_empty() {
+                        return "no workspaces".to_string();
+                    }
+                    let mut out = String::new();
+                    for w in &spaces {
+                        out.push_str(&format!(
+                            "{}  {}{}\n",
+                            w.short,
+                            w.root,
+                            if w.present { "" } else { "  (missing)" }
+                        ));
+                    }
+                    out.trim_end().to_string()
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Change(ChangeCmd::List) => {
             let repo = Repo::discover(&cwd)?;
             let changes = repo.changes()?;
@@ -610,6 +675,12 @@ fn run(cli: &Cli) -> Result<u8> {
                     // nothing (ADR-17 §6).
                     { "name": "assign", "state_changing": true, "undoable": true, "sample_args": ["seed.txt"] },
                     { "name": "change list", "state_changing": false, "undoable": false, "sample_args": [] },
+                    // Undoable:false is a decision, not an omission — ADR-7 §4
+                    // makes undo repository-scoped, so undoing this could
+                    // remove the workspace another person is working in.
+                    // sample_args is absent because the path must not exist
+                    // yet, and a fixed one would fail on its second draw.
+                    { "name": "workspace list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "line list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },

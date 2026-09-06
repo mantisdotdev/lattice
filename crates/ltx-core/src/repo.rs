@@ -240,11 +240,15 @@ impl Repo {
         loop {
             let marker = Self::repo_dir(cursor);
             if marker.is_dir() {
+                // A pointer, or the repository itself. Distinguished by
+                // contents rather than by kind: see the marker doc below for
+                // why this is not a `.lattice` FILE.
+                let pointer = marker.join(MARKER_FILE);
+                if pointer.is_file() {
+                    let repository = read_workspace_marker(&pointer)?;
+                    return Self::open_workspace(cursor, &repository);
+                }
                 return Self::open(cursor);
-            }
-            if marker.is_file() {
-                let repository = read_workspace_marker(&marker)?;
-                return Self::open_workspace(cursor, &repository);
             }
             match cursor.parent() {
                 Some(p) => cursor = p,
@@ -939,7 +943,8 @@ impl Repo {
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
-            | Operation::Thin { .. } => false,
+            | Operation::Thin { .. }
+            | Operation::Workspace { .. } => false,
         })
     }
 
@@ -1067,7 +1072,8 @@ impl Repo {
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
-            | Operation::Thin { .. } => {
+            | Operation::Thin { .. }
+            | Operation::Workspace { .. } => {
                 return Err(Error::Invalid(format!(
                     "operation {} ({}) has no inverse",
                     entry.seq,
@@ -1098,6 +1104,107 @@ impl Repo {
         }
         self.sync_head_pointer(&lines)?;
         Ok(outcome)
+    }
+
+    // --------------------------------------------------------- workspaces
+
+    /// Create a working tree over this repository at `at`.
+    ///
+    /// The tip is materialised there and a marker written afterwards, in that
+    /// order (ADR-7 §2): a crash between them leaves a directory of files that
+    /// is not yet a workspace, which is inert. The reverse order would leave a
+    /// workspace whose content is incomplete — a workspace that lies.
+    pub fn new_workspace(&mut self, at: &Path) -> Result<WorkspaceOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        // Materialising over a directory that already holds something would
+        // overwrite work this command was never asked to touch. `checkout`
+        // deliberately overwrites what it finds, which is right for a
+        // destination the caller named and wrong for one it is adopting.
+        if let Ok(mut entries) = fs::read_dir(at) {
+            if entries.next().is_some() {
+                return Err(Error::Invalid(format!(
+                    "{} is not empty; a workspace is created in a new or empty \
+                     directory",
+                    at.display()
+                )));
+            }
+        }
+
+        // Content first. A repository with nothing saved yet has no tree to
+        // write, which is an empty workspace rather than an error.
+        let entries_written = match self.head_checkpoint()? {
+            Some(_) => self.checkout_into(None, at)?.entries_written,
+            None => {
+                fs::create_dir_all(at)?;
+                0
+            }
+        };
+        platform::sync_dir(at)?;
+
+        let id = change::mint((self.id_bits)()?);
+        let root = fs::canonicalize(at)?;
+        // Written after the content and its sync, so the marker's presence
+        // means the content is there.
+        let marker_dir = at.join(REPO_DIR);
+        fs::create_dir_all(&marker_dir)?;
+        fs::write(
+            marker_dir.join(MARKER_FILE),
+            format!("{MARKER_KEY}{}\n", self.repository.display()),
+        )?;
+        platform::sync_dir(&marker_dir)?;
+        platform::sync_dir(at)?;
+
+        let mut lines = self.line_state()?;
+        lines.workspaces.insert(
+            id.clone(),
+            crate::oplog::WorkspaceRecord {
+                root: platform::bytes_from_os_str(root.as_os_str()),
+            },
+        );
+        let entry = self.oplog.commit(
+            Operation::Workspace {
+                id: id.clone(),
+                root: platform::bytes_from_os_str(root.as_os_str()),
+            },
+            Some(lines),
+        )?;
+
+        Ok(WorkspaceOutcome {
+            id,
+            root: root.display().to_string(),
+            entries_written,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Every working tree registered over this repository.
+    ///
+    /// A workspace whose directory is gone is reported as missing rather than
+    /// hidden: removing a directory does not remove its record, and pruning is
+    /// a verb rather than a side effect of noticing (ADR-7, consequences).
+    pub fn workspaces(&self) -> Result<Vec<WorkspaceView>> {
+        let lines = self.line_state()?;
+        let ids: Vec<&str> = lines.workspaces.keys().map(String::as_str).collect();
+        Ok(lines
+            .workspaces
+            .iter()
+            .map(|(id, record)| {
+                let root = platform::os_string_from_bytes(&record.root);
+                let present = root
+                    .as_ref()
+                    .map(|r| Path::new(r).is_dir())
+                    .unwrap_or(false);
+                WorkspaceView {
+                    short: change::abbreviate(id, &ids),
+                    id: id.clone(),
+                    root: root
+                        .map(|r| Path::new(&r).display().to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&record.root).into_owned()),
+                    present,
+                }
+            })
+            .collect())
     }
 
     // ------------------------------------------------------------ changes
@@ -2380,6 +2487,29 @@ pub struct SaveOutcome {
     pub rescued_working_state: Option<String>,
 }
 
+/// What `workspace new` did.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceOutcome {
+    pub id: String,
+    pub root: String,
+    /// Entries materialised into it. Zero for a repository with nothing saved
+    /// yet, which is an empty workspace rather than a failure.
+    pub entries_written: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+/// One workspace, as `workspace list` reports it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceView {
+    pub id: String,
+    pub short: String,
+    pub root: String,
+    /// Whether its directory is still there. A record outlives the directory,
+    /// and saying so is better than quietly listing somewhere that is gone.
+    pub present: bool,
+}
+
 /// What `assign` did.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssignOutcome {
@@ -2461,12 +2591,24 @@ pub struct ChangeView {
     pub current: bool,
 }
 
+/// The file inside a workspace's `.lattice` naming the repository it belongs to.
+///
+/// A workspace's marker is a FILE INSIDE a `.lattice` directory, never a
+/// `.lattice` file. Git uses the file shape and it would be the obvious choice
+/// here, but G1.2 compares the source and destination path sets byte for byte
+/// after a checkout and reports anything extra — and its `collect_entries`
+/// prunes `.lattice` from `dirnames` only, so a `.lattice` file lands in
+/// `filenames` and is never filtered. The file shape turns that gate from PASS
+/// to FAIL; the directory shape is pruned exactly as a repository's is. The
+/// harness is frozen, so this adapts (ADR-7 §1).
+const MARKER_FILE: &str = "repository";
+
 /// The first line of a workspace marker, naming the repository it belongs to.
 ///
 /// One `key: value` line rather than a bare path, so a file that is not a
-/// marker is REFUSED rather than read as a path: `.lattice` is a name a user
-/// might create for their own reasons, and treating any file of that name as a
-/// pointer would send commands at whatever it happened to contain.
+/// marker is REFUSED rather than read as a path: treating any file found at
+/// that place as a pointer would send commands at whatever it happened to
+/// contain.
 const MARKER_KEY: &str = "repository: ";
 
 fn read_workspace_marker(marker: &Path) -> Result<PathBuf> {
@@ -3684,6 +3826,138 @@ mod tests {
     }
 
     #[test]
+    fn a_new_workspace_holds_the_tip_and_addresses_the_repository_that_made_it() {
+        // G1.2 uses `workspace new` as its CHECKOUT mechanism and then verifies
+        // the adversarial corpus byte for byte at that path. It passes today
+        // only because the command fails and it falls back to `checkout
+        // --into`; the moment this succeeds, that gate measures it instead. A
+        // workspace that does not materialise the tip turns a passing HARD gate
+        // red rather than merely failing a new one (ADR-7 §2).
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"checkpointed").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/b.txt"), b"deeper").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+
+        let out = repo.new_workspace(&at).unwrap();
+
+        assert_eq!(fs::read(at.join("a.txt")).unwrap(), b"checkpointed");
+        assert_eq!(fs::read(at.join("sub/b.txt")).unwrap(), b"deeper");
+        assert!(out.entries_written > 0);
+
+        // And it is reachable as a workspace, not merely as a directory. The
+        // creating handle is dropped first: it holds the repository lock, and
+        // ADR-6 made that lock WAIT rather than fail, so discovering from
+        // inside this process while it is held blocks for the full timeout.
+        // That is the footgun the ADR records, and one process holding two
+        // handles is not something a command ever does.
+        drop(repo);
+        let from_there = Repo::discover(&at).expect("the marker names the repository");
+        assert_eq!(
+            from_there.head_checkpoint().unwrap().map(|c| c.message),
+            Some("seed".to_string())
+        );
+    }
+
+    #[test]
+    fn a_workspace_marker_is_a_file_inside_a_lattice_directory_never_a_lattice_file() {
+        // Not cosmetic. G1.2 compares the source and destination path sets
+        // byte for byte after a checkout and reports anything extra as
+        // "appeared after checkout, absent in source" — and its
+        // `collect_entries` prunes `.lattice` from `dirnames` only, so a
+        // `.lattice` FILE lands in `filenames` and is never filtered. The file
+        // shape turns that gate from PASS to FAIL. Verified against the frozen
+        // harness's own code; this test is what keeps it from coming back.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+
+        repo.new_workspace(&at).unwrap();
+
+        assert!(
+            at.join(".lattice").is_dir(),
+            "a workspace's marker must be pruned by a walk that prunes \
+             `.lattice` directories, which means it has to BE one"
+        );
+        assert!(at.join(".lattice/repository").is_file());
+    }
+
+    #[test]
+    fn a_workspace_is_refused_over_a_directory_that_already_holds_something() {
+        // `checkout` overwrites what it finds, which is right for a destination
+        // the caller named and wrong for one being adopted as a workspace.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("occupied");
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join("theirs.txt"), b"not ours to overwrite").unwrap();
+
+        let err = repo.new_workspace(&at).map(|_| ()).unwrap_err();
+
+        assert!(!err.recovery().is_empty());
+        assert_eq!(
+            fs::read(at.join("theirs.txt")).unwrap(),
+            b"not ours to overwrite",
+            "and it refused before writing anything"
+        );
+    }
+
+    #[test]
+    fn creating_a_workspace_is_recorded_but_cannot_be_undone() {
+        // ADR-7 §4 makes undo repository-scoped, so an undo run anywhere
+        // reverses the log's last eligible entry whichever workspace appended
+        // it. Were this undoable, that could be the entry that created the
+        // workspace someone else is working in right now.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        // A SECOND save, so the entry undo should reach is above the root
+        // floor. Without it the first save is permanently ineligible and the
+        // test could not tell "the workspace was skipped" from "nothing was
+        // eligible at all".
+        fs::write(dir.path().join("a.txt"), b"more").unwrap();
+        let second = repo.save("more", None).unwrap().checkpoint;
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+
+        let undone = repo.undo().unwrap();
+
+        assert_eq!(
+            undone.undone_checkpoint.as_deref(),
+            Some(second.id.as_str()),
+            "undo reaches past the workspace to the save before it"
+        );
+        assert_eq!(
+            repo.workspaces().unwrap().len(),
+            1,
+            "and the workspace stands"
+        );
+        assert!(at.join(".lattice/repository").is_file(), "marker and all");
+    }
+
+    #[test]
+    fn a_workspace_whose_directory_is_gone_is_listed_as_missing_not_hidden() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        assert!(repo.workspaces().unwrap()[0].present);
+
+        drop(holder);
+
+        let listed = repo.workspaces().unwrap();
+        assert_eq!(listed.len(), 1, "the record outlives the directory");
+        assert!(
+            !listed[0].present,
+            "and says so, rather than quietly listing somewhere that is gone"
+        );
+    }
+
+    #[test]
     fn a_marker_file_points_commands_at_the_repository_it_names() {
         // `.lattice` as a directory is a repository; as a FILE it is a
         // workspace naming one (ADR-7 §1). Written by hand here because
@@ -3696,8 +3970,9 @@ mod tests {
             repo.save("seed", None).unwrap();
         }
         let space = tempfile::tempdir().unwrap();
+        fs::create_dir_all(space.path().join(".lattice")).unwrap();
         fs::write(
-            space.path().join(".lattice"),
+            space.path().join(".lattice/repository"),
             format!(
                 "repository: {}\n",
                 repo_dir.path().join(".lattice").display()
@@ -3725,7 +4000,8 @@ mod tests {
         // Reading any file of that name as a path would send commands at
         // whatever it happened to contain.
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(".lattice"), b"notes to self\n").unwrap();
+        fs::create_dir_all(dir.path().join(".lattice")).unwrap();
+        fs::write(dir.path().join(".lattice/repository"), b"notes to self\n").unwrap();
 
         let err = Repo::discover(dir.path()).map(|_| ()).unwrap_err();
 

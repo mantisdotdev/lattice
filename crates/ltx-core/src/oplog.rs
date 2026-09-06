@@ -275,6 +275,25 @@ pub enum Operation {
         /// fact is what keeps the two lists from ever disagreeing.
         displaced: Vec<(Vec<u8>, String)>,
     },
+    /// Register a working tree over this repository.
+    ///
+    /// NOT undoable, and that is a decision rather than an oversight. ADR-7 §4
+    /// makes undo repository-scoped, so `ltx undo` run anywhere reverses the
+    /// log's last eligible entry whichever workspace appended it — and that
+    /// could be the entry that created the workspace somebody else is working
+    /// in at this moment. Undo exists to take back what you did, not to remove
+    /// the ground another person is standing on.
+    ///
+    /// Nothing is stranded by that. The files it materialised live outside the
+    /// repository entirely, so unlike an undone `start` there is no working
+    /// state for the ephemeral tier to preserve — the directory simply stays
+    /// where it is, with or without its marker.
+    Workspace {
+        id: String,
+        /// The working tree, as raw bytes: a path need not be valid UTF-8, and
+        /// a workspace this engine could not name is one it could not find.
+        root: Vec<u8>,
+    },
     Switch {
         from: String,
         to: String,
@@ -327,6 +346,7 @@ impl Operation {
                 | Operation::Adopt { .. }
                 | Operation::Redact { .. }
                 | Operation::Thin { .. }
+                | Operation::Workspace { .. }
         )
     }
 
@@ -336,6 +356,7 @@ impl Operation {
             Operation::Save { .. } => "save",
             Operation::StartLine { .. } => "start",
             Operation::Assign { .. } => "assign",
+            Operation::Workspace { .. } => "workspace",
             Operation::Switch { .. } => "switch",
             Operation::Undo { .. } => "undo",
             Operation::Adopt { .. } => "adopt",

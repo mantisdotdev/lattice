@@ -36,16 +36,30 @@ repository. It only has to answer what a workspace *is*.
 
 ### 1. A workspace is a directory that points at a repository
 
-`.lattice` as a **directory** is a repository. `.lattice` as a **file** is a
-workspace: it holds the path of the repository whose `.lattice` directory has
-the content. `Repo::discover` already walks upward looking for that one name, so
-it learns one new thing — that the name may be a file — rather than a second
-search.
+`.lattice` is always a **directory**. A repository's holds packs, the op-log and
+HEAD; a workspace's holds one file, `repository`, naming the repository whose
+directory has the content. `Repo::discover` already walks upward looking for
+that one name, so it learns one new thing — that the directory may be a pointer
+rather than the thing itself — rather than a second search.
 
-Git reached the same shape (`.git` as a file containing `gitdir:`) and it is
-right for the same reason: the alternative is a second marker name, which every
-tool, every ignore file and every "am I in a repository" check would have to
-learn separately.
+> **Corrected before shipping.** This section first said `.lattice` as a *file*
+> means workspace, following Git's `.git`-file shape. **That would have turned
+> G1.2 from PASS to FAIL.** G1.2 compares the source and destination path sets
+> as raw bytes and reports anything extra as `appeared after checkout, absent in
+> source`; its `collect_entries` prunes `.lattice` from `dirnames` only, so a
+> `.lattice` *file* lands in `filenames` and is never filtered. Verified by
+> calling the frozen harness's own `collect_entries` over both shapes: the file
+> form yields `only_dst = [b'.lattice']`, the directory form yields nothing.
+>
+> The harness is frozen, so the product adapts. This is the constraint the
+> Context section named as the sharpest in the document, arriving exactly where
+> it said it would — and it is why `workspace new` had to be measured against
+> G1.2's own code before being believed.
+
+A second marker *name* was the other option and loses for the reason Git's
+choice was right: every tool, every ignore file and every "am I in a repository"
+check would have to learn it separately. Keeping one name and distinguishing by
+contents costs a directory entry and nothing else.
 
 The repository's own root is a workspace too, not a special case. One code path
 covers both, and the eight-workspace and zero-workspace repositories differ only
