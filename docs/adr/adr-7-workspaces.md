@@ -147,7 +147,21 @@ invariant under apply-batch-then-undo-all.
   written at, so existing entries keep hashing the way they were hashed. The
   line state is a published document rather than a hashed entry, so it is
   rewritten in place on open. **This is the first migration, and it is the test
-  of whether that mechanism actually works.**
+  of whether that mechanism actually works.** It works.
+
+  **The break belongs to §3 alone, not to the slice.** Registering workspaces
+  was purely additive — a published document is not hashed content, so a
+  document written before the field existed reads back with an empty map and no
+  version needed to move. Only *removing* `current` and `working` is what an
+  older build must be kept away from. Sequencing it that way put the novel,
+  destructive step last and smallest, instead of gating everything behind it.
+
+  **The migration keeps what it replaces**, and the version moves last. Every
+  earlier break refused to open; this one rewrites, and a rewrite that goes
+  wrong is unrecoverable in a way a refusal is not. The pre-migration document
+  is written to its own key before anything is touched, and an interruption
+  leaves a repository still readable as format 3 that simply migrates again.
+  One key buys the difference between "restore it" and "it is gone".
 - **`line list` becomes workspace-relative.** It reports the current line of the
   workspace the command ran in. Two workspaces legitimately disagree about which
   line is current, and that is the feature.
