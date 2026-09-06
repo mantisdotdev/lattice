@@ -618,6 +618,9 @@ fn run(cli: &Cli) -> Result<u8> {
         Command::Line(LineCmd::List) => {
             let repo = Repo::discover(&cwd)?;
             let state = repo.lines()?;
+            // Workspace-relative: two workspaces legitimately disagree about
+            // which line is current, and that is the feature (ADR-7).
+            let current = repo.current_line()?;
             // Deliberately excludes preserved working state (the ephemeral tier
             // the undo equality domain omits) and any timestamp or count, so
             // this document is invariant under undo-all (ADR-16 §5).
@@ -631,13 +634,13 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     serde_json::json!({
                         "ok": true, "version": 1,
-                        "current": state.current, "lines": rows,
+                        "current": current, "lines": rows,
                     })
                 },
                 || {
                     let mut out = String::new();
                     for name in state.lines.keys() {
-                        let mark = if *name == state.current { "*" } else { " " };
+                        let mark = if *name == current { "*" } else { " " };
                         out.push_str(&format!("{mark} {name}\n"));
                     }
                     out.trim_end().to_string()

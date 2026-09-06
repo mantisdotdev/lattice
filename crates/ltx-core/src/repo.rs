@@ -111,6 +111,12 @@ pub struct Repo {
     store: Store,
     oplog: OpLog,
     id_bits: OpaqueIdBits,
+    /// Which workspace this handle addresses, by opaque id.
+    ///
+    /// Resolved once at open time from the working tree's path. Every question
+    /// about "the current line" or "the preserved working state" is really a
+    /// question about a workspace, and this is which one (ADR-7 §3).
+    workspace: String,
     /// Exclusive access to this repository, held for as long as it is open.
     ///
     /// redb takes a NON-BLOCKING exclusive lock on its own file, so a second
@@ -211,7 +217,17 @@ impl Repo {
         // entry would be an eligible undo target and undo-all would delete
         // `main` (ADR-16 §2). `Init` is not undoable, so `main` sits below the
         // undo floor.
-        oplog.commit_initial(Operation::Init, LineState::initial(), FORMAT_VERSION)?;
+        let workspace = change::mint(os_id_bits()?);
+        let root_bytes = platform::bytes_from_os_str(
+            fs::canonicalize(root)
+                .unwrap_or_else(|_| root.to_path_buf())
+                .as_os_str(),
+        );
+        oplog.commit_initial(
+            Operation::Init,
+            LineState::initial(&workspace, root_bytes),
+            FORMAT_VERSION,
+        )?;
         // redb's create syncs `.lattice` itself, but the entry FOR `.lattice`
         // lives in `root` and is only committed once `root` is fsynced —
         // otherwise a crash can lose the whole repository directory after init
@@ -223,6 +239,7 @@ impl Repo {
             store,
             oplog,
             id_bits: Box::new(os_id_bits),
+            workspace,
             _lock: lock,
         })
     }
@@ -313,12 +330,28 @@ impl Repo {
             }
         }
         let oplog = OpLog::open(&meta)?;
+        migrate_line_state_to_v4(&oplog, root)?;
+        // Which workspace is this? Matched by canonical path, because that is
+        // the only thing a command run in a directory knows about itself.
+        let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let here = platform::bytes_from_os_str(here.as_os_str());
+        let workspace = oplog
+            .line_state()?
+            .and_then(|state| {
+                state
+                    .workspaces
+                    .iter()
+                    .find(|(_, record)| record.root == here)
+                    .map(|(id, _)| id.clone())
+            })
+            .unwrap_or_default();
         Ok(Repo {
             root: root.to_path_buf(),
             repository: dir,
             store,
             oplog,
             id_bits: Box::new(os_id_bits),
+            workspace,
             _lock: lock,
         })
     }
@@ -355,7 +388,7 @@ impl Repo {
     pub fn save(&mut self, message: &str, change: Option<&str>) -> Result<SaveOutcome> {
         let rescued = self.complete_pending_switch()?;
         let mut lines = self.line_state()?;
-        let current = lines.current.clone();
+        let current = self.line_of(&lines);
 
         // Settle the scope before a byte is written. A `--change` that names
         // no open change, or one holding nothing, must leave the repository
@@ -520,7 +553,7 @@ impl Repo {
         if let Some(state) = self.oplog.line_state()? {
             return Ok(state);
         }
-        let mut state = LineState::initial();
+        let mut state = LineState::initial(&self.workspace, Vec::new());
         if let Some(rec) = state.lines.get_mut(DEFAULT_LINE) {
             rec.tip = self.legacy_head_id()?;
         }
@@ -553,7 +586,8 @@ impl Repo {
     /// The checkpoint the CURRENT line points at.
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
         let state = self.line_state()?;
-        let Some(tip) = state.lines.get(&state.current).and_then(|r| r.tip.clone()) else {
+        let current = self.line_of(&state);
+        let Some(tip) = state.lines.get(&current).and_then(|r| r.tip.clone()) else {
             return Ok(None);
         };
         self.checkpoint(&tip)
@@ -1011,19 +1045,19 @@ impl Repo {
                     lines.lines.remove(name);
                     outcome.preserved_working_state = Some(captured);
                 } else {
-                    lines.lines.entry(name.clone()).or_default().working = Some(captured);
+                    self.set_preserved(&mut lines, name, Some(captured));
                 }
-                let restored = lines.lines.entry(from.clone()).or_default().working.clone();
-                lines.current = from.clone();
+                let restored = self.preserved(&lines, from);
+                self.set_current_line(&mut lines, from);
                 materialise = Some(restored);
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
             Operation::Switch { from, to } => {
                 if from != to {
                     let captured = self.capture_working_tree()?;
-                    lines.lines.entry(to.clone()).or_default().working = Some(captured);
-                    let restored = lines.lines.entry(from.clone()).or_default().working.clone();
-                    lines.current = from.clone();
+                    self.set_preserved(&mut lines, to, Some(captured));
+                    let restored = self.preserved(&lines, from);
+                    self.set_current_line(&mut lines, from);
                     materialise = Some(restored);
                 }
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
@@ -1096,10 +1130,8 @@ impl Repo {
             // materialisation cannot drop the only reference to that work. It
             // then reads as a pending switch, which the next command completes.
             self.materialise_working_tree(target.as_deref())?;
-            let current = lines.current.clone();
-            if let Some(rec) = lines.lines.get_mut(&current) {
-                rec.working = None;
-            }
+            let current = self.line_of(&lines);
+            self.set_preserved(&mut lines, &current, None);
             self.oplog.publish_lines(&lines)?;
         }
         self.sync_head_pointer(&lines)?;
@@ -1107,6 +1139,57 @@ impl Repo {
     }
 
     // --------------------------------------------------------- workspaces
+
+    /// The line this workspace is on.
+    ///
+    /// Falls back to the default line for a workspace with no record, which a
+    /// repository cannot normally reach: `init` registers its own root and
+    /// `workspace new` registers every other. It is a floor rather than a
+    /// silent default — the alternative is an engine that cannot answer "which
+    /// line am I on" at all.
+    fn line_of(&self, lines: &LineState) -> String {
+        lines
+            .workspaces
+            .get(&self.workspace)
+            .map(|w| w.current.clone())
+            .unwrap_or_else(|| DEFAULT_LINE.to_string())
+    }
+
+    /// The line this workspace is on.
+    ///
+    /// Workspace-relative, and two workspaces legitimately disagree — that is
+    /// the feature, not a race (ADR-7, consequences).
+    pub fn current_line(&self) -> Result<String> {
+        Ok(self.line_of(&self.line_state()?))
+    }
+
+    fn set_current_line(&self, lines: &mut LineState, line: &str) {
+        if let Some(space) = lines.workspaces.get_mut(&self.workspace) {
+            space.current = line.to_string();
+        }
+    }
+
+    /// The working state this workspace preserved for `line`, if any.
+    fn preserved(&self, lines: &LineState, line: &str) -> Option<String> {
+        lines
+            .workspaces
+            .get(&self.workspace)
+            .and_then(|w| w.preserved.get(line).cloned())
+    }
+
+    fn set_preserved(&self, lines: &mut LineState, line: &str, tree: Option<String>) {
+        let Some(space) = lines.workspaces.get_mut(&self.workspace) else {
+            return;
+        };
+        match tree {
+            Some(tree) => {
+                space.preserved.insert(line.to_string(), tree);
+            }
+            None => {
+                space.preserved.remove(line);
+            }
+        }
+    }
 
     /// Create a working tree over this repository at `at`.
     ///
@@ -1159,6 +1242,10 @@ impl Repo {
             id.clone(),
             crate::oplog::WorkspaceRecord {
                 root: platform::bytes_from_os_str(root.as_os_str()),
+                // A new workspace starts on the line that made it, holding the
+                // tip that was just materialised into it.
+                current: self.line_of(&lines),
+                preserved: BTreeMap::new(),
             },
         );
         let entry = self.oplog.commit(
@@ -1238,7 +1325,7 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let (candidates, mut refused) = self.locate(paths)?;
         let mut lines = self.line_state()?;
-        let line = lines.current.clone();
+        let line = self.line_of(&lines);
         let record = lines.lines.entry(line.clone()).or_default();
         let from_current = record.current_change.clone();
 
@@ -1350,7 +1437,8 @@ impl Repo {
     /// G1.3 compares it for.
     pub fn changes(&self) -> Result<Vec<ChangeView>> {
         let lines = self.line_state()?;
-        let Some(record) = lines.lines.get(&lines.current) else {
+        let current = self.line_of(&lines);
+        let Some(record) = lines.lines.get(&current) else {
             return Ok(Vec::new());
         };
         let ids: Vec<&str> = record.changes.keys().map(String::as_str).collect();
@@ -1492,7 +1580,7 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let mut lines = self.line_state()?;
-        let from = lines.current.clone();
+        let from = self.line_of(&lines);
         if lines.lines.contains_key(&name) {
             let mut out = self.switch_to(lines, &from, &name, true)?;
             out.rescued_working_state = rescued;
@@ -1514,19 +1602,16 @@ impl Repo {
             .get(&from)
             .map(|r| (r.changes.clone(), r.current_change.clone()))
             .unwrap_or_default();
-        if let Some(rec) = lines.lines.get_mut(&from) {
-            rec.working = Some(captured);
-        }
+        self.set_preserved(&mut lines, &from, Some(captured));
         lines.lines.insert(
             name.clone(),
             LineRecord {
                 tip: tip.clone(),
-                working: None,
                 changes,
                 current_change,
             },
         );
-        lines.current = name.clone();
+        self.set_current_line(&mut lines, &name);
         let entry = self.oplog.commit(
             Operation::StartLine {
                 name: name.clone(),
@@ -1552,7 +1637,7 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let lines = self.line_state()?;
-        let from = lines.current.clone();
+        let from = self.line_of(&lines);
         if !lines.lines.contains_key(&name) {
             return Err(Error::NoSuchLine(format!("there is no line named {name}")));
         }
@@ -1600,18 +1685,16 @@ impl Repo {
         // Capture first: no materialisation ever happens without the current
         // working tree already durable in the store.
         let captured = self.capture_working_tree()?;
-        if let Some(rec) = lines.lines.get_mut(from) {
-            rec.working = Some(captured);
-        }
+        self.set_preserved(&mut lines, from, Some(captured));
         let target = lines.lines.entry(to.to_string()).or_default();
         // The preserved address is deliberately LEFT IN PLACE across the
         // publish. It is the marker that materialisation is still pending: if
         // we crash between publishing and writing the files, the next command
         // sees the current line holding preserved state and finishes the job.
         // Clearing it first would drop the only reference to that work.
-        let restored = target.working.clone();
         let tip = target.tip.clone();
-        lines.current = to.to_string();
+        let restored = self.preserved(&lines, to);
+        self.set_current_line(&mut lines, to);
 
         // Publish BEFORE materialising: a crash then leaves us unambiguously on
         // the target with a re-runnable idempotent materialisation, rather than
@@ -1634,9 +1717,7 @@ impl Repo {
         // Materialisation done: the bytes on disk are now the truth for this
         // line, so the preserved copy is consumed and the invariant that the
         // current line holds no preserved state is restored.
-        if let Some(rec) = lines.lines.get_mut(to) {
-            rec.working = None;
-        }
+        self.set_preserved(&mut lines, to, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
         Ok(LineOutcome {
@@ -1663,8 +1744,8 @@ impl Repo {
     /// switch.
     fn complete_pending_switch(&mut self) -> Result<Option<String>> {
         let lines = self.line_state()?;
-        let current = lines.current.clone();
-        let pending = lines.lines.get(&current).and_then(|r| r.working.clone());
+        let current = self.line_of(&lines);
+        let pending = self.preserved(&lines, &current);
         let Some(pending) = pending else {
             return Ok(None);
         };
@@ -1680,16 +1761,12 @@ impl Repo {
         if rescued == pending {
             // Nothing was written since the interruption; just consume the
             // marker without touching a single file.
-            if let Some(rec) = lines.lines.get_mut(&current) {
-                rec.working = None;
-            }
+            self.set_preserved(&mut lines, &current, None);
             self.oplog.publish_lines(&lines)?;
             return Ok(None);
         }
         self.materialise_working_tree(Some(&pending))?;
-        if let Some(rec) = lines.lines.get_mut(&current) {
-            rec.working = None;
-        }
+        self.set_preserved(&mut lines, &current, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
         // Durable, content-addressed, and named to the caller — the same
@@ -1797,7 +1874,11 @@ impl Repo {
 
     /// Keep the human-readable HEAD cache in step with the published state.
     fn sync_head_pointer(&self, lines: &LineState) -> Result<()> {
-        match lines.lines.get(&lines.current).and_then(|r| r.tip.clone()) {
+        match lines
+            .lines
+            .get(&self.line_of(lines))
+            .and_then(|r| r.tip.clone())
+        {
             Some(tip) => self.write_head_pointer(&tip),
             None => Ok(()),
         }
@@ -2285,24 +2366,34 @@ impl Repo {
                     ));
                 }
             }
-            if let Some(working) = &rec.working {
+        }
+        // Preserved working state is per workspace now, so it is checked per
+        // workspace — and so is the line each one claims to be on. A workspace
+        // pointing at a line that does not exist is exactly the damage the
+        // single-`current` version of this check looked for, once per place
+        // that can now be wrong.
+        for (id, space) in &state.workspaces {
+            let short = crate::short_id(id);
+            if !state.lines.contains_key(&space.current) {
+                report.structure_verified = false;
+                report.errors.push(format!(
+                    "workspace {short} is on line {}, which does not exist",
+                    space.current
+                ));
+            }
+            for (line, working) in &space.preserved {
                 let present = ChunkId::from_hex(working)
                     .map(|id| self.store.contains(id))
                     .unwrap_or(false);
                 if !present {
                     report.structure_verified = false;
                     report.errors.push(format!(
-                        "line {name} holds working state {} which is not present",
+                        "workspace {short} holds working state {} for line {line}, \
+                         which is not present",
                         crate::short_id(working)
                     ));
                 }
             }
-        }
-        if !state.lines.contains_key(&state.current) {
-            report.structure_verified = false;
-            report
-                .errors
-                .push(format!("the current line {} does not exist", state.current));
         }
 
         if complete && report.chunks_absent > 0 {
@@ -2589,6 +2680,70 @@ pub struct ChangeView {
     pub assigned: Vec<String>,
     /// Whether a bare `ltx assign` adds to this one.
     pub current: bool,
+}
+
+/// Bring a format-3 line state to format 4, keeping a copy of the old one.
+///
+/// The first migration this project has run, and the mechanism ADR-17 §9 built
+/// the per-entry format tag for: entries keep hashing under the tag they were
+/// written at, so only the published line state has to move.
+///
+/// **The pre-migration document is written to its own key first.** Every
+/// earlier format break REFUSED to open; this one REWRITES, and a rewrite that
+/// goes wrong is unrecoverable in a way a refusal never is. One extra key buys
+/// back the difference between "restore it" and "it is gone", which is not a
+/// trade worth thinking about twice.
+fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
+    if oplog.format_version()? != Some(3) {
+        return Ok(());
+    }
+    let Some(raw) = oplog.raw_line_state()? else {
+        // Nothing published: nothing to migrate, only the version to move.
+        oplog.set_format_version(FORMAT_VERSION)?;
+        return Ok(());
+    };
+    let old: crate::oplog::LineStateV3 = serde_json::from_slice(&raw)?;
+
+    // The whole of the old state, verbatim, before anything is rewritten.
+    oplog.keep_superseded_line_state(&raw)?;
+
+    // One workspace: the repository's own root, which is where every format-3
+    // repository did all its work, since workspaces did not exist.
+    let workspace = change::mint(os_id_bits()?);
+    let mut preserved = BTreeMap::new();
+    let mut lines = BTreeMap::new();
+    for (name, record) in old.lines {
+        if let Some(tree) = record.working {
+            preserved.insert(name.clone(), tree);
+        }
+        lines.insert(
+            name,
+            LineRecord {
+                tip: record.tip,
+                changes: record.changes,
+                current_change: record.current_change,
+            },
+        );
+    }
+    let mut workspaces = BTreeMap::new();
+    workspaces.insert(
+        workspace,
+        crate::oplog::WorkspaceRecord {
+            root: platform::bytes_from_os_str(
+                fs::canonicalize(root)
+                    .unwrap_or_else(|_| root.to_path_buf())
+                    .as_os_str(),
+            ),
+            current: old.current,
+            preserved,
+        },
+    );
+
+    oplog.publish_lines(&LineState { lines, workspaces })?;
+    // Last, so an interruption leaves a repository still readable as format 3
+    // and the migration simply runs again.
+    oplog.set_format_version(FORMAT_VERSION)?;
+    Ok(())
 }
 
 /// The file inside a workspace's `.lattice` naming the repository it belongs to.
@@ -3932,8 +4087,9 @@ mod tests {
         );
         assert_eq!(
             repo.workspaces().unwrap().len(),
-            1,
-            "and the workspace stands"
+            2,
+            "and the workspace stands — two, because the repository's own root \
+             is a workspace and not a special case (ADR-7 §1)"
         );
         assert!(at.join(".lattice/repository").is_file(), "marker and all");
     }
@@ -3944,15 +4100,22 @@ mod tests {
         fs::write(dir.path().join("a.txt"), b"a").unwrap();
         repo.save("seed", None).unwrap();
         let (holder, at) = outside("space");
-        repo.new_workspace(&at).unwrap();
-        assert!(repo.workspaces().unwrap()[0].present);
+        let made = repo.new_workspace(&at).unwrap();
+        assert!(
+            repo.workspaces().unwrap().iter().all(|w| w.present),
+            "both the repository's own root and the new one are there"
+        );
 
         drop(holder);
 
         let listed = repo.workspaces().unwrap();
-        assert_eq!(listed.len(), 1, "the record outlives the directory");
+        assert_eq!(listed.len(), 2, "the record outlives the directory");
+        let gone = listed
+            .iter()
+            .find(|w| w.id == made.id)
+            .expect("the workspace that was created");
         assert!(
-            !listed[0].present,
+            !gone.present,
             "and says so, rather than quietly listing somewhere that is gone"
         );
     }
@@ -4306,6 +4469,62 @@ mod tests {
         assert!(
             !repo.changes().unwrap().iter().any(|c| c.id == first.change),
             "the consumed change must not come back as pending"
+        );
+    }
+
+    #[test]
+    fn a_format_three_repository_migrates_and_keeps_what_it_replaced() {
+        // The first migration this project has run, and the mechanism ADR-17 §9
+        // built the per-entry format tag for. Every earlier break REFUSED to
+        // open; this one REWRITES, so the document it replaces is kept.
+        //
+        // The format-3 state is written by hand because no build that produces
+        // one exists any more — which is exactly the situation a migration is
+        // for.
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoint = {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            fs::write(dir.path().join("a.txt"), b"a").unwrap();
+            repo.save("seed", None).unwrap().checkpoint
+        };
+        let legacy = serde_json::json!({
+            "current": "feature",
+            "lines": {
+                "main": { "tip": checkpoint.id, "working": null },
+                "feature": { "tip": checkpoint.id, "working": checkpoint.tree },
+            },
+        });
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.publish_raw_line_state(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("a format-3 repository still opens");
+
+        assert_eq!(
+            repo.current_line().unwrap(),
+            "feature",
+            "the line the repository was on becomes the line its workspace is on"
+        );
+        let state = repo.line_state().unwrap();
+        assert_eq!(state.lines.len(), 2, "both lines survive");
+        let space = state.workspaces.values().next().expect("one workspace");
+        assert_eq!(
+            space.preserved.get("feature").map(String::as_str),
+            Some(checkpoint.tree.as_str()),
+            "and the working state a line held moves to the workspace holding it"
+        );
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(FORMAT_VERSION),
+            "the repository is on the new format afterwards"
+        );
+        assert!(
+            repo.oplog().superseded_line_state().unwrap().is_some(),
+            "and the document it replaced is still there to restore from — a \
+             rewrite that goes wrong is unrecoverable in a way a refusal is not"
         );
     }
 
@@ -4700,7 +4919,7 @@ mod tests {
     fn init_creates_the_default_line_below_the_undo_floor() {
         let (_dir, repo) = repo();
         let state = repo.lines().unwrap();
-        assert_eq!(state.current, DEFAULT_LINE);
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
         assert!(state.lines.contains_key(DEFAULT_LINE));
         // main must not come from a StartLine entry, or undo-all would delete it.
         for entry in repo.oplog().entries().unwrap() {
@@ -4721,7 +4940,7 @@ mod tests {
         assert!(out.created);
         assert_eq!(out.line, "feature");
         let state = repo.lines().unwrap();
-        assert_eq!(state.current, "feature");
+        assert_eq!(repo.current_line().unwrap(), "feature");
         // A new line inherits the tip, so no baseline checkpoint disappears.
         assert_eq!(
             state.lines["feature"].tip.as_deref(),
@@ -4741,7 +4960,7 @@ mod tests {
         // and requires exit 0 every time.
         let out = repo.start_line("feature").unwrap();
         assert!(!out.created, "an existing line is not created again");
-        assert_eq!(repo.lines().unwrap().current, "feature");
+        assert_eq!(repo.current_line().unwrap(), "feature");
     }
 
     #[test]
@@ -4897,12 +5116,12 @@ mod tests {
         fs::write(dir.path().join("f"), b"1").unwrap();
         repo.save("seed", None).unwrap();
         repo.start_line("feature").unwrap();
-        assert_eq!(repo.lines().unwrap().current, "feature");
+        assert_eq!(repo.current_line().unwrap(), "feature");
 
         let out = repo.undo().unwrap();
         assert!(!out.nothing_to_undo);
         let state = repo.lines().unwrap();
-        assert_eq!(state.current, DEFAULT_LINE);
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
         assert!(
             !state.lines.contains_key("feature"),
             "undoing a start removes the line it created"
@@ -4944,11 +5163,11 @@ mod tests {
         repo.save("seed", None).unwrap();
         repo.start_line("feature").unwrap();
         repo.switch_line(DEFAULT_LINE).unwrap();
-        assert_eq!(repo.lines().unwrap().current, DEFAULT_LINE);
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
 
         repo.undo().unwrap();
         assert_eq!(
-            repo.lines().unwrap().current,
+            repo.current_line().unwrap(),
             "feature",
             "undoing a switch returns to the line it left"
         );

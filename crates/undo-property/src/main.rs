@@ -90,7 +90,7 @@ fn snapshot(root: &Path, repo: &Repo) -> Snapshot {
     Snapshot {
         tree,
         checkpoints,
-        current_line: state.current,
+        current_line: repo.current_line().expect("current line"),
         lines,
         changes,
     }
