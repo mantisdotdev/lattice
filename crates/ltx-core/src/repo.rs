@@ -335,16 +335,40 @@ impl Repo {
         // the only thing a command run in a directory knows about itself.
         let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let here = platform::bytes_from_os_str(here.as_os_str());
-        let workspace = oplog
-            .line_state()?
-            .and_then(|state| {
-                state
-                    .workspaces
-                    .iter()
-                    .find(|(_, record)| record.root == here)
-                    .map(|(id, _)| id.clone())
-            })
-            .unwrap_or_default();
+        let state = oplog.line_state()?;
+        let known = state.as_ref().and_then(|state| {
+            state
+                .workspaces
+                .iter()
+                .find(|(_, record)| record.root == here)
+                .map(|(id, _)| id.clone())
+        });
+        // A workspace the repository has no record of is REFUSED, not opened
+        // with an empty id. With one, `set_current_line` and `set_preserved`
+        // find nothing to write and silently do nothing — so a `switch` would
+        // capture the working tree, publish a state that references it
+        // nowhere, and then fail to materialise. The capture would be durable
+        // and unreachable, which is losing work while reporting an error about
+        // something else.
+        //
+        // Reachable two ways: a crash between `workspace new` writing the
+        // marker and committing the record, and a workspace directory that has
+        // been moved. Both leave a marker with no matching record.
+        let workspace = match (known, state) {
+            (Some(id), _) => id,
+            // No published state at all is a repository mid-init, not a
+            // workspace mismatch; the default line is the honest answer.
+            (None, None) => String::new(),
+            (None, Some(_)) => {
+                return Err(Error::Invalid(format!(
+                    "{} is marked as a workspace of {}, but that repository has \
+                     no record of it — it may have been moved, or created by a \
+                     command that did not finish",
+                    root.display(),
+                    dir.display()
+                )))
+            }
+        };
         Ok(Repo {
             root: root.to_path_buf(),
             repository: dir,
@@ -1203,14 +1227,22 @@ impl Repo {
         // overwrite work this command was never asked to touch. `checkout`
         // deliberately overwrites what it finds, which is right for a
         // destination the caller named and wrong for one it is adopting.
-        if let Ok(mut entries) = fs::read_dir(at) {
-            if entries.next().is_some() {
-                return Err(Error::Invalid(format!(
-                    "{} is not empty; a workspace is created in a new or empty \
-                     directory",
-                    at.display()
-                )));
+        match fs::read_dir(at) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return Err(Error::Invalid(format!(
+                        "{} is not empty; a workspace is created in a new or \
+                         empty directory",
+                        at.display()
+                    )));
+                }
             }
+            // Not there yet is the ordinary case.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else means the guard could not run. An unreadable but
+            // writable directory would otherwise slip past it and be
+            // overwritten by the materialiser, which overwrites what it finds.
+            Err(e) => return Err(e.into()),
         }
 
         // Content first. A repository with nothing saved yet has no tree to
@@ -2702,7 +2734,19 @@ fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
         oplog.set_format_version(FORMAT_VERSION)?;
         return Ok(());
     };
-    let old: crate::oplog::LineStateV3 = serde_json::from_slice(&raw)?;
+
+    // A document with no `current` is already migrated. That cannot arise from
+    // an interrupted migration any more — the publish and the version bump are
+    // one transaction — but it is cheap to survive, and the failure it guards
+    // against is a repository that will not open at all, reporting a serde
+    // error whose recovery text says this is probably a bug in Lattice. The
+    // order matters: a v3 document also satisfies the v4 shape, since serde
+    // ignores the fields v4 dropped, so v3 is tried first and its REQUIRED
+    // `current` is what tells the two apart.
+    let Ok(old) = serde_json::from_slice::<crate::oplog::LineStateV3>(&raw) else {
+        oplog.set_format_version(FORMAT_VERSION)?;
+        return Ok(());
+    };
 
     // The whole of the old state, verbatim, before anything is rewritten.
     oplog.keep_superseded_line_state(&raw)?;
@@ -2739,10 +2783,13 @@ fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
         },
     );
 
-    oplog.publish_lines(&LineState { lines, workspaces })?;
-    // Last, so an interruption leaves a repository still readable as format 3
-    // and the migration simply runs again.
-    oplog.set_format_version(FORMAT_VERSION)?;
+    // The document and the version it is written at, in ONE transaction. As
+    // two, a crash between them leaves a format-4 document under a format-3
+    // version, and the rerun reads it with the v3 reader, fails on the `current`
+    // that is gone, and reports a serde error whose recovery says this is
+    // probably a bug in Lattice — every command failing, with no way forward.
+    // An interruption now leaves the repository wholly on one side or the other.
+    oplog.publish_migrated_lines(&LineState { lines, workspaces }, FORMAT_VERSION)?;
     Ok(())
 }
 
@@ -2750,12 +2797,13 @@ fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
 ///
 /// A workspace's marker is a FILE INSIDE a `.lattice` directory, never a
 /// `.lattice` file. Git uses the file shape and it would be the obvious choice
-/// here, but G1.2 compares the source and destination path sets byte for byte
-/// after a checkout and reports anything extra — and its `collect_entries`
-/// prunes `.lattice` from `dirnames` only, so a `.lattice` file lands in
-/// `filenames` and is never filtered. The file shape turns that gate from PASS
-/// to FAIL; the directory shape is pruned exactly as a repository's is. The
-/// harness is frozen, so this adapts (ADR-7 §1).
+/// here, but the directory shape has the better property: `.lattice` then means
+/// exactly one thing to anything walking a tree, so ONE rule — "skip
+/// `.lattice`" — covers a repository and a workspace alike. Under the file
+/// shape a walker that skips the directory still trips over the file, and every
+/// ignore rule, tree comparison and "am I in a repository" check would need to
+/// learn a second shape. What distinguishes the two is what is inside
+/// (ADR-7 §1).
 const MARKER_FILE: &str = "repository";
 
 /// The first line of a workspace marker, naming the repository it belongs to.
@@ -4121,29 +4169,19 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_file_points_commands_at_the_repository_it_names() {
-        // `.lattice` as a directory is a repository; as a FILE it is a
-        // workspace naming one (ADR-7 §1). Written by hand here because
-        // `workspace new` has not shipped — the same reason the assign
-        // inverses were built before the command that appends them.
+    fn a_marker_points_commands_at_the_repository_it_names() {
+        // `.lattice` as a directory holding a `repository` file is a workspace
+        // naming one (ADR-7 §1).
         let repo_dir = tempfile::tempdir().unwrap();
         fs::write(repo_dir.path().join("a.txt"), b"in the repository").unwrap();
+        let (_holder, space) = outside("space");
         {
             let mut repo = Repo::init(repo_dir.path()).unwrap();
             repo.save("seed", None).unwrap();
+            repo.new_workspace(&space).unwrap();
         }
-        let space = tempfile::tempdir().unwrap();
-        fs::create_dir_all(space.path().join(".lattice")).unwrap();
-        fs::write(
-            space.path().join(".lattice/repository"),
-            format!(
-                "repository: {}\n",
-                repo_dir.path().join(".lattice").display()
-            ),
-        )
-        .unwrap();
 
-        let found = Repo::discover(space.path()).expect("the marker names a repository");
+        let found = Repo::discover(&space).expect("the marker names a repository");
 
         assert_eq!(
             found.head_checkpoint().unwrap().map(|c| c.message),
@@ -4152,9 +4190,45 @@ mod tests {
         );
         assert_eq!(
             found.root().canonicalize().unwrap(),
-            space.path().canonicalize().unwrap(),
+            space.canonicalize().unwrap(),
             "and work in the workspace's own tree, not the repository's"
         );
+    }
+
+    #[test]
+    fn a_marker_the_repository_has_no_record_of_is_refused() {
+        // Reachable two ways: a crash between `workspace new` writing the
+        // marker and committing the record, and a workspace directory that has
+        // been moved. Opening one anyway leaves the handle with no workspace to
+        // write to, so `set_current_line` and `set_preserved` find nothing and
+        // silently do nothing — and a later `switch` would capture the working
+        // tree, publish a state referencing it nowhere, then fail to
+        // materialise. The capture would be durable and unreachable: work lost
+        // behind an error about something else.
+        let repo_dir = tempfile::tempdir().unwrap();
+        fs::write(repo_dir.path().join("a.txt"), b"a").unwrap();
+        {
+            let mut repo = Repo::init(repo_dir.path()).unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        let orphan = tempfile::tempdir().unwrap();
+        fs::create_dir_all(orphan.path().join(".lattice")).unwrap();
+        fs::write(
+            orphan.path().join(".lattice/repository"),
+            format!(
+                "repository: {}\n",
+                repo_dir.path().join(".lattice").display()
+            ),
+        )
+        .unwrap();
+
+        let err = Repo::discover(orphan.path()).map(|_| ()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("no record of it"),
+            "the refusal names the mismatch and what could have caused it: {err}"
+        );
+        assert!(!err.recovery().is_empty());
     }
 
     #[test]
@@ -4526,6 +4600,36 @@ mod tests {
             "and the document it replaced is still there to restore from — a \
              rewrite that goes wrong is unrecoverable in a way a refusal is not"
         );
+    }
+
+    #[test]
+    fn a_migration_interrupted_before_its_version_bump_still_opens() {
+        // The migration writes the new document and bumps the version. If those
+        // are separate transactions, a crash between them leaves a format-4
+        // document under a format-3 version — and the rerun parses it as v3,
+        // fails on the missing `current`, and reports a serde error whose
+        // recovery text says this is probably a bug in Lattice. Every command
+        // fails and there is no way forward.
+        //
+        // That is the exact opposite of what the sequencing is for, so it is
+        // pinned here.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            fs::write(dir.path().join("a.txt"), b"a").unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        // The half-done state: a migrated document, an unmigrated version.
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let repo = Repo::open(dir.path())
+            .expect("a migration interrupted before its version bump must still open");
+
+        assert_eq!(repo.oplog().format_version().unwrap(), Some(FORMAT_VERSION));
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
     }
 
     #[test]

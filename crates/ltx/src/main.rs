@@ -124,12 +124,12 @@ enum Command {
 
 #[derive(Subcommand)]
 enum WorkspaceCmd {
-    /// Create another working tree over this repository.
+    /// Start another workspace, with its own working state.
     New {
         /// Where to put it. A new or empty directory.
         path: PathBuf,
     },
-    /// Show every working tree over this repository.
+    /// Show every workspace over this repository.
     List,
 }
 
@@ -551,7 +551,7 @@ fn run(cli: &Cli) -> Result<u8> {
                 },
                 || {
                     format!(
-                        "new workspace at {} — {} entries",
+                        "new workspace at {} — {} paths of working state",
                         out.root, out.entries_written
                     )
                 },
@@ -683,6 +683,13 @@ fn run(cli: &Cli) -> Result<u8> {
                     // remove the workspace another person is working in.
                     // sample_args is absent because the path must not exist
                     // yet, and a fixed one would fail on its second draw.
+                    // `undoable: false` is a decision, not an omission — ADR-7
+                    // §4 makes undo repository-scoped, so undoing this could
+                    // remove the workspace another person is working in. The
+                    // sample path is a sibling of the repository, matching how
+                    // a workspace is actually made; drawn twice in one sequence
+                    // the second refuses, which is the behaviour under test.
+                    { "name": "workspace new", "state_changing": true, "undoable": false, "sample_args": ["../probe-workspace"] },
                     { "name": "workspace list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "line list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },

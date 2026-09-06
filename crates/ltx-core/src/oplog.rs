@@ -812,9 +812,37 @@ impl OpLog {
         }
     }
 
-    /// Publish a line state given as raw bytes, for a writer producing a shape
-    /// this build no longer has a type for.
-    pub fn publish_raw_line_state(&self, raw: &[u8]) -> Result<()> {
+    /// Publish a migrated line state and the format it is written at, together.
+    ///
+    /// One transaction, and it has to be. As two, a crash between them leaves a
+    /// NEW document under an OLD version — and the rerun reads the migrated
+    /// document with the old reader, fails on a field that is gone, and reports
+    /// a serde error whose recovery says this is probably a bug. Every command
+    /// then fails with no way forward, which is the opposite of what ordering
+    /// the writes was meant to achieve. Atomic by construction instead, the way
+    /// ADR-16 §7 makes the line publish atomic for the same reason.
+    pub fn publish_migrated_lines(&self, state: &LineState, version: u64) -> Result<()> {
+        let bytes = serde_json::to_vec(state)?;
+        let tx = self.db.begin_write()?;
+        {
+            let mut lines = tx.open_table(LINES)?;
+            lines.insert(LINES_KEY, bytes.as_slice())?;
+            let mut heads = tx.open_table(HEADS)?;
+            heads.insert(FORMAT_KEY, version)?;
+        }
+        // redb's commit is the durability barrier; it fsyncs.
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Publish a line state given as raw bytes.
+    ///
+    /// Test-only: `LINES["state"]` is authoritative and every read deserialises
+    /// it, so arbitrary bytes here turn every later command into a
+    /// deserialisation error. It exists to build the shape an older format
+    /// wrote, which no current build can produce.
+    #[cfg(test)]
+    pub(crate) fn publish_raw_line_state(&self, raw: &[u8]) -> Result<()> {
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(LINES)?;

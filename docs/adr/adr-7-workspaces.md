@@ -23,10 +23,26 @@ argument could:
   NFC/NFD pairs, invalid UTF-8, the executable bit, symlinks.
 
 That second one is the sharpest constraint in this document, because **G1.2
-passes today**. It passes by falling through to the fallback. The moment
-`workspace new` starts succeeding, G1.2 measures it instead — so a workspace
-that does not materialise the tip tree exactly does not merely fail its own
-gate, it turns a passing HARD gate red.
+passes today** — `bench/results/iteration-9.json` records it:
+
+```json
+{
+  "gate": "G1.2",
+  "target": 0.0,
+  "value": 0.0,
+  "status": "PASS"
+}
+```
+
+It passes by falling through to the fallback, because `workspace new` did not
+exist. The moment it starts succeeding, G1.2 measures it instead — so a
+workspace that does not materialise the tip tree exactly does not merely fail
+its own gate, it turns a passing HARD gate red.
+
+That gate cannot be re-run here: its corpus (`corpus/data/adversarial`) is not
+in this checkout, which is why the check below is its *comparison* applied to a
+small stand-in rather than the gate itself. Running the gate is owed before
+G1.2 is claimed again.
 
 ADR-6 already settled that concurrent commands queue rather than race, so this
 ADR does not have to answer whether eight working trees can address one
@@ -47,9 +63,21 @@ rather than the thing itself — rather than a second search.
 > G1.2 from PASS to FAIL.** G1.2 compares the source and destination path sets
 > as raw bytes and reports anything extra as `appeared after checkout, absent in
 > source`; its `collect_entries` prunes `.lattice` from `dirnames` only, so a
-> `.lattice` *file* lands in `filenames` and is never filtered. Verified by
-> calling the frozen harness's own `collect_entries` over both shapes: the file
-> form yields `only_dst = [b'.lattice']`, the directory form yields nothing.
+> `.lattice` *file* lands in `filenames` and is never filtered.
+>
+> Measured by importing the frozen harness's own `collect_entries` and running
+> it over both shapes:
+>
+> ```console
+> $ python3 - <<'EOF'   # imports harness/g1/g1_2_byte_fidelity.py
+> ... builds a source with a .lattice DIRECTORY (a repository),
+> ... and a destination with the marker in each shape, then diffs the path sets
+> EOF
+> marker as a file      -> only_dst=[b'.lattice'] only_src=[]  =>  G1.2 FAILS
+> marker as a directory -> only_dst=[] only_src=[]             =>  G1.2 PASSES
+> ```
+>
+> <!-- evidence: output of an ad-hoc script importing collect_entries from the frozen harness harness/g1/g1_2_byte_fidelity.py; reproducible from the two shapes described above, and pinned by the test `a_workspace_marker_is_a_file_inside_a_lattice_directory_never_a_lattice_file` -->
 >
 > The harness is frozen, so the product adapts. This is the constraint the
 > Context section named as the sharpest in the document, arriving exactly where
@@ -147,7 +175,11 @@ invariant under apply-batch-then-undo-all.
   written at, so existing entries keep hashing the way they were hashed. The
   line state is a published document rather than a hashed entry, so it is
   rewritten in place on open. **This is the first migration, and it is the test
-  of whether that mechanism actually works.** It works.
+  of whether that mechanism actually works.** It does: exercised by
+  `a_format_three_repository_migrates_and_keeps_what_it_replaced`, which builds
+  a format-3 document by hand — no build that produces one exists any more —
+  and asserts the lines, the moved working state, the version and the kept copy.
+  Both halves are mutation-checked.
 
   **The break belongs to §3 alone, not to the slice.** Registering workspaces
   was purely additive — a published document is not hashed content, so a
