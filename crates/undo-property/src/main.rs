@@ -154,15 +154,13 @@ fn run_sequence(base: Option<&Path>, rng: &mut Rng, emitted: &mut BTreeMap<Strin
     // here as in production.
     let id_seed = rng.next_u64();
     let mut minted: u64 = 0;
-    let mut repo = Repo::init(root)
-        .expect("init")
-        .with_change_id_bits(move || {
-            minted += 1;
-            let mut bits = [0u8; 16];
-            bits[..8].copy_from_slice(&id_seed.to_le_bytes());
-            bits[8..].copy_from_slice(&minted.to_le_bytes());
-            Ok(bits)
-        });
+    let mut repo = Repo::init(root).expect("init").with_id_bits(move || {
+        minted += 1;
+        let mut bits = [0u8; 16];
+        bits[..8].copy_from_slice(&id_seed.to_le_bytes());
+        bits[8..].copy_from_slice(&minted.to_le_bytes());
+        Ok(bits)
+    });
     repo.save("seed", None).expect("seed save");
     let initial = snapshot(root, &repo);
 

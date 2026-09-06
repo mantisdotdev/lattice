@@ -110,7 +110,7 @@ pub struct Repo {
     repository: PathBuf,
     store: Store,
     oplog: OpLog,
-    change_id_bits: ChangeIdBits,
+    id_bits: OpaqueIdBits,
     /// Exclusive access to this repository, held for as long as it is open.
     ///
     /// redb takes a NON-BLOCKING exclusive lock on its own file, so a second
@@ -136,16 +136,21 @@ pub struct Repo {
 /// killed from outside and recorded as a deadlock it is not.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Where a new change id gets its 128 bits (ADR-17 §3).
+/// Where a new opaque id gets its 128 bits (ADR-17 §3).
+///
+/// Changes were the first noun to need an identity that is neither content-
+/// addressed nor user-coined; workspaces are the second, and both draw from
+/// here. Named for what it produces rather than for the first thing to want
+/// one.
 ///
 /// Injected rather than reached for: the engine never touches an entropy
 /// source itself, so a test or the property runner substitutes a counter and
 /// exercises the code that ships rather than a second path beside it.
 /// Fallible because a machine that cannot produce entropy has to say so, not
 /// mint a predictable identity.
-pub type ChangeIdBits = Box<dyn FnMut() -> Result<[u8; 16]> + Send>;
+pub type OpaqueIdBits = Box<dyn FnMut() -> Result<[u8; 16]> + Send>;
 
-fn os_change_id_bits() -> Result<[u8; 16]> {
+fn os_id_bits() -> Result<[u8; 16]> {
     let mut bits = [0u8; 16];
     getrandom::fill(&mut bits).map_err(|e| Error::Io(std::io::Error::from(e)))?;
     Ok(bits)
@@ -217,7 +222,7 @@ impl Repo {
             repository: dir,
             store,
             oplog,
-            change_id_bits: Box::new(os_change_id_bits),
+            id_bits: Box::new(os_id_bits),
             _lock: lock,
         })
     }
@@ -309,21 +314,18 @@ impl Repo {
             repository: dir,
             store,
             oplog,
-            change_id_bits: Box::new(os_change_id_bits),
+            id_bits: Box::new(os_id_bits),
             _lock: lock,
         })
     }
 
-    /// Replace where new change ids get their bits.
+    /// Replace where new opaque ids get their bits.
     ///
     /// The one seam ADR-17 §3 asks for: entropy enters at this boundary and
     /// nowhere else, so a caller that needs a run to be reproducible passes a
     /// counter instead of the machine's entropy.
-    pub fn with_change_id_bits(
-        mut self,
-        bits: impl FnMut() -> Result<[u8; 16]> + Send + 'static,
-    ) -> Self {
-        self.change_id_bits = Box::new(bits);
+    pub fn with_id_bits(mut self, bits: impl FnMut() -> Result<[u8; 16]> + Send + 'static) -> Self {
+        self.id_bits = Box::new(bits);
         self
     }
 
@@ -1102,7 +1104,7 @@ impl Repo {
 
     /// Mint an identity for a new change.
     fn new_change_id(&mut self) -> Result<String> {
-        Ok(change::mint((self.change_id_bits)()?))
+        Ok(change::mint((self.id_bits)()?))
     }
 
     /// Route working-tree paths into a change.
@@ -3049,7 +3051,7 @@ mod tests {
     fn counted_ids(dir_and_repo: (tempfile::TempDir, Repo)) -> (tempfile::TempDir, Repo) {
         let (dir, repo) = dir_and_repo;
         let mut n = 0u8;
-        let repo = repo.with_change_id_bits(move || {
+        let repo = repo.with_id_bits(move || {
             n += 1;
             let mut bits = [0u8; 16];
             bits[2] = n;
