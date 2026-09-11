@@ -68,6 +68,14 @@ pub enum Error {
     #[error("no lens named {0}")]
     NoSuchLens(String),
 
+    /// Asked to merge two lines that have each moved since they parted.
+    ///
+    /// This build merges only when one line already contains the other. A
+    /// merge that must reconcile two histories is the semantic merge G4
+    /// measures, and pretending to do it is worse than refusing.
+    #[error("{line} and {other} have diverged; this build merges only when one line already contains the other")]
+    Diverged { line: String, other: String },
+
     /// Asked to sync, and there is no remote to sync with.
     #[error("no remote is configured, so there is nowhere to sync with")]
     NoRemote,
@@ -144,6 +152,7 @@ impl Error {
             Error::Corrupt(_) => Category::Corrupt,
             Error::Invalid(_)
             | Error::InvalidLine(_)
+            | Error::Diverged { .. }
             | Error::UnsupportedFormat(_)
             | Error::FormatFromNewerBuild(_) => Category::Invalid,
             Error::NoSuchLine(_)
@@ -167,7 +176,7 @@ impl Error {
             Error::NotFound(_) => Concept::Checkpoint,
             Error::Corrupt(_) => Concept::Checkpoint,
             Error::Invalid(_) => Concept::WorkingState,
-            Error::NoSuchLine(_) | Error::InvalidLine(_) => Concept::Line,
+            Error::NoSuchLine(_) | Error::InvalidLine(_) | Error::Diverged { .. } => Concept::Line,
             Error::NoSuchLens(_) => Concept::Lens,
             Error::NoRemote => Concept::Remote,
             Error::NoSuchChange(_)
@@ -200,6 +209,10 @@ impl Error {
             }
             Error::NoSuchLine(_) => "run `ltx line list` to see which lines exist",
             Error::NoSuchLens(_) => "run `ltx lens list` to see which lenses exist",
+            Error::Diverged { .. } => {
+                "run `ltx log --forensic` to see where the two lines part; save the work \
+                 you want to keep, then switch to the line whose history you want"
+            }
             Error::NoRemote => {
                 "no remote can be configured in this build; run `ltx sync --dry-run` to \
                  see what a sync would do"

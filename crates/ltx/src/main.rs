@@ -121,6 +121,11 @@ enum Command {
     /// Work with lines.
     #[command(subcommand)]
     Line(LineCmd),
+    /// Bring another line's history onto this one.
+    Merge {
+        /// The line to take history from.
+        line: String,
+    },
     /// Split the current change so each top-level path is a change of its own.
     Split,
     /// Look through a lens, or see which exist.
@@ -684,6 +689,30 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Merge { line } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.merge_line(line)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "line": out.line, "from": out.from,
+                        "fast_forward": out.fast_forward, "now_at": out.now_at,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    if out.fast_forward {
+                        format!("{} now holds everything on {}", out.line, out.from)
+                    } else {
+                        format!("{} already holds everything on {}", out.line, out.from)
+                    }
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Split => {
             let mut repo = Repo::discover(&cwd)?;
             let out = repo.split()?;
@@ -863,6 +892,11 @@ fn run(cli: &Cli) -> Result<u8> {
                     // assign, so a batch that draws it before any assign
                     // still counts a command that ran.
                     { "name": "split", "state_changing": true, "undoable": true, "sample_args": [] },
+                    // `main` always exists. From probe-line it is already
+                    // contained and the attempt is recorded; after `switch
+                    // main` it is a REAL fast-forward onto probe-line's
+                    // saves, whose undo rewrites the working tree back.
+                    { "name": "merge", "state_changing": true, "undoable": true, "sample_args": ["main"] },
                     { "name": "lens use", "state_changing": true, "undoable": true, "sample_args": ["clean"] },
                     { "name": "lens list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "sync", "state_changing": true, "undoable": true, "sample_args": ["--dry-run"] },

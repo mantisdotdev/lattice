@@ -1077,6 +1077,9 @@ impl Repo {
             // A dry-run sync moved nothing and a lens is a view: neither
             // wrote a byte of working state, so each is always reversible.
             Operation::Sync { .. } | Operation::Lens { .. } => true,
+            // A fast-forward's inverse puts a tip and a captured working tree
+            // back; both are durable content, so it is always possible.
+            Operation::Merge { .. } => true,
             // Split follows assign's rule exactly (ADR-17 §8): once a standing
             // save has consumed a change its inverse would write to — the
             // source it puts paths back into, or any it would delete — it is
@@ -1236,6 +1239,25 @@ impl Repo {
                 }
                 let current = self.line_of(&lines);
                 outcome.now_at = lines.lines.get(&current).and_then(|r| r.tip.clone());
+            }
+            Operation::Merge {
+                line,
+                before,
+                captured,
+                ..
+            } => {
+                let rec = lines.lines.entry(line.clone()).or_default();
+                rec.tip = before.clone();
+                outcome.now_at = before.clone();
+                if captured.is_some() {
+                    // The merge rewrote the working tree, so its inverse
+                    // rewrites it back — through the same pending mechanism
+                    // switch uses, so a crash mid-way completes next command.
+                    let rescued = self.capture_working_tree()?;
+                    outcome.preserved_working_state = Some(rescued);
+                    self.set_preserved(&mut lines, line, captured.clone());
+                    materialise = Some(captured.clone());
+                }
             }
             Operation::Split {
                 line,
@@ -2127,6 +2149,134 @@ impl Repo {
             oplog_seq: entry.seq,
             rescued_working_state: rescued,
         })
+    }
+
+    // --------------------------------------------------------------- merge
+
+    /// Bring another line's history onto this one.
+    ///
+    /// Fast-forward only. If this line already contains the other's tip,
+    /// nothing moves and the attempt is recorded. If the other contains this
+    /// one's, the tip advances and the working tree is rewritten to match —
+    /// captured first, through the same pending mechanism `switch` uses, so an
+    /// interruption completes on the next command. Two lines that have each
+    /// moved since they parted are refused by name: reconciling them is the
+    /// semantic merge G4 measures, and this build does not pretend to.
+    pub fn merge_line(&mut self, other: &str) -> Result<MergeOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let other = validate_line_name(other)?;
+        let mut lines = self.line_state()?;
+        let line = self.line_of(&lines);
+        let Some(target) = lines.lines.get(&other) else {
+            return Err(Error::NoSuchLine(format!("there is no line named {other}")));
+        };
+        let theirs = target.tip.clone();
+        let ours = lines.lines.get(&line).and_then(|r| r.tip.clone());
+
+        let advance_to = match self.relate(ours.as_deref(), theirs.as_deref())? {
+            Relation::Same | Relation::OursContainsTheirs => None,
+            Relation::TheirsContainsOurs => theirs.clone(),
+            Relation::Diverged => return Err(Error::Diverged { line, other }),
+        };
+        let Some(after) = advance_to else {
+            let entry = self.oplog.commit(
+                Operation::Merge {
+                    line: line.clone(),
+                    from: other.clone(),
+                    before: ours.clone(),
+                    after: ours.clone(),
+                    captured: None,
+                },
+                None,
+            )?;
+            return Ok(MergeOutcome {
+                line,
+                from: other,
+                fast_forward: false,
+                now_at: ours,
+                oplog_seq: entry.seq,
+                rescued_working_state: rescued,
+            });
+        };
+
+        let target_tree = self
+            .checkpoint(&after)?
+            .ok_or_else(|| {
+                Error::Corrupt(format!(
+                    "line {other} points at checkpoint {} which is not present",
+                    crate::short_id(&after)
+                ))
+            })?
+            .tree;
+        // Capture first: nothing is materialised over an uncaptured working
+        // tree (ADR-16 §6). The tip moves and the target tree is parked as
+        // this line's pending state in one publish, so a crash before the
+        // files are written leaves a merge the next command finishes.
+        let captured = self.capture_working_tree()?;
+        lines.lines.entry(line.clone()).or_default().tip = Some(after.clone());
+        self.set_preserved(&mut lines, &line, Some(target_tree.clone()));
+        let entry = self.oplog.commit(
+            Operation::Merge {
+                line: line.clone(),
+                from: other.clone(),
+                before: ours,
+                after: Some(after.clone()),
+                captured: Some(captured),
+            },
+            Some(lines.clone()),
+        )?;
+        self.materialise_working_tree(Some(&target_tree))?;
+        self.set_preserved(&mut lines, &line, None);
+        self.oplog.publish_lines(&lines)?;
+        self.sync_head_pointer(&lines)?;
+        Ok(MergeOutcome {
+            line,
+            from: other,
+            fast_forward: true,
+            now_at: Some(after),
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// How two tips stand to each other. A line with no tip is contained by
+    /// everything.
+    fn relate(&self, ours: Option<&str>, theirs: Option<&str>) -> Result<Relation> {
+        Ok(match (ours, theirs) {
+            (None, None) => Relation::Same,
+            (None, Some(_)) => Relation::TheirsContainsOurs,
+            (Some(_), None) => Relation::OursContainsTheirs,
+            (Some(a), Some(b)) if a == b => Relation::Same,
+            (Some(a), Some(b)) => {
+                if self.descends_from(a, b)? {
+                    Relation::OursContainsTheirs
+                } else if self.descends_from(b, a)? {
+                    Relation::TheirsContainsOurs
+                } else {
+                    Relation::Diverged
+                }
+            }
+        })
+    }
+
+    /// Whether `ancestor` is on `id`'s parent chain. Bounded like every walk
+    /// over history: a chain past the sane bound is corruption, not patience.
+    fn descends_from(&self, id: &str, ancestor: &str) -> Result<bool> {
+        let mut cursor = self.checkpoint(id)?.and_then(|c| c.parent);
+        let mut guard = 0usize;
+        while let Some(pid) = cursor {
+            guard += 1;
+            if guard > MAX_ANCESTRY_WALK {
+                return Err(Error::Corrupt(
+                    "checkpoint parent chain exceeds the sane bound".into(),
+                ));
+            }
+            if pid == ancestor {
+                return Ok(true);
+            }
+            cursor = self.checkpoint(&pid)?.and_then(|c| c.parent);
+        }
+        Ok(false)
     }
 
     // --------------------------------------------------------------- split
@@ -3526,6 +3676,31 @@ struct ThinRecord {
     at_unix_ms: u64,
     packs: Vec<u64>,
     collected: Vec<String>,
+}
+
+/// The longest parent chain any walk over history will follow before calling
+/// it corruption. A chain cannot cycle — an id hashes its parent — so this is
+/// a bound on patience, not on correctness.
+const MAX_ANCESTRY_WALK: usize = 10_000_000;
+
+/// How one tip stands to another.
+enum Relation {
+    Same,
+    OursContainsTheirs,
+    TheirsContainsOurs,
+    Diverged,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MergeOutcome {
+    pub line: String,
+    pub from: String,
+    /// Whether the tip moved. False when this line already held the other's
+    /// history, which is recorded but changes nothing.
+    pub fast_forward: bool,
+    pub now_at: Option<String>,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5730,6 +5905,96 @@ mod tests {
     }
 
     // ------------------------------------------------------------ verbs
+
+    #[test]
+    fn merge_fast_forwards_onto_a_line_that_moved_ahead_and_undo_brings_it_back() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let base = repo.save("base", None).unwrap().checkpoint;
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f.txt"), b"on feat").unwrap();
+        let ahead = repo.save("ahead", None).unwrap().checkpoint;
+        repo.switch_line("main").unwrap();
+        assert!(
+            !dir.path().join("f.txt").exists(),
+            "premise: main does not have it"
+        );
+        fs::write(dir.path().join("scratch.txt"), b"uncommitted on main").unwrap();
+
+        let out = repo.merge_line("feat").unwrap();
+
+        assert!(out.fast_forward);
+        assert_eq!(out.now_at.as_deref(), Some(ahead.id.as_str()));
+        assert_eq!(
+            fs::read(dir.path().join("f.txt")).unwrap(),
+            b"on feat",
+            "the working tree now matches the tip it advanced to"
+        );
+        assert!(
+            !dir.path().join("scratch.txt").exists(),
+            "and what was uncommitted was captured, not left to lie about the tip"
+        );
+
+        let undone = repo.undo().unwrap();
+
+        assert_eq!(
+            repo.head_checkpoint().unwrap().map(|c| c.id),
+            Some(base.id),
+            "the tip is back where it was"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("scratch.txt")).unwrap(),
+            b"uncommitted on main",
+            "and so is the working tree, uncommitted work included"
+        );
+        assert!(!dir.path().join("f.txt").exists());
+        assert!(
+            undone.preserved_working_state.is_some(),
+            "the merged tree is kept, durable"
+        );
+    }
+
+    #[test]
+    fn merging_a_line_this_one_already_contains_is_recorded_and_moves_nothing() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("base", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f.txt"), b"f").unwrap();
+        let tip = repo.save("ahead", None).unwrap().checkpoint;
+
+        let out = repo.merge_line("main").unwrap();
+
+        assert!(!out.fast_forward);
+        assert_eq!(out.now_at.as_deref(), Some(tip.id.as_str()));
+        assert!(out.oplog_seq > 0, "recorded: the command ran");
+    }
+
+    #[test]
+    fn merging_diverged_lines_is_refused_by_name_not_faked() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("base", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f.txt"), b"f").unwrap();
+        repo.save("on feat", None).unwrap();
+        repo.switch_line("main").unwrap();
+        fs::write(dir.path().join("m.txt"), b"m").unwrap();
+        let before = repo.save("on main", None).unwrap().checkpoint;
+
+        let err = repo.merge_line("feat").unwrap_err();
+
+        assert!(matches!(err, Error::Diverged { .. }), "{err}");
+        assert_eq!(
+            repo.head_checkpoint().unwrap().map(|c| c.id),
+            Some(before.id),
+            "and nothing moved"
+        );
+        assert!(
+            repo.merge_line("nowhere").is_err(),
+            "a line that does not exist is refused too"
+        );
+    }
 
     #[test]
     fn a_lens_is_per_workspace_recorded_and_undone_back_to_the_one_before() {

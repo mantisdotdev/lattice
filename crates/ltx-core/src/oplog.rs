@@ -410,6 +410,20 @@ pub enum Operation {
         from: String,
         to: String,
     },
+    /// One line took another's history. Fast-forward only: `after` is the
+    /// other line's tip, which already contained `before`. `captured` is the
+    /// working tree as it stood, durable, so the inverse can put it back;
+    /// `None` when the merge moved nothing.
+    Merge {
+        line: String,
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        captured: Option<String>,
+    },
     /// A change was split: each moved path left `change` for the change named
     /// beside it. The inverse moves them back and removes what was minted.
     Split {
@@ -476,6 +490,7 @@ impl Operation {
             Operation::Sync { .. } => "sync",
             Operation::Lens { .. } => "lens",
             Operation::Split { .. } => "split",
+            Operation::Merge { .. } => "merge",
         }
     }
 }
