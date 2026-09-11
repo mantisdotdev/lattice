@@ -167,10 +167,29 @@ The incremental save is the number to weigh, because a save does walk the tree:
 0.236 s where it was 3.445 s, still growing, and growing for a reason.
 
 Across the same three sizes an incremental save costs 0.073, 0.134 and 0.236 s.
-That residue is the tree walk, and it is not a defect of the same kind: a save
-that must notice which of 10,000 files changed has to look at 10,000 files.
-Making it proportional to the *change* instead needs a working-tree index, which
-is a separate slice and is not attempted here.
+That residue is the tree walk, and saying so is a measurement rather than an
+inference. Against the same 10,000-file tree:
+
+```console
+$ find . -type f -not -path './.lattice/*' >/dev/null      # metadata only
+real 0.01
+$ find . -type f -not -path './.lattice/*' -exec cat {} + >/dev/null
+real 0.17
+$ ltx save "one file changed"
+real 0.20
+```
+
+<!-- evidence: /usr/bin/time -p, median of three runs each, on the 10,000-file tree scripts/probe_scaling.py builds; the commands are quoted in full above and reproduce directly -->
+
+Reading every file costs 0.17 s and the save costs 0.20 s, so almost all of what
+remains is the bytes going through, and Lattice's own share above raw reading is
+a few hundredths of a second. That is not a defect of the same kind: a save that
+must notice which of 10,000 files changed has to look at 10,000 files.
+
+It also sizes the next slice rather than gesturing at it. Walking the same tree
+for metadata alone costs 0.01 s — seventeen times less than reading it — so a
+working-tree index that reads only what the metadata says has changed has that
+much headroom to work in. That is a separate slice and is not attempted here.
 
 **G1.4 is closer and still does not fit.** The probe's own extrapolation falls
 from 306 hours to 21, and 21 hours is not a budget anyone accepts either. What
