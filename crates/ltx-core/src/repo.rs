@@ -49,8 +49,20 @@ impl Checkpoint {
     /// and, worse, letting the stored `id` field be trusted directly lets any
     /// ordinary file whose bytes deserialise as a Checkpoint impersonate one.
     fn body_id(&self) -> Result<String> {
-        let body = serde_json::to_vec(&(&self.tree, &self.message, &self.parent, self.at_unix_ms))?;
-        Ok(ChunkId::of(&body).to_hex())
+        Ok(ChunkId::of(&self.body_bytes()?).to_hex())
+    }
+
+    /// The body's serialised form — tree, message, parent, timestamp — in the
+    /// order and encoding every checkpoint id in every repository was hashed
+    /// from. Changing this re-addresses all of them, so it changes only at a
+    /// format break that says so.
+    fn body_bytes(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&(
+            &self.tree,
+            &self.message,
+            &self.parent,
+            self.at_unix_ms,
+        ))?)
     }
 
     /// True iff the blob's declared `id` actually hashes its body. A blob that
