@@ -91,6 +91,19 @@ in-process property harness and the emission floor are untouched.
   published as non-undoable that quietly is undoable becomes a gate failure —
   which is the honest direction for that field to be checked in.
 
+## Addendum, same night: a run that exceeds its budget is a failed measurement
+
+The frozen harness gave the in-process half 7,200 seconds inline and let the
+`TimeoutExpired` propagate: the first run under the new verbs ended in a
+traceback and no verdict, and the nearest handled outcome would have called
+the subject "not built". Neither is what happened. The amended harness names
+the budget, catches the timeout, and reports zero in-process sequences — which
+the coverage contract already turns into a FAIL with the reason attached.
+
+§0.3 classification: **stricter**. An outcome that produced no result now
+produces a failing one. Evidence: the run of 2026-09-11, `g1_3.err`, which ends
+in `subprocess.TimeoutExpired` after 7200 seconds with an empty verdict.
+
 ## Not decided here
 
 G1.1's coverage contract requires a fault hit in a `merge` critical section

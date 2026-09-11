@@ -146,6 +146,50 @@ would add a second write to keep in step and a new way for the two to disagree
 after a crash. Eight workspaces rewriting one document is affordable precisely
 because ADR-6 made them take turns.
 
+
+> **Corrected 2026-09-12, from the G1.4 pilots.** Two things this section
+> implied were never written down in the op-log or the engine, and the pilot
+> found both: 20 of 8,000 operations failed, every one with "this line
+> preserved no working state, so there is nothing to restore" (13 `undo`,
+> 5 `switch main`, 2 `start line`), and a second pilot with the failing
+> output captured showed that single error 22 times in 2,400.
+> `bench/results/raw/adr7-workspace-undo.json`:
+>
+> ```json
+> {
+>   "ops_total": 8000,
+>   "failures": 20,
+>   "linearizability_violations": 0
+> }
+> ```
+>
+> First: a workspace joining a line it has never been on had nothing
+> preserved for it, and the switch was refused. What it gets is the line's
+> tip — the same act `workspace new` performs — published under the target
+> line before the commit so a crash still leaves a pending switch the next
+> command completes.
+>
+> Second, and the one that matters: `Switch` and `StartLine` entries named
+> no workspace, so a workspace's `undo` could pick up *another* workspace's
+> switch as the newest undoable entry and apply its inverse here, against
+> preserved state this workspace never kept. The entries now record the
+> workspace that made them, and eligibility treats another workspace's
+> switch, start or lens change as not this one's to reverse — it keeps
+> looking further back. That is on-disk format 7: additive, the field is
+> skipped when empty so entries written earlier hash exactly as they did and
+> nothing migrates, and the bump is there so a build without the field
+> refuses the repository instead of re-hashing its entries and reporting a
+> broken chain.
+>
+> The same pilot on the fixed binary then failed nothing and ordered
+> everything, and exposed the one consequence of scoping: an `undo` that
+> finds nothing of its own to reverse exited 0 with no op-log position, twice
+> in 2,400 operations, and a success that cannot be placed in the history is
+> one the gate refuses. So an undo that finds nothing is recorded — an `Undo`
+> entry with no `undone_seq` — for the reason a dry-run sync already is: an
+> attempt is a fact, and the position is what a concurrent history is ordered
+> by. It is never itself a target, so undo-all still stops where it did.
+
 ### 4. Undo is repository-scoped, and that is a stated limit
 
 `ltx undo` reverses the op-log's last eligible entry, whichever workspace

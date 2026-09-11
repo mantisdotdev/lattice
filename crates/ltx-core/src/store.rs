@@ -575,6 +575,52 @@ impl Store {
         Ok(())
     }
 
+    /// Rewrite one pack without the chunks in `doomed`, durably, and remove
+    /// the original. Returns how many chunks were dropped.
+    ///
+    /// The replacement is written and made durable as a NEW pack before the
+    /// original goes, so a crash at any point leaves every kept chunk readable
+    /// from one pack or the other — duplicates across packs are byte-identical
+    /// by construction and either copy serves. Only redaction calls this; it
+    /// is the one operation that removes content something still names.
+    ///
+    /// The new pack takes a fresh id, which breaks the ordering `thin` leans
+    /// on — that a chunk in pack P was not in the store before P. A redacted
+    /// store therefore makes thin walk all of history rather than a bounded
+    /// slice; `Repo::thin` checks the redaction ledger for exactly that.
+    pub fn rewrite_pack_without(
+        &mut self,
+        id: u64,
+        doomed: &std::collections::HashSet<ChunkId>,
+    ) -> Result<usize> {
+        let Some(position) = self.packs.iter().position(|(pid, _)| *pid == id) else {
+            return Err(Error::NotFound(format!("pack {id} is not in this store")));
+        };
+        let chunks = self.packs[position].1.chunk_ids();
+        let mut kept = PackWriter::new();
+        let mut dropped = 0usize;
+        for chunk in chunks {
+            if doomed.contains(&chunk) {
+                dropped += 1;
+                continue;
+            }
+            // Read through the pack itself, not the store: the store would
+            // happily answer from a duplicate elsewhere, and this pack's own
+            // copy is what must be carried over.
+            let Some(bytes) = self.packs[position].1.read(chunk)? else {
+                return Err(Error::Corrupt(format!(
+                    "pack {id} indexes {chunk:?} but cannot read it"
+                )));
+            };
+            kept.add(chunk, &bytes);
+        }
+        if !kept.is_empty() {
+            self.write_pack(kept)?;
+        }
+        self.remove_pack(id)?;
+        Ok(dropped)
+    }
+
     pub fn all_chunk_ids(&self) -> Vec<ChunkId> {
         let mut out: Vec<ChunkId> = self.packs.iter().flat_map(|(_, p)| p.chunk_ids()).collect();
         out.sort_unstable();

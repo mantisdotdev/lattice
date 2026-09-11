@@ -121,6 +121,15 @@ enum Command {
     /// Work with lines.
     #[command(subcommand)]
     Line(LineCmd),
+    /// Destroy a file's content everywhere history holds it. Cannot be undone.
+    Redact {
+        /// The file whose content must go.
+        path: PathBuf,
+        /// Name the irreversibility: without this, redact reports what it
+        /// would destroy and does nothing.
+        #[arg(long)]
+        confirm_destroy: bool,
+    },
     /// Bring another line's history onto this one.
     Merge {
         /// The line to take history from.
@@ -427,11 +436,21 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     let mut out = format!("wrote {n} entries into {}", into.display());
                     for c in &report.collisions {
-                        out.push_str(&format!(
-                            "\n  not written: {} — this filesystem does not distinguish \
-                         it from {}",
-                            c.path, c.collided_with
-                        ));
+                        // A fold names the sibling it collided with; every
+                        // other reason — a redacted file, a name this platform
+                        // cannot spell, a mode it cannot record — carries its
+                        // own explanation and no sibling. Printing the fold
+                        // sentence for those said "does not distinguish it
+                        // from" and then nothing.
+                        if c.collided_with.is_empty() {
+                            out.push_str(&format!("\n  {}: {}", c.path, c.reason));
+                        } else {
+                            out.push_str(&format!(
+                                "\n  not written: {} — this filesystem does not distinguish \
+                             it from {}",
+                                c.path, c.collided_with
+                            ));
+                        }
                     }
                     out
                 },
@@ -689,6 +708,39 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Redact {
+            path,
+            confirm_destroy,
+        } => {
+            let mut repo = Repo::discover(&cwd)?;
+            // Who did it is part of the record. The environment is read here,
+            // at the edge, and handed in.
+            let redactor = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "unknown".to_string());
+            let out = repo.redact(path, &redactor, *confirm_destroy)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "target": out.target,
+                        "chunks_destroyed": out.chunks_destroyed,
+                        "places_in_history": out.places_in_history,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    format!(
+                        "destroyed the content of {} in {} place(s) in history; \
+                         undo will not restore it",
+                        out.target, out.places_in_history
+                    )
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Merge { line } => {
             let mut repo = Repo::discover(&cwd)?;
             let out = repo.merge_line(line)?;
@@ -897,6 +949,12 @@ fn run(cli: &Cli) -> Result<u8> {
                     // main` it is a REAL fast-forward onto probe-line's
                     // saves, whose undo rewrites the working tree back.
                     { "name": "merge", "state_changing": true, "undoable": true, "sample_args": ["main"] },
+                    // Recorded and not undoable (Challenge 12, ADR-20): the
+                    // content is destroyed, and the gate excludes what a
+                    // redaction destroyed from what undo must bring back.
+                    // `seed.txt` is the path every batch guarantees, so the
+                    // destruction is real on every draw.
+                    { "name": "redact", "state_changing": true, "undoable": false, "sample_args": ["seed.txt", "--confirm-destroy"] },
                     { "name": "lens use", "state_changing": true, "undoable": true, "sample_args": ["clean"] },
                     { "name": "lens list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "sync", "state_changing": true, "undoable": true, "sample_args": ["--dry-run"] },

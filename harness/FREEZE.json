@@ -105,9 +105,9 @@
   },
   "G1.3": {
     "dependencies": {},
-    "frozen_at": "2026-09-03T12:01:06Z",
+    "frozen_at": "2026-09-11T21:24:58Z",
     "harness": "harness/g1/g1_3_universal_undo.py",
-    "sha256": "8638b30297218eecf858d8fa6c286d66aabea65e3801f2c878999530b9547fdb"
+    "sha256": "917aafb30136873c52947adccf5b36d8a3c530732f459c69c9e9b74b80ff6b49"
   },
   "G1.4": {
     "dependencies": {

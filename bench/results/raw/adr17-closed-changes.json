@@ -1,0 +1,70 @@
+{
+  "probe": "G1.4 rerun on the index-driven release binary (commit 28b2458), started 2026-09-11 21:45 IST, stopped by hand 2026-09-12 02:46 IST at the throughput below; every number here is read from the run directory after the stop",
+  "gate": "G1.4",
+  "op_log_seq_archived": 32461,
+  "redb_bytes": 811225088,
+  "archive_segments": 3274,
+  "packs": 4039,
+  "operations_by_kind": {
+    "assign": 3160,
+    "compact": 3273,
+    "init": 1,
+    "lens": 3205,
+    "save": 3231,
+    "split": 3288,
+    "start-line": 3261,
+    "switch": 3305,
+    "sync": 3266,
+    "thin": 3243,
+    "undo": 3220,
+    "workspace": 8
+  },
+  "splits": 3288,
+  "changes_minted_by_split": 1317917,
+  "max_changes_minted_by_one_split": 999,
+  "assigns": 3160,
+  "paths_displaced_by_assign": 1271545,
+  "throughput": [
+    {
+      "from_seq": 2048,
+      "to_seq": 5017,
+      "ops_per_min": 695.1
+    },
+    {
+      "from_seq": 5017,
+      "to_seq": 10001,
+      "ops_per_min": 333.4
+    },
+    {
+      "from_seq": 10001,
+      "to_seq": 15012,
+      "ops_per_min": 179.7
+    },
+    {
+      "from_seq": 15012,
+      "to_seq": 20006,
+      "ops_per_min": 110.7
+    },
+    {
+      "from_seq": 20006,
+      "to_seq": 25004,
+      "ops_per_min": 65.6
+    },
+    {
+      "from_seq": 25004,
+      "to_seq": 30020,
+      "ops_per_min": 60.3
+    },
+    {
+      "from_seq": 30020,
+      "to_seq": 32461,
+      "ops_per_min": 51.6
+    }
+  ],
+  "profile": {
+    "command": "ltx workspace list --json on a copy-on-write clone of the run repository, sampled with macOS sample(1) at 1 ms",
+    "samples": 293,
+    "samples_inside_OpLog_line_state": 254,
+    "note": "line_state is the deserialisation of the LINES document; it is entered twice per command, once in Repo::open_at and once by the verb"
+  }
+}

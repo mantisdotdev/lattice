@@ -98,6 +98,11 @@ pub struct VerifyReport {
     pub structure_verified: bool,
     pub chunks_verified: u64,
     pub chunks_absent: u64,
+    /// Chunks a tree names that a redaction destroyed. Absent by design, and
+    /// counted apart from `chunks_absent` so a complete verify of a redacted
+    /// repository can still say everything that should be here is.
+    #[serde(default)]
+    pub chunks_redacted: u64,
     /// How many checkpoints record only part of the working state that stood
     /// when they were written.
     ///
@@ -964,7 +969,16 @@ impl Repo {
     pub fn undo(&mut self) -> Result<UndoOutcome> {
         let rescued = self.complete_pending_switch()?;
         let Some(target) = self.next_undo_target()? else {
+            // Nothing to reverse is still an outcome that happened at a point
+            // in the history, and the point is what a concurrent history is
+            // ordered by: a success that cannot be placed is one G1.4 refuses.
+            // Recorded the way a dry-run sync is, and never itself a target —
+            // `is_undoable` says no to every `Undo`.
+            let entry = self
+                .oplog
+                .commit(Operation::Undo { undone_seq: None }, None)?;
             let mut out = UndoOutcome::nothing();
+            out.undo_seq = Some(entry.seq);
             out.rescued_working_state = rescued;
             return Ok(out);
         };
@@ -998,7 +1012,9 @@ impl Repo {
         self.oplog.walk_newest_first(|entry| {
             match &entry.operation {
                 Operation::Undo { undone_seq } => {
-                    undone.insert(*undone_seq);
+                    if let Some(seq) = undone_seq {
+                        undone.insert(*seq);
+                    }
                     return Ok(true);
                 }
                 Operation::Save {
@@ -1034,6 +1050,19 @@ impl Repo {
         consumed: &std::collections::HashSet<(String, String)>,
     ) -> Result<bool> {
         Ok(match op {
+            // Another workspace's view or working tree is not this one's to
+            // reverse: the inverse would apply that workspace's switch to this
+            // working tree, against preserved state this workspace never
+            // kept. An entry written before format 7 names no workspace and
+            // is treated as this one's, which is what every undo did until
+            // then.
+            Operation::StartLine { workspace, .. }
+            | Operation::Switch { workspace, .. }
+            | Operation::Lens { workspace, .. }
+                if !workspace.is_empty() && *workspace != self.workspace =>
+            {
+                false
+            }
             Operation::Save { checkpoint, .. } => match self.checkpoint(checkpoint)? {
                 Some(cp) => cp.parent.is_some(),
                 None => false,
@@ -1047,6 +1076,7 @@ impl Repo {
                 name,
                 from,
                 created: true,
+                ..
             } => {
                 let tip = lines.lines.get(name).and_then(|r| r.tip.clone());
                 let origin = lines.lines.get(from).and_then(|r| r.tip.clone());
@@ -1175,6 +1205,7 @@ impl Repo {
                 name,
                 from,
                 created,
+                ..
             } => {
                 let captured = self.capture_working_tree()?;
                 if *created {
@@ -1193,7 +1224,7 @@ impl Repo {
                 materialise = Some((captured, restored));
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
-            Operation::Switch { from, to } => {
+            Operation::Switch { from, to, .. } => {
                 if from != to {
                     let captured = self.capture_working_tree()?;
                     self.set_preserved(&mut lines, to, Some(captured.clone()));
@@ -1320,7 +1351,7 @@ impl Repo {
 
         let undo_entry = self.oplog.commit(
             Operation::Undo {
-                undone_seq: entry.seq,
+                undone_seq: Some(entry.seq),
             },
             Some(lines.clone()),
         )?;
@@ -1372,6 +1403,14 @@ impl Repo {
     }
 
     /// The working state this workspace preserved for `line`, if any.
+    /// The tree a checkpoint id names, or `None` when there is no checkpoint.
+    fn tip_tree(&self, tip: Option<&str>) -> Result<Option<String>> {
+        let Some(id) = tip else {
+            return Ok(None);
+        };
+        Ok(self.checkpoint_at(id)?.map(|cp| cp.tree))
+    }
+
     fn preserved(&self, lines: &LineState, line: &str) -> Option<String> {
         lines
             .workspaces
@@ -1604,6 +1643,16 @@ impl Repo {
             if let Some(owner) = held_by {
                 if let Some(previous) = record.changes.get_mut(owner) {
                     previous.assigned.remove(&path);
+                    // A change this assignment empties is closed. Nothing
+                    // names it any more, and the inverse reopens it from
+                    // `displaced` (it inserts with `entry`, not `get_mut`).
+                    // Left open, the split -> assign cycle G1.4 draws
+                    // accumulates one empty record per path per split, and
+                    // every command parses all of them (ADR-17, correction
+                    // of 2026-09-12).
+                    if previous.assigned.is_empty() {
+                        record.changes.remove(owner);
+                    }
                 }
                 displaced.push((path.clone(), owner.clone()));
             }
@@ -1849,6 +1898,7 @@ impl Repo {
                 name: name.clone(),
                 from,
                 created: true,
+                workspace: self.workspace.clone(),
             },
             Some(lines.clone()),
         )?;
@@ -1896,11 +1946,13 @@ impl Repo {
                         name: to.to_string(),
                         from: from.to_string(),
                         created: false,
+                        workspace: self.workspace.clone(),
                     }
                 } else {
                     Operation::Switch {
                         from: from.to_string(),
                         to: to.to_string(),
+                        workspace: self.workspace.clone(),
                     }
                 },
                 None,
@@ -1925,7 +1977,17 @@ impl Repo {
         // sees the current line holding preserved state and finishes the job.
         // Clearing it first would drop the only reference to that work.
         let tip = target.tip.clone();
-        let restored = self.preserved(&lines, to);
+        // What this workspace left on `to` when it last switched away — or,
+        // for a line it has never been on, the line's tip: that is what
+        // `workspace new` materialises, and joining a line is the same act.
+        // Published under `to` for the reason above: a crash between the
+        // entry and the bytes then leaves a pending switch the next command
+        // completes, exactly as a preserved tree would.
+        let restored = match self.preserved(&lines, to) {
+            Some(tree) => Some(tree),
+            None => self.tip_tree(tip.as_deref())?,
+        };
+        self.set_preserved(&mut lines, to, restored.clone());
         self.set_current_line(&mut lines, to);
 
         // Publish BEFORE materialising: a crash then leaves us unambiguously on
@@ -1937,11 +1999,13 @@ impl Repo {
                 name: to.to_string(),
                 from: from.to_string(),
                 created: false,
+                workspace: self.workspace.clone(),
             }
         } else {
             Operation::Switch {
                 from: from.to_string(),
                 to: to.to_string(),
+                workspace: self.workspace.clone(),
             }
         };
         let entry = self.oplog.commit(op, Some(lines.clone()))?;
@@ -2297,6 +2361,245 @@ impl Repo {
         })
     }
 
+    // -------------------------------------------------------------- redact
+
+    /// Destroy the content at `target` wherever history holds it, for good.
+    ///
+    /// Every checkpoint history records and every preserved working state is
+    /// walked, and the chunks the file at `target` names in any of them are
+    /// the doomed set. Content is addressed by what it is, so a chunk that
+    /// another path ALSO names cannot go without taking that path with it —
+    /// and rather than do that silently, the redaction refuses and names the
+    /// path. The ledger is written before a byte goes, each pack holding a
+    /// doomed chunk is rewritten without it, this workspace's own copy is
+    /// removed, and the operation is recorded as one `undo` will never
+    /// reverse (Challenge 12): a controller who says the data was erased must
+    /// not be one command away from un-erasing it.
+    pub fn redact(
+        &mut self,
+        target: &Path,
+        redactor: &str,
+        confirmed: bool,
+    ) -> Result<RedactOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let rel = self.history_path(target)?;
+        let components: Vec<&[u8]> = rel.split(|b| *b == b'/').collect();
+
+        // Where the file lives in history, and what it is made of.
+        let mut roots: Vec<(String, String)> = Vec::new(); // (what, tree)
+        for (id, _) in self.oplog.saved_checkpoints()? {
+            if let Some(cp) = self.checkpoint_at(&id)? {
+                roots.push((format!("checkpoint {}", crate::short_id(&id)), cp.tree));
+            }
+        }
+        let lines = self.line_state()?;
+        for (space, record) in &lines.workspaces {
+            for (line, tree) in &record.preserved {
+                roots.push((
+                    format!(
+                        "working state of {line} in workspace {}",
+                        crate::short_id(space)
+                    ),
+                    tree.clone(),
+                ));
+            }
+        }
+        let mut doomed: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        let mut holders: Vec<String> = Vec::new();
+        for (what, tree) in &roots {
+            if let Some(Node::File { chunks, .. }) = self.node_at(tree, &components)? {
+                let mut named = false;
+                for hex in &chunks {
+                    if let Some(c) = ChunkId::from_hex(hex) {
+                        doomed.insert(c);
+                        named = true;
+                    }
+                }
+                if named {
+                    holders.push(what.clone());
+                }
+            }
+        }
+        if doomed.is_empty() {
+            return Err(Error::NotFound(format!(
+                "nothing at {} in any checkpoint or preserved working state",
+                display_path(&rel)
+            )));
+        }
+        // The same bytes under another name would go too. Refuse, and say so.
+        let mut sharers: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+        for (_, tree) in &roots {
+            self.files_naming(tree, &doomed, Vec::new(), &mut sharers)?;
+        }
+        sharers.remove(&rel);
+        if let Some(other) = sharers.iter().next() {
+            return Err(Error::Invalid(format!(
+                "the content of {} is also the content of {}; redacting one destroys \
+                 both, and this build refuses to choose for you",
+                display_path(&rel),
+                display_path(other)
+            )));
+        }
+        if !confirmed {
+            return Err(Error::Invalid(format!(
+                "redacting {} destroys its content in {} place(s) in history and \
+                 cannot be undone; run the same command with --confirm-destroy",
+                display_path(&rel),
+                holders.len()
+            )));
+        }
+
+        // The ledger first: what is about to go, so verify can tell destroyed
+        // from lost, and a crash after this point completes on rerun.
+        let record = RedactRecord {
+            at_unix_ms: unix_ms_now(),
+            target: display_path(&rel),
+            redactor: redactor.to_string(),
+            chunks: doomed.iter().map(|c| c.to_hex()).collect(),
+        };
+        let mut line = serde_json::to_vec(&record)?;
+        line.push(b'\n');
+        append_durably(
+            &self.repository.join(REDACTED_DIR),
+            REDACTED_LEDGER_FILE,
+            &line,
+        )?;
+
+        let mut destroyed = 0usize;
+        for (pack, chunks) in self.store.packs_with_chunks() {
+            if chunks.iter().any(|c| doomed.contains(c)) {
+                destroyed += self.store.rewrite_pack_without(pack, &doomed)?;
+            }
+        }
+        // This workspace's own copy goes with it. Other workspaces are other
+        // directories; what they hold on disk is theirs to remove.
+        if let Some(name) = platform::os_string_from_bytes(&rel) {
+            remove_entry(&self.root.join(name))?;
+        }
+
+        let entry = self.oplog.commit(
+            Operation::Redact {
+                target: display_path(&rel),
+                redactor: redactor.to_string(),
+            },
+            None,
+        )?;
+        Ok(RedactOutcome {
+            target: display_path(&rel),
+            chunks_destroyed: destroyed as u64,
+            places_in_history: holders.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// A path as history would name it, whether or not anything is on disk
+    /// there now. Redaction targets history, and the common case is a secret
+    /// the user has already deleted from the working tree — `locate` refuses
+    /// an absent path because assignment needs bytes, and this does not.
+    /// Containment is still checked the way `locate` checks it: the parent is
+    /// resolved as far as it exists, so `..` and a linked directory have to
+    /// be followed before the answer means anything.
+    fn history_path(&self, target: &Path) -> Result<Vec<u8>> {
+        let root = self.canonical_root()?;
+        let resolved = match (target.parent(), target.file_name()) {
+            (Some(parent), Some(name)) => {
+                let parent = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+                resolve_as_far_as_it_exists(parent)?.join(name)
+            }
+            _ => resolve_as_far_as_it_exists(target)?,
+        };
+        resolved
+            .strip_prefix(&root)
+            .ok()
+            .and_then(relative_path_bytes)
+            .filter(|rel| !rel.is_empty())
+            .ok_or_else(|| {
+                Error::Invalid(format!(
+                    "{} is not a path inside this working tree",
+                    target.display()
+                ))
+            })
+    }
+
+    /// Every chunk a redaction has destroyed, from the ledger. Empty when
+    /// nothing has ever been redacted.
+    fn redacted_chunks(&self) -> Result<std::collections::HashSet<ChunkId>> {
+        let path = self
+            .repository
+            .join(REDACTED_DIR)
+            .join(REDACTED_LEDGER_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = std::collections::HashSet::new();
+        for line in text.lines() {
+            // A torn last line is a record that was never completed; nothing
+            // before it is affected, and the redaction that wrote it reruns.
+            let Ok(record) = serde_json::from_str::<RedactRecord>(line) else {
+                continue;
+            };
+            for hex in record.chunks {
+                if let Some(c) = ChunkId::from_hex(&hex) {
+                    out.insert(c);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The node at a path inside a tree, if there is one.
+    fn node_at(&self, tree_id: &str, components: &[&[u8]]) -> Result<Option<Node>> {
+        let Some((last, dirs)) = components.split_last() else {
+            return Ok(None);
+        };
+        let mut tree = self.load_tree(tree_id)?;
+        for dir in dirs {
+            match tree.entries.get(*dir) {
+                Some(Node::Directory { tree: child }) => tree = self.load_tree(child)?,
+                _ => return Ok(None),
+            }
+        }
+        Ok(tree.entries.get(*last).cloned())
+    }
+
+    /// Paths, under `tree_id`, of every file naming any chunk in `doomed`.
+    fn files_naming(
+        &self,
+        tree_id: &str,
+        doomed: &std::collections::HashSet<ChunkId>,
+        prefix: Vec<u8>,
+        out: &mut std::collections::BTreeSet<Vec<u8>>,
+    ) -> Result<()> {
+        let tree = self.load_tree(tree_id)?;
+        for (name, node) in &tree.entries {
+            let mut path = prefix.clone();
+            if !path.is_empty() {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
+            match node {
+                Node::Directory { tree: child } => self.files_naming(child, doomed, path, out)?,
+                Node::Symlink { .. } => {}
+                Node::File { chunks, .. } => {
+                    if chunks
+                        .iter()
+                        .any(|h| ChunkId::from_hex(h).is_some_and(|c| doomed.contains(&c)))
+                    {
+                        out.insert(path);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // --------------------------------------------------------------- merge
 
     /// Bring another line's history onto this one.
@@ -2609,7 +2912,15 @@ impl Repo {
             .collect();
         let mut removed: Vec<u64> = Vec::new();
         let mut collected: Vec<String> = Vec::new();
-        if let Some(oldest) = candidates.iter().map(|(pack, _)| *pack).min() {
+        // Redaction rewrites packs under fresh ids, which breaks the ordering
+        // the bound below leans on. A store that has ever redacted walks all
+        // of history; redaction is rare and thin's patience is cheap.
+        let bound = if self.redacted_chunks()?.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        if let Some(oldest) = bound.or_else(|| candidates.iter().map(|(pack, _)| *pack).min()) {
             // Stage two, bounded: a chunk in pack P was NOT in the store when
             // P was written — that is what `retain_unknown` means — so nothing
             // written before P can name it, and only checkpoints whose own
@@ -3141,6 +3452,18 @@ impl Repo {
                         return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
                     };
                     let Some(part) = self.store.read(cid)? else {
+                        // Absent because a redaction destroyed it: the file
+                        // is not written — not partially, not at all — and
+                        // the report says why. Absent for any other reason
+                        // is the error it always was.
+                        if self.redacted_chunks()?.contains(&cid) {
+                            report.collisions.push(Collision {
+                                path: String::from_utf8_lossy(name).into_owned(),
+                                collided_with: String::new(),
+                                reason: "not written: its content was redacted".to_string(),
+                            });
+                            return Ok(());
+                        }
                         return Err(Error::NotFound(format!(
                             "chunk {hex} is not present locally"
                         )));
@@ -3200,6 +3523,7 @@ impl Repo {
             structure_verified: true,
             chunks_verified: 0,
             chunks_absent: 0,
+            chunks_redacted: 0,
             checkpoints_partial: 0,
             checkpoints: 0,
             oplog_entries: self.oplog.len()?,
@@ -3213,6 +3537,7 @@ impl Repo {
         }
 
         let checkpoints = self.checkpoints()?;
+        let redacted = self.redacted_chunks()?;
         let known: std::collections::HashSet<&str> =
             checkpoints.iter().map(|c| c.id.as_str()).collect();
         for cp in &checkpoints {
@@ -3220,7 +3545,7 @@ impl Repo {
             if self.change_a_checkpoint_took(&cp.id)?.is_some() {
                 report.checkpoints_partial += 1;
             }
-            if let Err(e) = self.verify_tree(&cp.tree, &mut report) {
+            if let Err(e) = self.verify_tree(&cp.tree, &mut report, &redacted) {
                 report.structure_verified = false;
                 report
                     .errors
@@ -3310,7 +3635,12 @@ impl Repo {
         Ok(report)
     }
 
-    fn verify_tree(&self, tree_id: &str, report: &mut VerifyReport) -> Result<()> {
+    fn verify_tree(
+        &self,
+        tree_id: &str,
+        report: &mut VerifyReport,
+        redacted: &std::collections::HashSet<ChunkId>,
+    ) -> Result<()> {
         let Some(id) = ChunkId::from_hex(tree_id) else {
             return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
         };
@@ -3332,7 +3662,7 @@ impl Repo {
 
         for node in tree.entries.values() {
             match node {
-                Node::Directory { tree } => self.verify_tree(tree, report)?,
+                Node::Directory { tree } => self.verify_tree(tree, report, redacted)?,
                 Node::Symlink { .. } => {}
                 Node::File { chunks, .. } => {
                     for hex in chunks {
@@ -3342,7 +3672,17 @@ impl Repo {
                         // `store.read` re-hashes and errors on mismatch, so a
                         // successful read IS the verification.
                         match self.store.read(cid) {
+                            // Destroyed content that is still here is the one
+                            // thing a redaction ledger exists to catch.
+                            Ok(Some(_)) if redacted.contains(&cid) => {
+                                report.structure_verified = false;
+                                report.errors.push(format!(
+                                    "redacted content is still present: chunk {}",
+                                    crate::short_id(hex)
+                                ));
+                            }
                             Ok(Some(_)) => report.chunks_verified += 1,
+                            Ok(None) if redacted.contains(&cid) => report.chunks_redacted += 1,
                             Ok(None) => report.chunks_absent += 1,
                             Err(e) => {
                                 report.structure_verified = false;
@@ -3900,6 +4240,28 @@ const ARCHIVE_DIR: &str = "archive";
 /// Where thinning records what it collected.
 const THIN_DIR: &str = "thin";
 const THIN_LEDGER_FILE: &str = "ledger.jsonl";
+/// Where redaction records what it destroyed: the tombstones that let
+/// `verify` tell destroyed from lost. Never compacted, never thinned.
+const REDACTED_DIR: &str = "redacted";
+const REDACTED_LEDGER_FILE: &str = "ledger.jsonl";
+
+/// One redaction, as the ledger records it.
+#[derive(Serialize, Deserialize)]
+struct RedactRecord {
+    at_unix_ms: u64,
+    target: String,
+    redactor: String,
+    chunks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RedactOutcome {
+    pub target: String,
+    pub chunks_destroyed: u64,
+    pub places_in_history: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
 
 /// The last sync attempt, as a real sync will read it back.
 #[derive(Serialize, Deserialize)]
@@ -4126,7 +4488,7 @@ fn checkpointed_change(typed: &str, line: &str, oplog: &OpLog) -> Result<Option<
     let undone: std::collections::HashSet<u64> = entries
         .iter()
         .filter_map(|e| match &e.operation {
-            Operation::Undo { undone_seq } => Some(*undone_seq),
+            Operation::Undo { undone_seq } => *undone_seq,
             _ => None,
         })
         .collect();
@@ -4777,14 +5139,10 @@ mod tests {
             .unwrap();
 
         let moved = repo.changes().unwrap();
-        assert_eq!(
-            moved
-                .iter()
-                .find(|c| c.id == first.change)
-                .unwrap()
-                .assigned,
-            Vec::<String>::new(),
-            "a path belongs to one change at a time"
+        assert!(
+            moved.iter().all(|c| c.id != first.change),
+            "a path belongs to one change at a time, and the change it left \
+             holds nothing now, so it is closed rather than listed empty"
         );
         assert_eq!(
             moved
@@ -5228,6 +5586,84 @@ mod tests {
         platform::lock_exclusive(&lock, std::time::Duration::from_millis(500)).expect(
             "closing the repository releases it — including on a kill, \
                      since the OS owns the release",
+        );
+    }
+
+    #[test]
+    fn an_undo_that_finds_nothing_is_still_recorded_at_a_position() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+        let seed = repo.save("seed", None).unwrap();
+
+        let first = repo.undo().unwrap();
+        let second = repo.undo().unwrap();
+
+        assert!(
+            first.nothing_to_undo,
+            "premise: a root save has no parent to return to"
+        );
+        let first_seq = first
+            .undo_seq
+            .expect("an attempt that found nothing still has a position");
+        let second_seq = second.undo_seq.expect("and so does the next one");
+        assert!(first_seq > seed.checkpoint.oplog_seq && second_seq > first_seq);
+        assert!(
+            second.nothing_to_undo,
+            "the recorded attempt is not itself something to undo"
+        );
+    }
+
+    #[test]
+    fn a_workspace_joining_a_line_it_has_never_been_on_gets_the_line_s_tip() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        repo.start_line("feature").unwrap();
+        fs::write(dir.path().join("feature.txt"), b"on feature").unwrap();
+        repo.save("feature work", None).unwrap();
+        drop(repo);
+
+        let mut other = Repo::discover(&at).unwrap();
+        let out = other.switch_line("feature").unwrap();
+
+        assert_eq!(out.line, "feature");
+        assert_eq!(
+            fs::read(at.join("feature.txt")).unwrap(),
+            b"on feature",
+            "a workspace that never left the line gets its tip, as `workspace new` would"
+        );
+        assert_eq!(other.current_line().unwrap(), "feature");
+    }
+
+    #[test]
+    fn undo_in_one_workspace_leaves_another_workspace_s_switch_standing() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        drop(repo);
+        let mut other = Repo::discover(&at).unwrap();
+        other.start_line("feature").unwrap();
+        drop(other);
+
+        let mut repo = Repo::discover(dir.path()).unwrap();
+        let out = repo.undo().unwrap();
+
+        assert!(
+            out.nothing_to_undo,
+            "the other workspace's start is not this one's to reverse, and the \
+             seed save has no parent to fall back to"
+        );
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
+        drop(repo);
+        let other = Repo::discover(&at).unwrap();
+        assert_eq!(
+            other.current_line().unwrap(),
+            "feature",
+            "and the switch it made still stands"
         );
     }
 
@@ -6164,6 +6600,114 @@ mod tests {
     // ------------------------------------------------------------ verbs
 
     #[test]
+    fn redact_destroys_content_everywhere_history_holds_it_and_undo_never_brings_it_back() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("secret.txt"), b"hunter2, the whole of it").unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let first = repo.save("leaked", None).unwrap().checkpoint;
+        fs::write(dir.path().join("a.txt"), b"aa").unwrap();
+        repo.save("still there", None).unwrap();
+        let secret_chunk = ChunkId::of(b"hunter2, the whole of it");
+        assert!(
+            repo.store().contains(secret_chunk),
+            "premise: the content is stored"
+        );
+
+        let out = repo
+            .redact(&dir.path().join("secret.txt"), "tester", true)
+            .unwrap();
+
+        assert_eq!(out.places_in_history, 2, "named by both checkpoints");
+        assert!(out.chunks_destroyed >= 1);
+        assert!(
+            !repo.store().contains(secret_chunk),
+            "and the bytes are gone from the store"
+        );
+        assert!(
+            !dir.path().join("secret.txt").exists(),
+            "and from this working tree"
+        );
+        let report = repo.verify(true).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.chunks_absent, 0, "destroyed is not lost");
+        assert!(report.chunks_redacted >= 1);
+
+        let outdir = tempfile::tempdir().unwrap();
+        let written = repo
+            .checkout_into(Some(&first.id), &outdir.path().join("c"))
+            .unwrap();
+        assert!(
+            !outdir.path().join("c/secret.txt").exists(),
+            "a checkout does not resurrect it"
+        );
+        assert!(
+            written
+                .collisions
+                .iter()
+                .any(|c| c.reason.contains("redacted")),
+            "and says why"
+        );
+        assert_eq!(
+            fs::read(outdir.path().join("c/a.txt")).unwrap(),
+            b"a",
+            "everything else is intact"
+        );
+
+        for _ in 0..8 {
+            if repo.undo().unwrap().nothing_to_undo {
+                break;
+            }
+        }
+        assert!(
+            !repo.store().contains(secret_chunk),
+            "undo-all never brings it back"
+        );
+    }
+
+    #[test]
+    fn redact_refuses_content_another_path_also_holds_rather_than_destroy_both() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("secret.txt"), b"the same bytes").unwrap();
+        fs::write(dir.path().join("copy.txt"), b"the same bytes").unwrap();
+        repo.save("two names, one content", None).unwrap();
+
+        let err = repo
+            .redact(&dir.path().join("secret.txt"), "tester", true)
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Invalid(_)), "{err}");
+        assert!(
+            err.to_string().contains("copy.txt"),
+            "names the other path: {err}"
+        );
+        assert!(
+            repo.store().contains(ChunkId::of(b"the same bytes")),
+            "and destroys nothing"
+        );
+    }
+
+    #[test]
+    fn redact_wants_the_irreversibility_named_and_finds_nothing_for_an_unknown_path() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("secret.txt"), b"s").unwrap();
+        repo.save("one", None).unwrap();
+
+        let err = repo
+            .redact(&dir.path().join("secret.txt"), "tester", false)
+            .unwrap_err();
+        assert!(err.to_string().contains("--confirm-destroy"), "{err}");
+        assert!(
+            repo.store().contains(ChunkId::of(b"s")),
+            "nothing destroyed without it"
+        );
+
+        let err = repo
+            .redact(&dir.path().join("never-saved.txt"), "tester", true)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err}");
+    }
+
+    #[test]
     fn merge_fast_forwards_onto_a_line_that_moved_ahead_and_undo_brings_it_back() {
         let (dir, mut repo) = counted_ids(repo());
         fs::write(dir.path().join("a.txt"), b"a").unwrap();
@@ -6476,6 +7020,48 @@ mod tests {
             changes[0].id, assigned.change,
             "and the original change is the one that remains, holding everything again"
         );
+    }
+
+    #[test]
+    fn assign_closes_a_change_it_empties_and_undo_reopens_it() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("docs/b.txt"), b"b").unwrap();
+        repo.save("seed", None).unwrap();
+        let assigned = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+        repo.split().unwrap();
+        assert_eq!(
+            repo.changes().unwrap().len(),
+            2,
+            "premise: split minted a second change for docs/"
+        );
+
+        // Everything back into the current change: the minted one is emptied.
+        repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+
+        let changes = repo.changes().unwrap();
+        assert_eq!(
+            changes.len(),
+            1,
+            "a change left holding nothing is closed, not listed empty"
+        );
+        assert_eq!(changes[0].id, assigned.change);
+        assert_eq!(changes[0].assigned.len(), 2);
+
+        repo.undo().unwrap();
+
+        let changes = repo.changes().unwrap();
+        assert_eq!(
+            changes.len(),
+            2,
+            "undoing the assignment reopens the closed change with its path"
+        );
+        let reopened = changes
+            .iter()
+            .find(|c| c.id != assigned.change)
+            .expect("the minted change is back");
+        assert_eq!(reopened.assigned, vec!["docs/b.txt".to_string()]);
     }
 
     #[test]
@@ -7123,16 +7709,18 @@ mod tests {
         repo.undo().unwrap();
         assert_eq!(ids(&repo), vec![a.id.clone()]);
 
-        // At the root there is nothing to undo, and no op is appended.
+        // At the root there is nothing to undo. The attempt is still
+        // recorded — exactly one entry, at a position the outcome names.
         let before = repo.oplog().len().unwrap();
         let u3 = repo.undo().unwrap();
         assert!(u3.nothing_to_undo);
         assert_eq!(u3.now_at, None);
         assert_eq!(
             repo.oplog().len().unwrap(),
-            before,
-            "nothing_to_undo must append no op"
+            before + 1,
+            "nothing_to_undo appends the attempt and nothing else"
         );
+        assert_eq!(u3.undo_seq, Some(before + 1));
         assert_eq!(
             repo.head_checkpoint().unwrap().unwrap().id,
             a.id,
