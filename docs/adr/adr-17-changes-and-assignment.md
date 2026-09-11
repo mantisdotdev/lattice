@@ -167,6 +167,44 @@ are capped, and the cap is reported when hit. When hunk-level assignment lands,
 assignment sets move to content-addressed blobs referenced by address — the
 pattern `working` already uses — rather than growing this key.
 
+> **Corrected 2026-09-12, from the G1.4 rerun.** The cap above bounds the
+> paths one change holds. It does not bound the number of change *records*,
+> and the pool G1.4 draws makes that number grow without limit: `split`
+> groups the current change's paths by first component, so on a flat tree a
+> 999-path split mints 999 one-path changes, and the next `assign .` moves
+> every one of those paths back — leaving 999 records that hold nothing. On
+> the index-driven binary the rerun slowed from 695 operations a minute to 52,
+> and stopping it at entry 32,461 found 1,317,917 changes minted by 3,288
+> splits, 1,271,545 of their paths displaced back by assigns, and every
+> command deserialising the result twice. `bench/results/raw/adr17-closed-changes.json`:
+>
+> ```json
+> {
+>   "op_log_seq_archived": 32461,
+>   "redb_bytes": 811225088,
+>   "splits": 3288,
+>   "changes_minted_by_split": 1317917,
+>   "paths_displaced_by_assign": 1271545
+> }
+> ```
+>
+> Sampling `workspace list` on a clone of that repository put 254 of 293
+> samples inside the `LINES` deserialisation, so the document, not the packs
+> or the log, was the cost.
+>
+> The rule that was missing: **a change an assignment empties is closed.**
+> `assign` removes a previous owner it leaves holding nothing; nothing names
+> that record any more, and the inverse already reopens it from `displaced`
+> (it inserts with `entry`, never `get_mut`), so undo-all round-trips exactly
+> as before — only a change that is *current* may sit open and empty, which
+> is the state a fully-refused bare assign has always produced. This is not a
+> format change: the document's shape is unchanged, and a repository written
+> before the rule sheds its empty records the next time an assignment
+> displaces from them. Records emptied by some other route — `assign --to`
+> moving the current change's paths elsewhere — stay, because closing the
+> current change would leave `current_change` naming nothing, and G1.3 would
+> then see a `change list` that differs after undo.
+
 ### 5. One `save`, with a scope flag
 
 ```console

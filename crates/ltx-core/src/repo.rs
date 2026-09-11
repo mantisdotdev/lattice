@@ -1609,6 +1609,16 @@ impl Repo {
             if let Some(owner) = held_by {
                 if let Some(previous) = record.changes.get_mut(owner) {
                     previous.assigned.remove(&path);
+                    // A change this assignment empties is closed. Nothing
+                    // names it any more, and the inverse reopens it from
+                    // `displaced` (it inserts with `entry`, not `get_mut`).
+                    // Left open, the split -> assign cycle G1.4 draws
+                    // accumulates one empty record per path per split, and
+                    // every command parses all of them (ADR-17, correction
+                    // of 2026-09-12).
+                    if previous.assigned.is_empty() {
+                        record.changes.remove(owner);
+                    }
                 }
                 displaced.push((path.clone(), owner.clone()));
             }
@@ -5080,14 +5090,10 @@ mod tests {
             .unwrap();
 
         let moved = repo.changes().unwrap();
-        assert_eq!(
-            moved
-                .iter()
-                .find(|c| c.id == first.change)
-                .unwrap()
-                .assigned,
-            Vec::<String>::new(),
-            "a path belongs to one change at a time"
+        assert!(
+            moved.iter().all(|c| c.id != first.change),
+            "a path belongs to one change at a time, and the change it left \
+             holds nothing now, so it is closed rather than listed empty"
         );
         assert_eq!(
             moved
@@ -6887,6 +6893,48 @@ mod tests {
             changes[0].id, assigned.change,
             "and the original change is the one that remains, holding everything again"
         );
+    }
+
+    #[test]
+    fn assign_closes_a_change_it_empties_and_undo_reopens_it() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("docs/b.txt"), b"b").unwrap();
+        repo.save("seed", None).unwrap();
+        let assigned = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+        repo.split().unwrap();
+        assert_eq!(
+            repo.changes().unwrap().len(),
+            2,
+            "premise: split minted a second change for docs/"
+        );
+
+        // Everything back into the current change: the minted one is emptied.
+        repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+
+        let changes = repo.changes().unwrap();
+        assert_eq!(
+            changes.len(),
+            1,
+            "a change left holding nothing is closed, not listed empty"
+        );
+        assert_eq!(changes[0].id, assigned.change);
+        assert_eq!(changes[0].assigned.len(), 2);
+
+        repo.undo().unwrap();
+
+        let changes = repo.changes().unwrap();
+        assert_eq!(
+            changes.len(),
+            2,
+            "undoing the assignment reopens the closed change with its path"
+        );
+        let reopened = changes
+            .iter()
+            .find(|c| c.id != assigned.change)
+            .expect("the minted change is back");
+        assert_eq!(reopened.assigned, vec!["docs/b.txt".to_string()]);
     }
 
     #[test]
