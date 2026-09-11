@@ -351,14 +351,30 @@ impl Repo {
         // A format NEWER than this build is refused too: its entries may use
         // variants this build cannot parse, and guessing at them is how a
         // reader corrupts a repository it did not understand.
-        match OpLog::format_version_at(&meta)? {
+        //
+        // The two refusals are DIFFERENT errors, because their recoveries are
+        // opposites. Too old means the entries cannot be re-hashed and the
+        // repository has to be recreated. Too new means the repository is
+        // intact and this build is behind — and telling that user to recreate
+        // it, as one shared message did, destroys a history a current build
+        // opens without complaint.
+        let found = OpLog::format_version_at(&meta)?;
+        let describe = |v: Option<u64>| {
+            v.map(|v| v.to_string())
+                .unwrap_or_else(|| "1 (unversioned)".into())
+        };
+        match found {
             Some(v) if (MIN_READABLE_FORMAT..=FORMAT_VERSION).contains(&v) => {}
+            Some(v) if v > FORMAT_VERSION => {
+                return Err(Error::FormatFromNewerBuild(format!(
+                    "this repository is on-disk format {v} but this build reads \
+                     formats {MIN_READABLE_FORMAT}–{FORMAT_VERSION}"
+                )))
+            }
             other => {
                 return Err(Error::UnsupportedFormat(format!(
                     "this repository is on-disk format {} but this build reads formats {}–{}",
-                    other
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "1 (unversioned)".into()),
+                    describe(other),
                     MIN_READABLE_FORMAT,
                     FORMAT_VERSION
                 )))
@@ -5134,6 +5150,51 @@ mod tests {
                 "a refusal must carry a way back to safety"
             );
         }
+    }
+
+    #[test]
+    fn a_repository_from_a_newer_build_is_never_told_to_re_create_itself() {
+        // The two format refusals shared one recovery, which said to start a
+        // fresh repository and re-save the work into it. For a format this
+        // build is too OLD to read, that is right. For one written by a NEWER
+        // build it destroys a history that a current build opens without
+        // complaint — a user who follows the advice loses everything, on the
+        // say-so of an error message.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let repo = Repo::init(dir.path()).unwrap();
+            repo.oplog.set_format_version(FORMAT_VERSION + 1).unwrap();
+        }
+
+        let newer = Repo::open(dir.path()).unwrap_err();
+
+        assert!(
+            !newer.recovery().contains("ltx init"),
+            "a healthy repository must never be told to re-create itself: {}",
+            newer.recovery()
+        );
+        assert!(
+            newer.recovery().contains("build"),
+            "and it must say what IS behind, which is this build: {}",
+            newer.recovery()
+        );
+
+        // The older direction keeps the advice that suits it, so the split is
+        // a distinction and not a blanket change of message.
+        let older = tempfile::tempdir().unwrap();
+        {
+            let repo = Repo::init(older.path()).unwrap();
+            repo.oplog
+                .set_format_version(MIN_READABLE_FORMAT - 1)
+                .unwrap();
+        }
+        assert!(
+            Repo::open(older.path())
+                .unwrap_err()
+                .recovery()
+                .contains("ltx init"),
+            "a repository this build genuinely cannot read still has to be recreated"
+        );
     }
 
     #[test]
