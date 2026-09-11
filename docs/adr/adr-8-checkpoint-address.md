@@ -209,6 +209,29 @@ The first save is unchanged, which is the control: it always wrote its content
 and never looked a checkpoint up, so nothing about it should have moved, and
 nothing did.
 
+The sharpest version of the result comes from the instrument that found the
+defect. ADR-6 used `probe_scaling.py --attribute` to separate the commands that
+answer from redb from the ones that go through `checkpoints()`, and at 10,000
+files they were two orders of magnitude apart. Running the same mode afterwards
+— `bench/results/raw/adr8-attribution.json`:
+
+```json
+{
+  "files": 10000,
+  "samples": 5,
+  "internals_oplog_s": 0.035,
+  "line_list_s": 0.035,
+  "log_forensic_s": 0.039,
+  "status_s": 0.038
+}
+```
+
+The two groups have collapsed into one. `log --forensic` was 7.782 s and is
+0.039 s; `status` was 11.524 s and is 0.038 s; the two commands that never
+scanned are where they always were. Every read command now costs process startup
+plus an indexed lookup, and nothing in the list can be told from anything else —
+which is what it means for the scan to be gone rather than merely smaller.
+
 `status` went from 8.361 s to 0.038 s and stopped growing: 0.035, 0.035, 0.038
 at 1,000, 5,000 and 10,000 files.
 

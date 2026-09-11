@@ -1,0 +1,9 @@
+{
+  "probe": "attribution",
+  "files": 10000,
+  "samples": 5,
+  "internals_oplog_s": 0.035,
+  "line_list_s": 0.035,
+  "log_forensic_s": 0.039,
+  "status_s": 0.038
+}
