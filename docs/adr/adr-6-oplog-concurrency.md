@@ -188,9 +188,14 @@ indexed is fast, and what is scanned is not.
 | `log --forensic` | 6.737 s | `checkpoints()` — reads every blob |
 | `status` | 10.435 s | `head_checkpoint` + `checkpoints()` |
 
-`save` pays it too, through `head_checkpoint`. A second, smaller scan of the
-same kind sits in `PackWriter::retain_unknown`, which asks `Store::contains` per
-chunk while `contains` scans every pack — worth fixing, but not what dominates.
+`save` pays it too, through `head_checkpoint`. A second cost, of a different
+shape, sits in `PackWriter::retain_unknown`: it asks `Store::contains` once per
+chunk offered, and `contains` binary-searches the index of every pack. It reads
+no payload and decompresses nothing, so it is not a scan of the same kind, and
+at the handful of saves this probe makes it is nothing. What it grows with is
+the number of packs — and a save writes a pack. At G1.4's 80,000 operations
+that is 80,000 index searches per chunk offered, which is why it is worth
+fixing even though it is not what dominates here.
 
 <!-- evidence: medians of three runs of each command against one 10,000-file repository built by the same method as scripts/probe_scaling.py; the two rows the probe records are in bench/results/raw/adr6-scaling.json -->
 

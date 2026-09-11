@@ -28,7 +28,10 @@ milliseconds:
     status             10.435 s    head_checkpoint + checkpoints()
 
 `save` pays it too, through `head_checkpoint`. `PackWriter::retain_unknown`
-asking `Store::contains` per chunk is a second, smaller scan of the same kind.
+asking `Store::contains` per chunk is a second cost but NOT a scan of the same
+kind: `contains` binary-searches each pack's index and reads no payload. It
+grows with the pack count rather than the blob count, so it is nothing at the
+few saves measured here and material only once a history has many packs.
 
 Both predate the workspace slice, which is why `--ltx` exists: pointing it at a
 binary built from another revision produces a second arm, and the two together
