@@ -343,8 +343,24 @@ mod tests {
         // below is simply never checked. G2.4 covers that gap from outside,
         // by triggering errors through the shipped CLI.
         const IMPLEMENTED: &[&str] = &[
-            "init", "save", "status", "log", "verify", "checkout", "undo", "start", "switch",
-            "line", "assign", "change", "workspace", "lens", "sync", "merge", "split", "thin",
+            "init",
+            "save",
+            "status",
+            "log",
+            "verify",
+            "checkout",
+            "undo",
+            "start",
+            "switch",
+            "line",
+            "assign",
+            "change",
+            "workspace",
+            "lens",
+            "sync",
+            "merge",
+            "split",
+            "thin",
             "internals",
         ];
         let cases: Vec<Error> = vec![

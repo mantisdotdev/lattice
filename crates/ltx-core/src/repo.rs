@@ -1134,7 +1134,7 @@ impl Repo {
             remote_effects_not_undone: Vec::new(),
         };
         // What the working tree must look like afterwards, if it must change.
-        let mut materialise: Option<Option<String>> = None;
+        let mut materialise: Option<(String, Option<String>)> = None;
 
         match &entry.operation {
             Operation::Save {
@@ -1180,22 +1180,22 @@ impl Repo {
                     // work is never destroyed — retrieval belongs to the
                     // ephemeral tier (ADR-16, open conflict 3).
                     lines.lines.remove(name);
-                    outcome.preserved_working_state = Some(captured);
+                    outcome.preserved_working_state = Some(captured.clone());
                 } else {
-                    self.set_preserved(&mut lines, name, Some(captured));
+                    self.set_preserved(&mut lines, name, Some(captured.clone()));
                 }
                 let restored = self.preserved(&lines, from);
                 self.set_current_line(&mut lines, from);
-                materialise = Some(restored);
+                materialise = Some((captured, restored));
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
             Operation::Switch { from, to } => {
                 if from != to {
                     let captured = self.capture_working_tree()?;
-                    self.set_preserved(&mut lines, to, Some(captured));
+                    self.set_preserved(&mut lines, to, Some(captured.clone()));
                     let restored = self.preserved(&lines, from);
                     self.set_current_line(&mut lines, from);
-                    materialise = Some(restored);
+                    materialise = Some((captured, restored));
                 }
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
@@ -1267,9 +1267,9 @@ impl Repo {
                     // rewrites it back — through the same pending mechanism
                     // switch uses, so a crash mid-way completes next command.
                     let rescued = self.capture_working_tree()?;
-                    outcome.preserved_working_state = Some(rescued);
+                    outcome.preserved_working_state = Some(rescued.clone());
                     self.set_preserved(&mut lines, line, captured.clone());
-                    materialise = Some(captured.clone());
+                    materialise = Some((rescued, captured.clone()));
                 }
             }
             Operation::Split {
@@ -1322,12 +1322,12 @@ impl Repo {
         )?;
         outcome.undo_seq = Some(undo_entry.seq);
 
-        if let Some(target) = materialise {
+        if let Some((snapshot, target)) = materialise {
             // Same discipline as switch_to: the restored address stays in the
             // published state until the files are actually written, so a failed
             // materialisation cannot drop the only reference to that work. It
             // then reads as a pending switch, which the next command completes.
-            self.materialise_working_tree(target.as_deref())?;
+            self.materialise_working_tree(Some(&snapshot), target.as_deref())?;
             let current = self.line_of(&lines);
             self.set_preserved(&mut lines, &current, None);
             self.oplog.publish_lines(&lines)?;
@@ -1913,7 +1913,7 @@ impl Repo {
         // Capture first: no materialisation ever happens without the current
         // working tree already durable in the store.
         let captured = self.capture_working_tree()?;
-        self.set_preserved(&mut lines, from, Some(captured));
+        self.set_preserved(&mut lines, from, Some(captured.clone()));
         let target = lines.lines.entry(to.to_string()).or_default();
         // The preserved address is deliberately LEFT IN PLACE across the
         // publish. It is the marker that materialisation is still pending: if
@@ -1941,7 +1941,7 @@ impl Repo {
             }
         };
         let entry = self.oplog.commit(op, Some(lines.clone()))?;
-        self.materialise_working_tree(restored.as_deref())?;
+        self.materialise_working_tree(Some(&captured), restored.as_deref())?;
         // Materialisation done: the bytes on disk are now the truth for this
         // line, so the preserved copy is consumed and the invariant that the
         // current line holds no preserved state is restored.
@@ -1993,7 +1993,7 @@ impl Repo {
             self.oplog.publish_lines(&lines)?;
             return Ok(None);
         }
-        self.materialise_working_tree(Some(&pending))?;
+        self.materialise_working_tree(Some(&rescued), Some(&pending))?;
         self.set_preserved(&mut lines, &current, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
@@ -2026,8 +2026,22 @@ impl Repo {
     /// Unreachable from any caller today — every one passes `Some` — so this
     /// costs a refusal in a case that does not arise, and prevents a silent
     /// deletion in one that would.
-    fn materialise_working_tree(&self, tree: Option<&str>) -> Result<()> {
-        let Some(target) = tree else {
+    /// Bring the working tree to the state `to` describes.
+    ///
+    /// `from` is the snapshot of the working tree the caller just took —
+    /// every caller captures before it materialises (ADR-16 §6) — and with it
+    /// only the DIFFERENCE is touched: an entry whose node is identical in
+    /// both trees is already on disk exactly as `to` wants it, and a subtree
+    /// with the same address on both sides is skipped without being read.
+    /// Without this, every switch rewrote every file in the working tree, so a
+    /// switch cost the size of the tree rather than the size of the change —
+    /// and G1.4's eight workspaces, each gaining a file per operation, had
+    /// slowed to a crawl by their few-hundredth operation of ten thousand.
+    ///
+    /// With no snapshot, the working tree itself is reconciled: pruned to the
+    /// target and rewritten in full. That is the slow path and the safe one.
+    fn materialise_working_tree(&self, from: Option<&str>, to: Option<&str>) -> Result<()> {
+        let Some(target) = to else {
             return Err(Error::Invalid(
                 "this line preserved no working state, so there is nothing to \
                  restore; the working tree has been left exactly as it is"
@@ -2041,12 +2055,127 @@ impl Repo {
             entries_written: 0,
             collisions: Vec::new(),
         };
-        // Reconciling, unlike `checkout --into`: switching lines must also
-        // REMOVE what the target tree does not name, or the working tree
-        // becomes the union of both lines and switch stops being involutive.
-        self.prune_to_tree(&target, &root)?;
-        self.restore_tree(&target, &root, &mut report)?;
+        match from {
+            Some(from) => self.reconcile_tree(from, &target, &root, &mut report)?,
+            None => {
+                // Reconciling, unlike `checkout --into`: switching lines must
+                // also REMOVE what the target tree does not name, or the
+                // working tree becomes the union of both lines and switch
+                // stops being involutive.
+                self.prune_to_tree(&target, &root)?;
+                self.restore_tree(&target, &root, &mut report)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Reconcile one directory from the state `from_id` describes to the
+    /// state `to_id` describes, touching only what differs.
+    ///
+    /// `from_id` is a faithful snapshot of what is in `dest` right now, so
+    /// "named by `from` and not by `to`" is exactly "on disk and must go",
+    /// and "identical node on both sides" is exactly "already right".
+    ///
+    /// The one subtlety is a name the filesystem folds onto one that stays.
+    /// `write_entry` detects a fold by the identity of what this pass already
+    /// created in the directory — and an unchanged entry was not created by
+    /// this pass. So the identities of everything that stays are gathered
+    /// FIRST, and only then is anything written: a changed name that folds
+    /// onto an unchanged one is reported as a collision, not written over it.
+    fn reconcile_tree(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        dest: &Path,
+        report: &mut CheckoutReport,
+    ) -> Result<()> {
+        if from_id == to_id {
+            return Ok(());
+        }
+        let to = self.load_tree(to_id)?;
+        // The snapshot was written moments ago under this same lock, so its
+        // absence is damage rather than a case to work around.
+        let from = self.load_tree(from_id).map_err(|e| {
+            Error::Corrupt(format!(
+                "the working-tree snapshot {} cannot be read: {e}",
+                crate::short_id(from_id)
+            ))
+        })?;
+
+        // 0. Remove what `to` does not name.
+        for name in from.entries.keys() {
+            if to.entries.contains_key(name) {
+                continue;
+            }
+            // The snapshot's names came from this directory, so a name this
+            // platform cannot spell was never on it — nothing to remove.
+            let Some(name_os) = platform::os_string_from_bytes(name) else {
+                continue;
+            };
+            remove_entry(&dest.join(&name_os))?;
+        }
+
+        // 1. What stays, and what it is on disk — see above.
+        let mut written_ids: Vec<(Vec<u8>, (u64, u64))> = Vec::new();
+        for (name, node) in &to.entries {
+            if from.entries.get(name) != Some(node) {
+                continue;
+            }
+            let Some(name_os) = platform::os_string_from_bytes(name) else {
+                continue;
+            };
+            if let Ok(meta) = fs::symlink_metadata(dest.join(&name_os)) {
+                if let Some(id) = platform::file_identity(&meta) {
+                    written_ids.push((name.clone(), id));
+                }
+            }
+        }
+
+        // 2. Write what changed.
+        for (name, node) in &to.entries {
+            let before = from.entries.get(name);
+            if before == Some(node) {
+                continue;
+            }
+            if let (
+                Some(Node::Directory { tree: from_child }),
+                Node::Directory { tree: to_child },
+            ) = (before, node)
+            {
+                // A directory on both sides whose contents differ: descend,
+                // rather than delete and rewrite the whole of it.
+                if !is_safe_component(name) {
+                    continue;
+                }
+                let Some(name_os) = platform::os_string_from_bytes(name) else {
+                    continue;
+                };
+                self.reconcile_tree(from_child, to_child, &dest.join(&name_os), report)?;
+                continue;
+            }
+            if before.is_some() {
+                // The kind changed, or a file's content did. What stands here
+                // goes first, so a directory in the way of a file — or a file
+                // in the way of a directory — cannot fail the write half-way.
+                if let Some(name_os) = platform::os_string_from_bytes(name) {
+                    remove_entry(&dest.join(&name_os))?;
+                }
+            }
+            self.write_entry(name, node, dest, &mut written_ids, report)?;
+        }
+        Ok(())
+    }
+
+    fn load_tree(&self, tree_id: &str) -> Result<Tree> {
+        let Some(id) = ChunkId::from_hex(tree_id) else {
+            return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
+        };
+        let Some(bytes) = self.store.read(id)? else {
+            return Err(Error::NotFound(format!(
+                "tree {tree_id} is not present locally"
+            )));
+        };
+        Tree::from_bytes(&bytes)
     }
 
     /// Delete working-tree entries the target tree does not name.
@@ -2234,11 +2363,11 @@ impl Repo {
                 from: other.clone(),
                 before: ours,
                 after: Some(after.clone()),
-                captured: Some(captured),
+                captured: Some(captured.clone()),
             },
             Some(lines.clone()),
         )?;
-        self.materialise_working_tree(Some(&target_tree))?;
+        self.materialise_working_tree(Some(&captured), Some(&target_tree))?;
         self.set_preserved(&mut lines, &line, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
@@ -3848,6 +3977,22 @@ fn append_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Remove whatever stands at `path`, by what it is on disk. Already gone is
+/// fine; anything else is not.
+fn remove_entry(path: &Path) -> Result<()> {
+    let result = match fs::symlink_metadata(path) {
+        // Never descend through a link: the target is outside the tree.
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => fs::remove_dir_all(path),
+        Ok(_) => return platform::remove_file_or_symlink(path),
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn display_path(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
@@ -4815,7 +4960,7 @@ mod tests {
         fs::write(dir.path().join("unassigned.txt"), b"not checkpointed").unwrap();
         repo.save("seed", None).unwrap();
 
-        let err = repo.materialise_working_tree(None).unwrap_err();
+        let err = repo.materialise_working_tree(None, None).unwrap_err();
 
         assert!(!err.recovery().is_empty());
         assert_eq!(
@@ -6046,7 +6191,79 @@ mod tests {
             matches!(repo.head_checkpoint(), Err(Error::Corrupt(_))),
             "a set tip with no blob must read as damage"
         );
-        assert!(repo.status().is_err(), "and status must not count around it");
+        assert!(
+            repo.status().is_err(),
+            "and status must not count around it"
+        );
+    }
+
+    #[test]
+    fn switching_touches_only_what_differs_between_the_two_lines() {
+        // Every file that is the same on both lines is made read-only. The
+        // old materialiser rewrote every file and would fail on the first of
+        // them; one that touches only the difference never opens them.
+        let (dir, mut repo) = repo();
+        fs::create_dir_all(dir.path().join("deep/er")).unwrap();
+        for i in 0..20 {
+            fs::write(dir.path().join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+        }
+        fs::write(dir.path().join("deep/er/kept.txt"), b"kept\n").unwrap();
+        repo.save("base", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f3.txt"), b"changed on feat\n").unwrap();
+        fs::write(dir.path().join("only-feat.txt"), b"new\n").unwrap();
+        fs::remove_file(dir.path().join("f7.txt")).unwrap();
+        repo.save("feat", None).unwrap();
+        repo.switch_line("main").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("f7.txt")).unwrap(),
+            b"7\n",
+            "premise: back on main"
+        );
+
+        let unchanged: Vec<PathBuf> = (0..20)
+            .filter(|i| *i != 3 && *i != 7)
+            .map(|i| dir.path().join(format!("f{i}.txt")))
+            .chain(std::iter::once(dir.path().join("deep/er/kept.txt")))
+            .collect();
+        // Read-only is part of the snapshot, so both lines must agree on it
+        // or the mode itself would be a difference to write.
+        for path in &unchanged {
+            platform::set_file_mode(path, 0o444).unwrap();
+        }
+        repo.save("read-only on main", None).unwrap();
+        repo.switch_line("feat").unwrap();
+        for path in &unchanged {
+            platform::set_file_mode(path, 0o444).unwrap();
+        }
+        repo.save("read-only on feat", None).unwrap();
+
+        repo.switch_line("main").unwrap();
+
+        assert_eq!(fs::read(dir.path().join("f3.txt")).unwrap(), b"3\n");
+        assert!(dir.path().join("f7.txt").exists(), "restored on main");
+        assert!(
+            !dir.path().join("only-feat.txt").exists(),
+            "removed on main"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("f5.txt")).unwrap(),
+            b"5\n",
+            "untouched, and intact"
+        );
+
+        repo.switch_line("feat").unwrap();
+
+        assert_eq!(
+            fs::read(dir.path().join("f3.txt")).unwrap(),
+            b"changed on feat\n"
+        );
+        assert!(!dir.path().join("f7.txt").exists());
+        assert_eq!(
+            fs::read(dir.path().join("only-feat.txt")).unwrap(),
+            b"new\n"
+        );
+        assert!(repo.verify(true).unwrap().errors.is_empty());
     }
 
     #[test]
