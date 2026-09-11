@@ -900,6 +900,20 @@ impl OpLog {
     ///
     /// One indexed lookup — the question "is this checkpoint part of history?"
     /// must not cost a scan of the whole log.
+    /// Every checkpoint a `Save` has recorded, by id. Read from the index,
+    /// so resolving what a user typed costs the keys of one table and no
+    /// entry is deserialised.
+    pub fn saved_checkpoints(&self) -> Result<Vec<String>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(SAVED)?;
+        let mut out = Vec::new();
+        for item in table.iter()? {
+            let (key, _) = item?;
+            out.push(key.value().to_string());
+        }
+        Ok(out)
+    }
+
     pub fn save_seq(&self, checkpoint: &str) -> Result<Option<u64>> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(SAVED)?;
