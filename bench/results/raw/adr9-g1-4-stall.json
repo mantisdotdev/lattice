@@ -1,0 +1,84 @@
+{
+  "probe": "g1.4-stall",
+  "op_log_seq_reached": 18437,
+  "redb_bytes": 350445568,
+  "rate_ops_per_min": {
+    "19:48": 239,
+    "21:30": 111,
+    "21:33": 14
+  },
+  "bytes_per_entry_by_sequence": [
+    {
+      "seq_from": 1,
+      "seq_to": 1843,
+      "entries": 1835,
+      "bytes_per_entry": 1160
+    },
+    {
+      "seq_from": 1844,
+      "seq_to": 3686,
+      "entries": 1817,
+      "bytes_per_entry": 3084
+    },
+    {
+      "seq_from": 3687,
+      "seq_to": 5529,
+      "entries": 1829,
+      "bytes_per_entry": 4866
+    },
+    {
+      "seq_from": 5530,
+      "seq_to": 7372,
+      "entries": 1814,
+      "bytes_per_entry": 6396
+    },
+    {
+      "seq_from": 7373,
+      "seq_to": 9215,
+      "entries": 1826,
+      "bytes_per_entry": 7985
+    },
+    {
+      "seq_from": 9216,
+      "seq_to": 11058,
+      "entries": 1824,
+      "bytes_per_entry": 9267
+    },
+    {
+      "seq_from": 11059,
+      "seq_to": 12901,
+      "entries": 1834,
+      "bytes_per_entry": 8736
+    },
+    {
+      "seq_from": 12902,
+      "seq_to": 14744,
+      "entries": 1836,
+      "bytes_per_entry": 8947
+    },
+    {
+      "seq_from": 14745,
+      "seq_to": 16587,
+      "entries": 1817,
+      "bytes_per_entry": 10658
+    },
+    {
+      "seq_from": 16588,
+      "seq_to": 18430,
+      "entries": 1827,
+      "bytes_per_entry": 9557
+    },
+    {
+      "seq_from": 18431,
+      "seq_to": 20273,
+      "entries": 4,
+      "bytes_per_entry": 245
+    }
+  ],
+  "largest_entry_sample": {
+    "kind": "compact",
+    "entry_bytes": 261,
+    "paths_in_entry": 0,
+    "first_path_as_serialised": null
+  }
+}
