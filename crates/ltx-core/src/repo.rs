@@ -4917,6 +4917,47 @@ mod tests {
     }
 
     #[test]
+    fn the_oldest_readable_repository_migrates_through_both_steps() {
+        // Format 3 is the oldest this build reads, and reaching 5 from there
+        // means running BOTH migrations in order. The existing format-3 test
+        // cannot show this: it builds its repository with the current code, so
+        // its checkpoint blob is already at the right address and the second
+        // migration has nothing to do. Here the blob is in the pre-5 shape AND
+        // the line state is in the format-3 shape, which is what a repository
+        // written by that build actually looked like.
+        let cp = checkpoint_of(&"ef".repeat(32), "ancient");
+        let dir = format_four_repository(&cp, &[]);
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            let legacy = serde_json::json!({
+                "current": DEFAULT_LINE,
+                "lines": { DEFAULT_LINE: { "tip": cp.id, "working": null } },
+            });
+            log.publish_raw_line_state(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("a format-3 repository still opens");
+
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(CHECKPOINT_ADDRESS_FORMAT),
+            "both steps run, not just the first"
+        );
+        let found = repo
+            .checkpoint(&cp.id)
+            .unwrap()
+            .expect("and the checkpoint is readable at its own address");
+        assert_eq!(found.message, "ancient");
+        assert_eq!(
+            repo.current_line().unwrap(),
+            DEFAULT_LINE,
+            "with the line state migrated too"
+        );
+    }
+
+    #[test]
     fn a_format_four_checkpoint_is_found_at_its_own_address_after_migrating() {
         // ADR-8. Before format 5 a checkpoint blob was the serialised struct
         // stored under the hash of THAT, while its id was the hash of its body,
