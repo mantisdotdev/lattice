@@ -1,0 +1,34 @@
+{
+  "probe": "scaling",
+  "samples": 3,
+  "sizes": [
+    {
+      "files": 1000,
+      "first_save_s": 0.132,
+      "incremental_save_s": 0.135,
+      "status_s": 0.068,
+      "switch_s": 0.124
+    },
+    {
+      "files": 5000,
+      "first_save_s": 0.252,
+      "incremental_save_s": 0.245,
+      "status_s": 0.066,
+      "switch_s": 0.27
+    },
+    {
+      "files": 10000,
+      "first_save_s": 0.595,
+      "incremental_save_s": 0.652,
+      "status_s": 0.098,
+      "switch_s": 0.806
+    }
+  ],
+  "projection": {
+    "basis": "linear in tree size from the largest measured point; the measured growth is worse than linear, so this is a floor",
+    "mean_tree_files": 40000,
+    "projected_incremental_save_s": 2.61,
+    "g1_4_operations": 80000,
+    "projected_hours_if_every_operation_saved": 58.0
+  }
+}

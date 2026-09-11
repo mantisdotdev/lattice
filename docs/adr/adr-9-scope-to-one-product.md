@@ -41,6 +41,52 @@ about performance:
 4. **The working-tree index is not on the critical path** of any HARD gate
    and is not built until one needs it.
 
+   > **Corrected the same evening.** Something adjacent to it was on the
+   > critical path, and the plan said otherwise: G1.4 on the new verbs ran at
+   > roughly a hundred operations a minute and was still slowing at its
+   > few-hundredth operation of eighty thousand. Not the lock. Every `switch`
+   > pruned the working tree and rewrote all of it, and the gate's eight
+   > workspaces each gain a file per operation. Measured with
+   > `scripts/probe_scaling.py`, which gained a `switch_s` row for the
+   > purpose — a switch between two lines that differ by one file — against
+   > a binary built before the change (`bench/results/raw/adr9-scaling-before.json`):
+   >
+   > ```json
+   > {
+   >   "files": 10000,
+   >   "first_save_s": 0.376,
+   >   "incremental_save_s": 0.372,
+   >   "status_s": 0.062,
+   >   "switch_s": 35.835
+   > }
+   > ```
+   >
+   > and after it (`bench/results/raw/adr9-scaling.json`):
+   >
+   > ```json
+   > {
+   >   "files": 10000,
+   >   "first_save_s": 0.595,
+   >   "incremental_save_s": 0.652,
+   >   "status_s": 0.098,
+   >   "switch_s": 0.806
+   > }
+   > ```
+   >
+   > Thirty-six seconds to under one, for a one-file difference. The old
+   > cost also grew faster than the tree — 1.8 s at 1,000 files, 18.5 s at
+   > 5,000 — because each written entry was checked against every entry
+   > already written in its directory. Materialisation now reconciles the
+   > snapshot every caller already takes against the target and touches only
+   > what differs; what remains is the snapshot walk. Both arms ran on one
+   > machine while two gates were also running, which is why the after arm's
+   > saves are slower than the before arm's: the ratio is the finding, and
+   > no absolute here is quiet-machine.
+   >
+   > The index proper — reading only what the metadata says changed — is
+   > still not built, and this correction does not change that. It changes
+   > what "not on the critical path" was allowed to mean.
+
 ## Consequences
 
 - **G1.1 cannot pass under its frozen harness even with every verb built.**

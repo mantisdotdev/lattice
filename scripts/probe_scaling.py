@@ -49,7 +49,7 @@ the before-and-after arms of ADR-8 were produced on one machine with one probe.
 Comparing against an artifact from an EARLIER version of this file would not
 have been sound: `status_s` became a median here, having been one observation.
 
-    python3 scripts/probe_scaling.py --out bench/results/raw/adr8-scaling.json
+    python3 scripts/probe_scaling.py --out bench/results/raw/adr9-scaling.json
     python3 scripts/probe_scaling.py --ltx /other/ltx --out .../adr8-scaling-before.json
     python3 scripts/probe_scaling.py --attribute --sizes 10000 \
         --out bench/results/raw/adr6-attribution.json
@@ -130,6 +130,23 @@ def measure(ltx: Path, files: int, samples: int) -> dict | None:
                 return None
             statuses.append(elapsed)
 
+        # A switch between two lines that differ by ONE file. If a switch
+        # costs the size of the tree, this grows with `files` like the first
+        # save does; if it costs the size of the change, it does not.
+        rc, _ = run(ltx, ["start", "other"], work)
+        if rc != 0:
+            return None
+        (work / "only-on-other.txt").write_text("other\n")
+        rc, _ = run(ltx, ["save", "one more file"], work)
+        if rc != 0:
+            return None
+        switches = []
+        for target in ["main", "other"] * samples:
+            rc, elapsed = run(ltx, ["switch", target], work)
+            if rc != 0:
+                return None
+            switches.append(elapsed)
+
         return {
             "files": files,
             # One observation by nature — a repository has exactly one first
@@ -137,6 +154,7 @@ def measure(ltx: Path, files: int, samples: int) -> dict | None:
             "first_save_s": round(first_save, 3),
             "incremental_save_s": round(statistics.median(edits), 3),
             "status_s": round(statistics.median(statuses), 3),
+            "switch_s": round(statistics.median(switches), 3),
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)
