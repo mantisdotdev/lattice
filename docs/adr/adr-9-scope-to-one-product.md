@@ -87,6 +87,42 @@ about performance:
    > still not built, and this correction does not change that. It changes
    > what "not on the critical path" was allowed to mean.
 
+   > **Corrected again the same night, from the rerun.** With switches fixed,
+   > G1.4 ran at 239 operations a minute at op-log entry 7,000 and 14 a
+   > minute at entry 18,400, and was stopped there. Not the lock, and not
+   > materialisation this time. `bench/results/raw/adr9-g1-4-stall.json`
+   > records the entry size by sequence, from the archive segments `compact`
+   > wrote:
+   >
+   > ```json
+   > {
+   >   "op_log_seq_reached": 18437,
+   >   "redb_bytes": 350445568
+   > }
+   > ```
+   >
+   > Entries averaged 1,160 bytes over the first 1,800 and about 10,000 bytes
+   > by entry 16,000. An `assign .` records every path it moved, and each
+   > workspace gains a file per operation — so entry size grows with the run.
+   > On its own that is linear. What makes it quadratic is that `undo`,
+   > `thin` and `log` load and deserialise the entire log to answer: at entry
+   > 18,000 that is roughly 120 MB of JSON per call, and the pool draws one of
+   > those every few operations. Same shape as the switch defect, one layer
+   > down.
+   >
+   > The fix needs no format change and is the first thing tomorrow: enumerate
+   > checkpoints from the `SAVED` index that already maps id to sequence, and
+   > have undo scan from the tail and stop at the first eligible entry rather
+   > than loading all of them. Shrinking the entries themselves — paths
+   > serialise as arrays of integers — would need a format break, because the
+   > chain hashes the serialisation, and is not the bottleneck once nothing
+   > loads the whole log.
+   >
+   > G1.3 did not report either: its in-process half ran into the frozen
+   > harness's own 7,200-second budget on a disk shared with G1.4. It is
+   > fsync-bound at a hundred thousand fresh repositories and needs the
+   > machine to itself.
+
 ## Consequences
 
 - **G1.1 cannot pass under its frozen harness even with every verb built.**
