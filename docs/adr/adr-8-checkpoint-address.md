@@ -118,6 +118,59 @@ They are garbage in the precise sense — unreferenced content awaiting a
 collector that does not exist yet — and they are the reason this ADR does not
 claim to reduce store size. It reduces work, not bytes.
 
+## Measured
+
+Both arms are the same probe, on the same machine, in the same session: one
+binary built at `0c70ca8` (this branch, before the change) and one after.
+`bench/results/raw/adr6-scaling.json` was produced by an earlier version of the
+probe, in which `status_s` was a single observation rather than a median, so it
+is not the comparison used here.
+
+At 10,000 files — `bench/results/raw/adr8-scaling-before.json`:
+
+```json
+{
+  "files": 10000,
+  "first_save_s": 0.242,
+  "incremental_save_s": 3.445,
+  "status_s": 8.361
+}
+```
+
+and `bench/results/raw/adr8-scaling.json`:
+
+```json
+{
+  "files": 10000,
+  "first_save_s": 0.245,
+  "incremental_save_s": 0.236,
+  "status_s": 0.038
+}
+```
+
+The first save is unchanged, which is the control: it always wrote its content
+and never looked a checkpoint up, so nothing about it should have moved, and
+nothing did.
+
+`status` is the clean result. It went from 8.361 s to 0.038 s, and — the part
+that matters more than the ratio — it stopped growing: 0.035, 0.035, 0.038 at
+1,000, 5,000 and 10,000 files. A command that reads no content now costs the
+same whatever the repository holds, which is what "it is a lookup, not a scan"
+means when measured rather than asserted.
+
+An incremental save went from 3.445 s to 0.236 s and still grows with the tree —
+0.073, 0.134, 0.236 across the same three sizes. That residue is the tree walk,
+and it is not a defect of the same kind: a save that must notice which of 10,000
+files changed has to look at 10,000 files. Making it proportional to the *change*
+instead needs a working-tree index, which is a separate slice and is not
+attempted here.
+
+**G1.4 is closer and still does not fit.** The probe's own extrapolation falls
+from 306 hours to 21, and 21 hours is not a budget anyone accepts either. What
+changed is the character of what remains: the scan was accidental, and the tree
+walk is work. The honest statement is that ADR-6's finding is answered and
+G1.4's obstacle is now a different one.
+
 ## Consequences
 
 - **`Checkpoint` loses two fields from the wire.** `id` and `oplog_seq` are no
@@ -127,10 +180,11 @@ claim to reduce store size. It reduces work, not bytes.
 - **`is_authentic` is deleted.** The check it performed is now done by
   `Store::read` for every chunk in the repository, not just for checkpoints.
 - **G1.4, G1.5, G1.6 and G1.7 are unblocked, and none of them is claimed.**
-  ADR-6 named all four as sharing this scan. What this ADR is entitled to say is
-  that the dominant term is gone; whether each gate then *passes* is a
-  measurement none of them has yet had, on a reference repository this checkout
-  does not contain.
+  ADR-6 named all four as sharing this scan, and the section above shows it
+  gone. That is not a gate result: each of those gates measures a reference
+  repository this checkout does not contain, and none of them has been run.
+  `status` at 0.038 s against G1.5's 100 ms budget is encouraging at a tenth of
+  the reference size and is not a pass.
 - **The pack-count cost is untouched.** ADR-6 also names `retain_unknown`, whose
   cost grows with the number of packs rather than the number of blobs. It is a
   different fix and it is not in this slice.

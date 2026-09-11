@@ -213,6 +213,12 @@ fixing even though it is not what dominates here.
 
 <!-- evidence: the `retain_unknown` paragraph is read from the source of Store::contains and PackWriter::retain_unknown, not measured; every number above it is quoted from bench/results/raw/adr6-attribution.json or bench/results/raw/adr6-scaling.json -->
 
+**ADR-8 answers this.** A checkpoint's blob is now stored at the address its id
+already named, so the scan is a lookup: `status` at 10,000 files falls from
+seconds to tens of milliseconds and stops growing with the tree. What remains in
+a save is the tree walk, which is work rather than accident. The paragraphs
+below stand as the record of what was measured here and why.
+
 Both predate this ADR and both are acknowledged where they are written ("small
 and adequate for the current history sizes; a checkpoint index is a later
 refinement"). `bench/results/raw/adr6-scaling-baseline.json` is the same probe
