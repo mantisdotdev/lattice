@@ -748,22 +748,14 @@ impl Repo {
     /// if some Save entry references its id and its body authenticates — so a
     /// file that merely looks like a checkpoint never appears here.
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>> {
-        let mut seq_by_id: std::collections::BTreeMap<String, u64> =
-            std::collections::BTreeMap::new();
-        for entry in self.oplog.entries()? {
-            if let Operation::Save { checkpoint, .. } = &entry.operation {
-                // Last reference wins, so a checkpoint named by more than one
-                // Save reports the newest — the order the previous scan
-                // produced, kept.
-                seq_by_id.insert(checkpoint.clone(), entry.seq);
-            }
-        }
-
-        // One read per checkpoint history records, rather than one per blob the
-        // store holds. A checkpoint whose blob is absent — a partial clone —
-        // is omitted, exactly as it was when the store was scanned for it.
+        // From the index the Save wrote in its own transaction: one table, no
+        // entry deserialised. The index keeps the NEWEST Save naming each id,
+        // which is the order the entry scan this replaces produced. One body
+        // read per checkpoint history records, rather than one per blob the
+        // store holds; a checkpoint whose blob is absent — a partial clone —
+        // is omitted, exactly as before.
         let mut out: Vec<Checkpoint> = Vec::new();
-        for (id, seq) in seq_by_id {
+        for (id, seq) in self.oplog.saved_checkpoints()? {
             if let Some(mut cp) = self.checkpoint_at(&id)? {
                 cp.oplog_seq = seq;
                 out.push(cp);
@@ -983,39 +975,51 @@ impl Repo {
 
     /// The highest-seq live, eligible entry, or None at the floor.
     fn next_undo_target(&self) -> Result<Option<Entry>> {
-        let entries = self.oplog.entries()?;
-        let undone: std::collections::HashSet<u64> = entries
-            .iter()
-            .filter_map(|e| match &e.operation {
-                Operation::Undo { undone_seq } => Some(*undone_seq),
-                _ => None,
-            })
-            .collect();
+        // One walk from the tail, stopping at the first eligible entry. The
+        // two sets the eligibility check needs are built as the walk goes,
+        // and that is sound because both only ever point BACKWARD in time:
+        //
+        //   * an `undo` entry names a sequence below its own, so every undo
+        //     of a candidate has been visited before the candidate is;
+        //   * a save consumes a change that an earlier assign or split put
+        //     there, so every save that could make a candidate ineligible is
+        //     newer than the candidate and has been visited too.
+        //
+        // Loading the whole log to build them up front made each undo cost
+        // the size of history, and history in a long run is large.
+        let lines = self.line_state()?;
+        let mut undone: std::collections::HashSet<u64> = std::collections::HashSet::new();
         // Changes a standing save has already checkpointed, per line — a
         // change id can exist on two lines at once, since `start` copies the
         // open changes along with the bytes they label.
-        let consumed: std::collections::HashSet<(&str, &str)> = entries
-            .iter()
-            .filter(|e| !undone.contains(&e.seq))
-            .filter_map(|e| match &e.operation {
+        let mut consumed: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut found: Option<Entry> = None;
+        self.oplog.walk_newest_first(|entry| {
+            match &entry.operation {
+                Operation::Undo { undone_seq } => {
+                    undone.insert(*undone_seq);
+                    return Ok(true);
+                }
                 Operation::Save {
                     line,
                     change: Some(c),
                     ..
-                } => Some((line.as_str(), c.id.as_str())),
-                _ => None,
-            })
-            .collect();
-        let lines = self.line_state()?;
-        for entry in entries.iter().rev() {
+                } if !undone.contains(&entry.seq) => {
+                    consumed.insert((line.clone(), c.id.clone()));
+                }
+                _ => {}
+            }
             if !entry.operation.is_undoable() || undone.contains(&entry.seq) {
-                continue;
+                return Ok(true);
             }
             if self.is_eligible(&entry.operation, &lines, &consumed)? {
-                return Ok(Some(entry.clone()));
+                found = Some(entry);
+                return Ok(false);
             }
-        }
-        Ok(None)
+            Ok(true)
+        })?;
+        Ok(found)
     }
 
     /// Whether an operation still has something to reverse.
@@ -1027,7 +1031,7 @@ impl Repo {
         &self,
         op: &Operation,
         lines: &LineState,
-        consumed: &std::collections::HashSet<(&str, &str)>,
+        consumed: &std::collections::HashSet<(String, String)>,
     ) -> Result<bool> {
         Ok(match op {
             Operation::Save { checkpoint, .. } => match self.checkpoint(checkpoint)? {
@@ -1071,10 +1075,10 @@ impl Repo {
                 displaced,
                 ..
             } => {
-                !consumed.contains(&(line.as_str(), change.as_str()))
+                !consumed.contains(&(line.clone(), change.clone()))
                     && !displaced
                         .iter()
-                        .any(|(_, owner)| consumed.contains(&(line.as_str(), owner.as_str())))
+                        .any(|(_, owner)| consumed.contains(&(line.clone(), owner.clone())))
             }
             // Everything else has no defined inverse. `Adopt` is also marked
             // non-undoable at the source so a core caller cannot append one and
@@ -1103,11 +1107,11 @@ impl Repo {
                 moved,
             } => {
                 !change
-                    .as_deref()
-                    .is_some_and(|c| consumed.contains(&(line.as_str(), c)))
+                    .as_ref()
+                    .is_some_and(|c| consumed.contains(&(line.clone(), c.clone())))
                     && !moved
                         .iter()
-                        .any(|(_, into)| consumed.contains(&(line.as_str(), into.as_str())))
+                        .any(|(_, into)| consumed.contains(&(line.clone(), into.clone())))
             }
             Operation::Init
             | Operation::Undo { .. }
@@ -2588,15 +2592,38 @@ impl Repo {
     /// and every working state any workspace has preserved.
     pub fn thin(&mut self) -> Result<ThinOutcome> {
         let rescued = self.complete_pending_switch()?;
-        let live = self.reachable_chunks()?;
+        // Stage one, cheap: a pack holding a checkpoint body history records,
+        // or any chunk a line's tip or a workspace's preserved state reaches,
+        // is referenced — and permanently, because checkpoints are immutable.
+        // That is one table and a walk of a dozen trees, and in the common
+        // case it leaves no candidate at all, so the walk over history below
+        // never runs.
+        let anchored = self.anchored_chunks()?;
+        let candidates: Vec<(u64, Vec<ChunkId>)> = self
+            .store
+            .packs_with_chunks()
+            .into_iter()
+            .filter(|(_, chunks)| {
+                !chunks.is_empty() && !chunks.iter().any(|c| anchored.contains(c))
+            })
+            .collect();
         let mut removed: Vec<u64> = Vec::new();
         let mut collected: Vec<String> = Vec::new();
-        for (pack, chunks) in self.store.packs_with_chunks() {
-            if chunks.is_empty() || chunks.iter().any(|c| live.contains(c)) {
-                continue;
+        if let Some(oldest) = candidates.iter().map(|(pack, _)| *pack).min() {
+            // Stage two, bounded: a chunk in pack P was NOT in the store when
+            // P was written — that is what `retain_unknown` means — so nothing
+            // written before P can name it, and only checkpoints whose own
+            // body sits in a pack at or after P need walking. A duplicate of
+            // a chunk in a later pack is redundant by definition, so removing
+            // the later copy loses nothing either.
+            let live = self.reachable_chunks_from(oldest)?;
+            for (pack, chunks) in candidates {
+                if chunks.iter().any(|c| live.contains(c)) {
+                    continue;
+                }
+                collected.extend(chunks.iter().map(|c| c.to_hex()));
+                removed.push(pack);
             }
-            collected.extend(chunks.iter().map(|c| c.to_hex()));
-            removed.push(pack);
         }
         // The ledger first — what is about to go — then the packs. A crash
         // between leaves a record of an intent that was safe to carry out,
@@ -2626,28 +2653,26 @@ impl Repo {
         })
     }
 
-    /// Every chunk something still refers to.
-    fn reachable_chunks(&self) -> Result<std::collections::HashSet<ChunkId>> {
+    /// Every chunk reachable from what a line or a workspace points at right
+    /// now: each checkpoint body history records, each tip's tree, and each
+    /// preserved working state. What this reaches is referenced for good,
+    /// since checkpoints never change.
+    fn anchored_chunks(&self) -> Result<std::collections::HashSet<ChunkId>> {
         let mut live = std::collections::HashSet::new();
-        let mut trees: Vec<String> = Vec::new();
-        for cp in self.checkpoints()? {
-            if let Some(id) = ChunkId::from_hex(&cp.id) {
-                live.insert(id);
+        for (id, _) in self.oplog.saved_checkpoints()? {
+            if let Some(body) = ChunkId::from_hex(&id) {
+                live.insert(body);
             }
-            trees.push(cp.tree);
         }
         let lines = self.line_state()?;
+        let mut trees: Vec<String> = Vec::new();
         for rec in lines.lines.values() {
             if let Some(cp) = rec
                 .tip
                 .as_deref()
-                .and_then(|t| self.checkpoint(t).transpose())
+                .and_then(|t| self.checkpoint_at(t).transpose())
             {
-                let cp = cp?;
-                if let Some(id) = ChunkId::from_hex(&cp.id) {
-                    live.insert(id);
-                }
-                trees.push(cp.tree);
+                trees.push(cp?.tree);
             }
         }
         for space in lines.workspaces.values() {
@@ -2655,6 +2680,36 @@ impl Repo {
         }
         for tree in trees {
             self.collect_tree(&tree, &mut live)?;
+        }
+        Ok(live)
+    }
+
+    /// Every chunk something still refers to, walking only the checkpoints
+    /// whose body lives in a pack numbered `from_pack` or later, plus what
+    /// `anchored_chunks` reaches. See `thin` for why that bound is complete.
+    fn reachable_chunks_from(&self, from_pack: u64) -> Result<std::collections::HashSet<ChunkId>> {
+        let mut live = self.anchored_chunks()?;
+        let bodies: std::collections::HashMap<ChunkId, String> = self
+            .oplog
+            .saved_checkpoints()?
+            .into_iter()
+            .filter_map(|(id, _)| ChunkId::from_hex(&id).map(|c| (c, id)))
+            .collect();
+        let mut recent: Vec<String> = Vec::new();
+        for (pack, chunks) in self.store.packs_with_chunks() {
+            if pack < from_pack {
+                continue;
+            }
+            for chunk in chunks {
+                if let Some(id) = bodies.get(&chunk) {
+                    recent.push(id.clone());
+                }
+            }
+        }
+        for id in recent {
+            if let Some(cp) = self.checkpoint_at(&id)? {
+                self.collect_tree(&cp.tree, &mut live)?;
+            }
         }
         Ok(live)
     }
@@ -2905,7 +2960,7 @@ impl Repo {
             return Ok(typed.to_string());
         }
         let saved = self.oplog.saved_checkpoints()?;
-        let live: Vec<&str> = saved.iter().map(String::as_str).collect();
+        let live: Vec<&str> = saved.iter().map(|(id, _)| id.as_str()).collect();
         match change::resolve(typed, &live) {
             change::Resolution::One(id) => Ok(id),
             change::Resolution::Ambiguous(matched) => {
@@ -6530,6 +6585,74 @@ mod tests {
         );
         let report = repo.verify(true).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn thin_still_finds_an_old_orphan_after_history_has_moved_on() {
+        // The bounded walk covers checkpoints whose body sits in a pack at or
+        // after the oldest candidate. An orphan planted early, followed by
+        // saves that reference none of it, must still be collected — and the
+        // saves' content must not be.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let mut orphan = PackWriter::new();
+        orphan.add(ChunkId::of(b"orphaned early"), b"orphaned early");
+        repo.store.write_pack(orphan).unwrap();
+        for i in 0..3 {
+            fs::write(dir.path().join(format!("later-{i}.txt")), format!("{i}")).unwrap();
+            repo.save(format!("later {i}").as_str(), None).unwrap();
+        }
+
+        let out = repo.thin().unwrap();
+
+        assert_eq!(out.collected, 1, "the early orphan is found");
+        assert!(!repo.store().contains(ChunkId::of(b"orphaned early")));
+        assert!(repo.verify(true).unwrap().errors.is_empty());
+    }
+
+    #[test]
+    fn thin_keeps_a_chunk_only_a_checkpoint_that_is_no_longer_a_tip_still_names() {
+        // The scenario the bound exists for. A switch captures a file into a
+        // pack of its own; switching back orphans that capture's tree; a save
+        // then names the file from a body in a LATER pack; a further save
+        // without the file moves the tip on. Now the capture pack holds one
+        // orphaned tree and one chunk that only a non-tip checkpoint names —
+        // and that checkpoint's body is in a pack after the candidate, which
+        // is exactly the walk the bound must include. Collecting it would be
+        // data loss, and `verify --complete` would say so.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(
+            dir.path().join("w.txt"),
+            b"only ever captured, then saved once",
+        )
+        .unwrap();
+        repo.switch_line("main").unwrap();
+        repo.switch_line("feat").unwrap();
+        let with_w = repo.save("with w", None).unwrap().checkpoint;
+        fs::remove_file(dir.path().join("w.txt")).unwrap();
+        repo.save("without w", None).unwrap();
+        assert_ne!(
+            repo.head_checkpoint().unwrap().unwrap().id,
+            with_w.id,
+            "premise: the checkpoint naming w.txt is no longer a tip"
+        );
+
+        repo.thin().unwrap();
+
+        let report = repo.verify(true).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.chunks_absent, 0, "nothing a checkpoint names may go");
+        let out = tempfile::tempdir().unwrap();
+        repo.checkout_into(Some(&with_w.id), &out.path().join("w"))
+            .expect("the checkpoint that names w.txt can still be written out");
+        assert_eq!(
+            fs::read(out.path().join("w/w.txt")).unwrap(),
+            b"only ever captured, then saved once"
+        );
     }
 
     #[test]
