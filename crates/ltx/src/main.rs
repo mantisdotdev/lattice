@@ -121,9 +121,38 @@ enum Command {
     /// Work with lines.
     #[command(subcommand)]
     Line(LineCmd),
+    /// Bring another line's history onto this one.
+    Merge {
+        /// The line to take history from.
+        line: String,
+    },
+    /// Split the current change so each top-level path is a change of its own.
+    Split,
+    /// Look through a lens, or see which exist.
+    #[command(subcommand)]
+    Lens(LensCmd),
+    /// Exchange history with a remote.
+    Sync {
+        /// Report what would be sent and received, and move nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Collect content nothing references.
+    Thin,
     /// Plumbing. Never required on a normal path.
     #[command(subcommand)]
     Internals(Internals),
+}
+
+#[derive(Subcommand)]
+enum LensCmd {
+    /// Look through a lens.
+    Use {
+        /// The lens by name; `ltx lens list` shows them.
+        name: String,
+    },
+    /// Show every lens, and which one this workspace looks through.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -157,6 +186,13 @@ enum Internals {
     Oplog,
     /// Chunk store statistics.
     Store,
+    /// Archive the operation-log entries written since the last archive.
+    Compact,
+    /// The same collection `ltx thin` performs. Here as well because §4.2
+    /// puts maintenance behind `internals`, and the user-facing verb exists
+    /// because the undo contract names `thin` at the top level; one
+    /// operation, reachable by both spellings.
+    Thin,
 }
 
 fn main() -> ExitCode {
@@ -653,6 +689,162 @@ fn run(cli: &Cli) -> Result<u8> {
             Ok(EXIT_OK)
         }
 
+        Command::Merge { line } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.merge_line(line)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "line": out.line, "from": out.from,
+                        "fast_forward": out.fast_forward, "now_at": out.now_at,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    if out.fast_forward {
+                        format!("{} now holds everything on {}", out.line, out.from)
+                    } else {
+                        format!("{} already holds everything on {}", out.line, out.from)
+                    }
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Split => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.split()?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "change": out.change, "into": out.into,
+                        "moved": out.moved, "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || match (&out.change, out.into.len()) {
+                    (None, _) => "nothing is current, so nothing to split".to_string(),
+                    (Some(_), 0) => {
+                        "the current change holds one group; nothing to split".to_string()
+                    }
+                    (Some(_), n) => format!("split {} path(s) into {} new change(s)", out.moved, n),
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Lens(LensCmd::Use { name }) => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.use_lens(name)?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "lens": out.lens, "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || format!("looking through lens {}", out.lens),
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Lens(LensCmd::List) => {
+            let repo = Repo::discover(&cwd)?;
+            let lenses = repo.lenses()?;
+            emit(
+                cli,
+                || serde_json::json!({ "ok": true, "version": 1, "lenses": lenses }),
+                || {
+                    lenses
+                        .iter()
+                        .map(|l| {
+                            format!(
+                                "{} {}  hides {}",
+                                if l.active { "*" } else { " " },
+                                l.name,
+                                l.hides
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Sync { dry_run } => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = if *dry_run {
+                repo.sync_dry_run()?
+            } else {
+                repo.sync()?
+            };
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "dry_run": out.dry_run, "remote": out.remote,
+                        "would_send": out.would_send, "would_receive": out.would_receive,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    "dry run: no remote is configured; nothing to send, nothing to receive"
+                        .to_string()
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Thin | Command::Internals(Internals::Thin) => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.thin()?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "collected": out.collected, "packs_removed": out.packs_removed,
+                        "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    format!(
+                        "collected {} unreferenced chunk(s) from {} pack(s)",
+                        out.collected, out.packs_removed
+                    )
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
+        Command::Internals(Internals::Compact) => {
+            let mut repo = Repo::discover(&cwd)?;
+            let out = repo.compact()?;
+            emit(
+                cli,
+                || {
+                    serde_json::json!({
+                        "ok": true, "from_seq": out.from_seq, "to_seq": out.to_seq,
+                        "archived": out.archived, "oplog_seq": out.oplog_seq,
+                        "rescued_working_state": out.rescued_working_state,
+                    })
+                },
+                || {
+                    format!(
+                        "archived {} operation(s), {}..{}",
+                        out.archived, out.from_seq, out.to_seq
+                    )
+                },
+            );
+            Ok(EXIT_OK)
+        }
+
         Command::Internals(Internals::CommandSurface) => {
             // G1.3's coverage contract requires the state-changing surface to
             // be DISCOVERABLE rather than hand-listed in the harness, so the
@@ -695,6 +887,24 @@ fn run(cli: &Cli) -> Result<u8> {
                     // the second refuses, which is the behaviour under test.
                     { "name": "workspace new", "state_changing": true, "undoable": false, "sample_args": ["../probe-workspace"] },
                     { "name": "workspace list", "state_changing": false, "undoable": false, "sample_args": [] },
+                    // Bare: splits whatever change is current, and succeeds
+                    // with nothing to split — the same rule as a refused
+                    // assign, so a batch that draws it before any assign
+                    // still counts a command that ran.
+                    { "name": "split", "state_changing": true, "undoable": true, "sample_args": [] },
+                    // `main` always exists. From probe-line it is already
+                    // contained and the attempt is recorded; after `switch
+                    // main` it is a REAL fast-forward onto probe-line's
+                    // saves, whose undo rewrites the working tree back.
+                    { "name": "merge", "state_changing": true, "undoable": true, "sample_args": ["main"] },
+                    { "name": "lens use", "state_changing": true, "undoable": true, "sample_args": ["clean"] },
+                    { "name": "lens list", "state_changing": false, "undoable": false, "sample_args": [] },
+                    { "name": "sync", "state_changing": true, "undoable": true, "sample_args": ["--dry-run"] },
+                    // Recorded and not undoable (Challenge 12): collected
+                    // content is gone. It changes nothing the equality domain
+                    // holds, because nothing referenced is ever collected.
+                    { "name": "thin", "state_changing": true, "undoable": false, "sample_args": [] },
+                    { "name": "internals compact", "state_changing": true, "undoable": false, "sample_args": [] },
                     { "name": "line list", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "status", "state_changing": false, "undoable": false, "sample_args": [] },
                     { "name": "log", "state_changing": false, "undoable": false, "sample_args": [] },

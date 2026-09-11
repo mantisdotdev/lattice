@@ -64,6 +64,22 @@ pub enum Error {
     #[error("{0}")]
     NoSuchLine(String),
 
+    /// Named a lens this repository does not have.
+    #[error("no lens named {0}")]
+    NoSuchLens(String),
+
+    /// Asked to merge two lines that have each moved since they parted.
+    ///
+    /// This build merges only when one line already contains the other. A
+    /// merge that must reconcile two histories is the semantic merge G4
+    /// measures, and pretending to do it is worse than refusing.
+    #[error("{line} and {other} have diverged; this build merges only when one line already contains the other")]
+    Diverged { line: String, other: String },
+
+    /// Asked to sync, and there is no remote to sync with.
+    #[error("no remote is configured, so there is nowhere to sync with")]
+    NoRemote,
+
     /// A name that cannot be a line. Distinct from Invalid for the same reason.
     #[error("{0}")]
     InvalidLine(String),
@@ -136,9 +152,13 @@ impl Error {
             Error::Corrupt(_) => Category::Corrupt,
             Error::Invalid(_)
             | Error::InvalidLine(_)
+            | Error::Diverged { .. }
             | Error::UnsupportedFormat(_)
             | Error::FormatFromNewerBuild(_) => Category::Invalid,
-            Error::NoSuchLine(_) | Error::NoSuchChange(_) => Category::NotFound,
+            Error::NoSuchLine(_)
+            | Error::NoSuchChange(_)
+            | Error::NoSuchLens(_)
+            | Error::NoRemote => Category::NotFound,
             // Neither `Io` nor `Invalid`: nothing failed, and the command was
             // not wrong. The repository was in use, which is a state the model
             // allows — and the only one where retrying unchanged is right.
@@ -156,7 +176,9 @@ impl Error {
             Error::NotFound(_) => Concept::Checkpoint,
             Error::Corrupt(_) => Concept::Checkpoint,
             Error::Invalid(_) => Concept::WorkingState,
-            Error::NoSuchLine(_) | Error::InvalidLine(_) => Concept::Line,
+            Error::NoSuchLine(_) | Error::InvalidLine(_) | Error::Diverged { .. } => Concept::Line,
+            Error::NoSuchLens(_) => Concept::Lens,
+            Error::NoRemote => Concept::Remote,
             Error::NoSuchChange(_)
             | Error::InvalidChange(_)
             | Error::ChangeAlreadyCheckpointed(_)
@@ -164,7 +186,12 @@ impl Error {
             Error::Busy(_) | Error::UnsupportedFormat(_) | Error::FormatFromNewerBuild(_) => {
                 Concept::Workspace
             }
-            Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
+            // The machine holding the repository refused, or what it holds
+            // did not parse. That is about the workspace — the directory the
+            // user is standing in — which is also what `NotARepository` and
+            // `Busy` are about. `None` said nothing, and an error that names
+            // no concept leaves the user without orientation (G2.4).
+            Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::Workspace,
         }
     }
 
@@ -186,6 +213,15 @@ impl Error {
                  with a valid argument"
             }
             Error::NoSuchLine(_) => "run `ltx line list` to see which lines exist",
+            Error::NoSuchLens(_) => "run `ltx lens list` to see which lenses exist",
+            Error::Diverged { .. } => {
+                "run `ltx log --forensic` to see where the two lines part; save the work \
+                 you want to keep, then switch to the line whose history you want"
+            }
+            Error::NoRemote => {
+                "no remote can be configured in this build; run `ltx sync --dry-run` to \
+                 see what a sync would do"
+            }
             Error::NoSuchChange(_) => "run `ltx change list` to see which changes are open",
             Error::InvalidChange(_) => {
                 "run `ltx change list` and name enough characters to pick out the \
@@ -302,9 +338,30 @@ mod tests {
         // A user who runs the suggested command must not hit "unrecognized
         // subcommand". This keeps the advice tracking the actual CLI surface,
         // so adopt/sync/undo cannot be advertised before they are built.
+        // Hand-maintained, and therefore a trap: a recovery naming a command
+        // missing from this list fails, but a VARIANT missing from `cases`
+        // below is simply never checked. G2.4 covers that gap from outside,
+        // by triggering errors through the shipped CLI.
         const IMPLEMENTED: &[&str] = &[
-            "init", "save", "status", "log", "verify", "checkout", "undo", "start", "switch",
-            "line", "assign", "change",
+            "init",
+            "save",
+            "status",
+            "log",
+            "verify",
+            "checkout",
+            "undo",
+            "start",
+            "switch",
+            "line",
+            "assign",
+            "change",
+            "workspace",
+            "lens",
+            "sync",
+            "merge",
+            "split",
+            "thin",
+            "internals",
         ];
         let cases: Vec<Error> = vec![
             Error::NotARepository(PathBuf::from("/tmp")),
@@ -320,6 +377,13 @@ mod tests {
             Error::ChangeHoldsNothing("x".into()),
             Error::Busy("x".into()),
             Error::UnsupportedFormat("x".into()),
+            Error::FormatFromNewerBuild("x".into()),
+            Error::NoSuchLens("x".into()),
+            Error::NoRemote,
+            Error::Diverged {
+                line: "a".into(),
+                other: "b".into(),
+            },
             Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
         ];
         for e in cases {

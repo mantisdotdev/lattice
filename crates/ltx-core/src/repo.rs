@@ -16,7 +16,7 @@ use crate::change;
 use crate::chunk::ChunkId;
 use crate::error::{Error, Result};
 use crate::oplog::{
-    CheckpointedChange, Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE,
+    CheckpointedChange, Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LENS, DEFAULT_LINE,
     FORMAT_VERSION, MIN_READABLE_FORMAT,
 };
 use crate::platform;
@@ -385,6 +385,7 @@ impl Repo {
         // repository runs both, a format-4 repository runs only the second.
         migrate_line_state_to_v4(&oplog)?;
         migrate_checkpoint_blobs_to_v5(&mut store, &oplog)?;
+        stamp_current_format(&oplog)?;
         // Which workspace is this? Matched by canonical path, because that is
         // the only thing a command run in a directory knows about itself.
         let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -677,13 +678,26 @@ impl Repo {
     }
 
     /// The checkpoint the CURRENT line points at.
+    ///
+    /// `None` means the line has no tip. A tip whose blob is not present is
+    /// not that: it is a hole in the history spine, and reading it as "no
+    /// history" would let `log` print an empty history and `status` count
+    /// zero checkpoints over a repository that has lost one. A save writes
+    /// its content before the entry that names it, so nothing short of
+    /// damage produces this — and damage is reported, never rounded down.
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
         let state = self.line_state()?;
         let current = self.line_of(&state);
         let Some(tip) = state.lines.get(&current).and_then(|r| r.tip.clone()) else {
             return Ok(None);
         };
-        self.checkpoint(&tip)
+        match self.checkpoint(&tip)? {
+            Some(cp) => Ok(Some(cp)),
+            None => Err(Error::Corrupt(format!(
+                "line {current} points at checkpoint {} which is not present",
+                crate::short_id(&tip)
+            ))),
+        }
     }
 
     pub fn checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
@@ -1073,11 +1087,34 @@ impl Repo {
             // `reverse` arm and no eligibility arm: it would compile, become
             // permanently ineligible, and `ltx undo` would report
             // `nothing_to_undo` while its effect still stood.
+            // A dry-run sync moved nothing and a lens is a view: neither
+            // wrote a byte of working state, so each is always reversible.
+            Operation::Sync { .. } | Operation::Lens { .. } => true,
+            // A fast-forward's inverse puts a tip and a captured working tree
+            // back; both are durable content, so it is always possible.
+            Operation::Merge { .. } => true,
+            // Split follows assign's rule exactly (ADR-17 §8): once a standing
+            // save has consumed a change its inverse would write to — the
+            // source it puts paths back into, or any it would delete — it is
+            // ineligible.
+            Operation::Split {
+                line,
+                change,
+                moved,
+            } => {
+                !change
+                    .as_deref()
+                    .is_some_and(|c| consumed.contains(&(line.as_str(), c)))
+                    && !moved
+                        .iter()
+                        .any(|(_, into)| consumed.contains(&(line.as_str(), into.as_str())))
+            }
             Operation::Init
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
             | Operation::Thin { .. }
+            | Operation::Compact { .. }
             | Operation::Workspace { .. } => false,
         })
     }
@@ -1097,7 +1134,7 @@ impl Repo {
             remote_effects_not_undone: Vec::new(),
         };
         // What the working tree must look like afterwards, if it must change.
-        let mut materialise: Option<Option<String>> = None;
+        let mut materialise: Option<(String, Option<String>)> = None;
 
         match &entry.operation {
             Operation::Save {
@@ -1143,22 +1180,22 @@ impl Repo {
                     // work is never destroyed — retrieval belongs to the
                     // ephemeral tier (ADR-16, open conflict 3).
                     lines.lines.remove(name);
-                    outcome.preserved_working_state = Some(captured);
+                    outcome.preserved_working_state = Some(captured.clone());
                 } else {
-                    self.set_preserved(&mut lines, name, Some(captured));
+                    self.set_preserved(&mut lines, name, Some(captured.clone()));
                 }
                 let restored = self.preserved(&lines, from);
                 self.set_current_line(&mut lines, from);
-                materialise = Some(restored);
+                materialise = Some((captured, restored));
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
             Operation::Switch { from, to } => {
                 if from != to {
                     let captured = self.capture_working_tree()?;
-                    self.set_preserved(&mut lines, to, Some(captured));
+                    self.set_preserved(&mut lines, to, Some(captured.clone()));
                     let restored = self.preserved(&lines, from);
                     self.set_current_line(&mut lines, from);
-                    materialise = Some(restored);
+                    materialise = Some((captured, restored));
                 }
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
@@ -1202,11 +1239,72 @@ impl Repo {
             // an eligibility arm and no inverse would otherwise compile, and
             // `ltx undo` would exit non-zero on it — which breaks undo-all
             // mid-way rather than reporting nothing to undo (ADR-17 §8).
+            Operation::Sync { .. } => {
+                // A dry run moved nothing, so its inverse moves nothing back.
+                let current = self.line_of(&lines);
+                outcome.now_at = lines.lines.get(&current).and_then(|r| r.tip.clone());
+            }
+            Operation::Lens {
+                workspace, from, ..
+            } => {
+                if let Some(space) = lines.workspaces.get_mut(workspace) {
+                    space.lens = from.clone();
+                }
+                let current = self.line_of(&lines);
+                outcome.now_at = lines.lines.get(&current).and_then(|r| r.tip.clone());
+            }
+            Operation::Merge {
+                line,
+                before,
+                captured,
+                ..
+            } => {
+                let rec = lines.lines.entry(line.clone()).or_default();
+                rec.tip = before.clone();
+                outcome.now_at = before.clone();
+                if captured.is_some() {
+                    // The merge rewrote the working tree, so its inverse
+                    // rewrites it back — through the same pending mechanism
+                    // switch uses, so a crash mid-way completes next command.
+                    let rescued = self.capture_working_tree()?;
+                    outcome.preserved_working_state = Some(rescued.clone());
+                    self.set_preserved(&mut lines, line, captured.clone());
+                    materialise = Some((rescued, captured.clone()));
+                }
+            }
+            Operation::Split {
+                line,
+                change,
+                moved,
+            } => {
+                // Labels only, like assign's inverse: every path goes back to
+                // the change it left, and every change this split minted is
+                // removed — eligibility has established none was consumed.
+                let rec = lines.lines.entry(line.clone()).or_default();
+                if let Some(source) = change {
+                    for (path, into) in moved {
+                        if let Some(minted) = rec.changes.get_mut(into) {
+                            minted.assigned.remove(path);
+                        }
+                        rec.changes
+                            .entry(source.clone())
+                            .or_default()
+                            .assigned
+                            .insert(path.clone());
+                    }
+                    for (_, into) in moved {
+                        rec.changes.remove(into);
+                    }
+                }
+                rec.current_change = change.clone();
+                outcome.now_at = rec.tip.clone();
+            }
             Operation::Init
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
             | Operation::Thin { .. }
+            | Operation::Compact { .. }
             | Operation::Workspace { .. } => {
                 return Err(Error::Invalid(format!(
                     "operation {} ({}) has no inverse",
@@ -1224,12 +1322,12 @@ impl Repo {
         )?;
         outcome.undo_seq = Some(undo_entry.seq);
 
-        if let Some(target) = materialise {
+        if let Some((snapshot, target)) = materialise {
             // Same discipline as switch_to: the restored address stays in the
             // published state until the files are actually written, so a failed
             // materialisation cannot drop the only reference to that work. It
             // then reads as a pending switch, which the next command completes.
-            self.materialise_working_tree(target.as_deref())?;
+            self.materialise_working_tree(Some(&snapshot), target.as_deref())?;
             let current = self.line_of(&lines);
             self.set_preserved(&mut lines, &current, None);
             self.oplog.publish_lines(&lines)?;
@@ -1354,6 +1452,7 @@ impl Repo {
                 // tip that was just materialised into it.
                 current: self.line_of(&lines),
                 preserved: BTreeMap::new(),
+                lens: DEFAULT_LENS.to_string(),
             },
         );
         let entry = self.oplog.commit(
@@ -1814,7 +1913,7 @@ impl Repo {
         // Capture first: no materialisation ever happens without the current
         // working tree already durable in the store.
         let captured = self.capture_working_tree()?;
-        self.set_preserved(&mut lines, from, Some(captured));
+        self.set_preserved(&mut lines, from, Some(captured.clone()));
         let target = lines.lines.entry(to.to_string()).or_default();
         // The preserved address is deliberately LEFT IN PLACE across the
         // publish. It is the marker that materialisation is still pending: if
@@ -1842,7 +1941,7 @@ impl Repo {
             }
         };
         let entry = self.oplog.commit(op, Some(lines.clone()))?;
-        self.materialise_working_tree(restored.as_deref())?;
+        self.materialise_working_tree(Some(&captured), restored.as_deref())?;
         // Materialisation done: the bytes on disk are now the truth for this
         // line, so the preserved copy is consumed and the invariant that the
         // current line holds no preserved state is restored.
@@ -1894,7 +1993,7 @@ impl Repo {
             self.oplog.publish_lines(&lines)?;
             return Ok(None);
         }
-        self.materialise_working_tree(Some(&pending))?;
+        self.materialise_working_tree(Some(&rescued), Some(&pending))?;
         self.set_preserved(&mut lines, &current, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
@@ -1927,8 +2026,22 @@ impl Repo {
     /// Unreachable from any caller today — every one passes `Some` — so this
     /// costs a refusal in a case that does not arise, and prevents a silent
     /// deletion in one that would.
-    fn materialise_working_tree(&self, tree: Option<&str>) -> Result<()> {
-        let Some(target) = tree else {
+    /// Bring the working tree to the state `to` describes.
+    ///
+    /// `from` is the snapshot of the working tree the caller just took —
+    /// every caller captures before it materialises (ADR-16 §6) — and with it
+    /// only the DIFFERENCE is touched: an entry whose node is identical in
+    /// both trees is already on disk exactly as `to` wants it, and a subtree
+    /// with the same address on both sides is skipped without being read.
+    /// Without this, every switch rewrote every file in the working tree, so a
+    /// switch cost the size of the tree rather than the size of the change —
+    /// and G1.4's eight workspaces, each gaining a file per operation, had
+    /// slowed to a crawl by their few-hundredth operation of ten thousand.
+    ///
+    /// With no snapshot, the working tree itself is reconciled: pruned to the
+    /// target and rewritten in full. That is the slow path and the safe one.
+    fn materialise_working_tree(&self, from: Option<&str>, to: Option<&str>) -> Result<()> {
+        let Some(target) = to else {
             return Err(Error::Invalid(
                 "this line preserved no working state, so there is nothing to \
                  restore; the working tree has been left exactly as it is"
@@ -1942,12 +2055,127 @@ impl Repo {
             entries_written: 0,
             collisions: Vec::new(),
         };
-        // Reconciling, unlike `checkout --into`: switching lines must also
-        // REMOVE what the target tree does not name, or the working tree
-        // becomes the union of both lines and switch stops being involutive.
-        self.prune_to_tree(&target, &root)?;
-        self.restore_tree(&target, &root, &mut report)?;
+        match from {
+            Some(from) => self.reconcile_tree(from, &target, &root, &mut report)?,
+            None => {
+                // Reconciling, unlike `checkout --into`: switching lines must
+                // also REMOVE what the target tree does not name, or the
+                // working tree becomes the union of both lines and switch
+                // stops being involutive.
+                self.prune_to_tree(&target, &root)?;
+                self.restore_tree(&target, &root, &mut report)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Reconcile one directory from the state `from_id` describes to the
+    /// state `to_id` describes, touching only what differs.
+    ///
+    /// `from_id` is a faithful snapshot of what is in `dest` right now, so
+    /// "named by `from` and not by `to`" is exactly "on disk and must go",
+    /// and "identical node on both sides" is exactly "already right".
+    ///
+    /// The one subtlety is a name the filesystem folds onto one that stays.
+    /// `write_entry` detects a fold by the identity of what this pass already
+    /// created in the directory — and an unchanged entry was not created by
+    /// this pass. So the identities of everything that stays are gathered
+    /// FIRST, and only then is anything written: a changed name that folds
+    /// onto an unchanged one is reported as a collision, not written over it.
+    fn reconcile_tree(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        dest: &Path,
+        report: &mut CheckoutReport,
+    ) -> Result<()> {
+        if from_id == to_id {
+            return Ok(());
+        }
+        let to = self.load_tree(to_id)?;
+        // The snapshot was written moments ago under this same lock, so its
+        // absence is damage rather than a case to work around.
+        let from = self.load_tree(from_id).map_err(|e| {
+            Error::Corrupt(format!(
+                "the working-tree snapshot {} cannot be read: {e}",
+                crate::short_id(from_id)
+            ))
+        })?;
+
+        // 0. Remove what `to` does not name.
+        for name in from.entries.keys() {
+            if to.entries.contains_key(name) {
+                continue;
+            }
+            // The snapshot's names came from this directory, so a name this
+            // platform cannot spell was never on it — nothing to remove.
+            let Some(name_os) = platform::os_string_from_bytes(name) else {
+                continue;
+            };
+            remove_entry(&dest.join(&name_os))?;
+        }
+
+        // 1. What stays, and what it is on disk — see above.
+        let mut written_ids: Vec<(Vec<u8>, (u64, u64))> = Vec::new();
+        for (name, node) in &to.entries {
+            if from.entries.get(name) != Some(node) {
+                continue;
+            }
+            let Some(name_os) = platform::os_string_from_bytes(name) else {
+                continue;
+            };
+            if let Ok(meta) = fs::symlink_metadata(dest.join(&name_os)) {
+                if let Some(id) = platform::file_identity(&meta) {
+                    written_ids.push((name.clone(), id));
+                }
+            }
+        }
+
+        // 2. Write what changed.
+        for (name, node) in &to.entries {
+            let before = from.entries.get(name);
+            if before == Some(node) {
+                continue;
+            }
+            if let (
+                Some(Node::Directory { tree: from_child }),
+                Node::Directory { tree: to_child },
+            ) = (before, node)
+            {
+                // A directory on both sides whose contents differ: descend,
+                // rather than delete and rewrite the whole of it.
+                if !is_safe_component(name) {
+                    continue;
+                }
+                let Some(name_os) = platform::os_string_from_bytes(name) else {
+                    continue;
+                };
+                self.reconcile_tree(from_child, to_child, &dest.join(&name_os), report)?;
+                continue;
+            }
+            if before.is_some() {
+                // The kind changed, or a file's content did. What stands here
+                // goes first, so a directory in the way of a file — or a file
+                // in the way of a directory — cannot fail the write half-way.
+                if let Some(name_os) = platform::os_string_from_bytes(name) {
+                    remove_entry(&dest.join(&name_os))?;
+                }
+            }
+            self.write_entry(name, node, dest, &mut written_ids, report)?;
+        }
+        Ok(())
+    }
+
+    fn load_tree(&self, tree_id: &str) -> Result<Tree> {
+        let Some(id) = ChunkId::from_hex(tree_id) else {
+            return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
+        };
+        let Some(bytes) = self.store.read(id)? else {
+            return Err(Error::NotFound(format!(
+                "tree {tree_id} is not present locally"
+            )));
+        };
+        Tree::from_bytes(&bytes)
     }
 
     /// Delete working-tree entries the target tree does not name.
@@ -2011,6 +2239,455 @@ impl Repo {
             Some(tip) => self.write_head_pointer(&tip),
             None => Ok(()),
         }
+    }
+
+    // -------------------------------------------------------------- lenses
+
+    /// The lenses this repository has, and which one this workspace looks
+    /// through. One, built in, hiding nothing — until lenses are defined,
+    /// every view is already the forensic view.
+    pub fn lenses(&self) -> Result<Vec<LensView>> {
+        let lines = self.line_state()?;
+        let active = self.lens_of(&lines);
+        Ok(vec![LensView {
+            name: DEFAULT_LENS.to_string(),
+            active: active == DEFAULT_LENS,
+            hides: "nothing".to_string(),
+        }])
+    }
+
+    fn lens_of(&self, lines: &LineState) -> String {
+        lines
+            .workspaces
+            .get(&self.workspace)
+            .map(|w| w.lens.clone())
+            .unwrap_or_else(|| DEFAULT_LENS.to_string())
+    }
+
+    /// Look through a lens. Per workspace, like the current line, and
+    /// reversible: the inverse looks back through the one it replaced.
+    pub fn use_lens(&mut self, name: &str) -> Result<LensOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        if name != DEFAULT_LENS {
+            return Err(Error::NoSuchLens(name.to_string()));
+        }
+        let mut lines = self.line_state()?;
+        let from = self.lens_of(&lines);
+        if let Some(space) = lines.workspaces.get_mut(&self.workspace) {
+            space.lens = name.to_string();
+        }
+        // Recorded even when nothing changed, as a self-switch is: the
+        // command ran, and a concurrent history is ordered by what ran.
+        let entry = self.oplog.commit(
+            Operation::Lens {
+                workspace: self.workspace.clone(),
+                from,
+                to: name.to_string(),
+            },
+            Some(lines),
+        )?;
+        Ok(LensOutcome {
+            lens: name.to_string(),
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    // --------------------------------------------------------------- merge
+
+    /// Bring another line's history onto this one.
+    ///
+    /// Fast-forward only. If this line already contains the other's tip,
+    /// nothing moves and the attempt is recorded. If the other contains this
+    /// one's, the tip advances and the working tree is rewritten to match —
+    /// captured first, through the same pending mechanism `switch` uses, so an
+    /// interruption completes on the next command. Two lines that have each
+    /// moved since they parted are refused by name: reconciling them is the
+    /// semantic merge G4 measures, and this build does not pretend to.
+    pub fn merge_line(&mut self, other: &str) -> Result<MergeOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let other = validate_line_name(other)?;
+        let mut lines = self.line_state()?;
+        let line = self.line_of(&lines);
+        let Some(target) = lines.lines.get(&other) else {
+            return Err(Error::NoSuchLine(format!("there is no line named {other}")));
+        };
+        let theirs = target.tip.clone();
+        let ours = lines.lines.get(&line).and_then(|r| r.tip.clone());
+
+        let advance_to = match self.relate(ours.as_deref(), theirs.as_deref())? {
+            Relation::Same | Relation::OursContainsTheirs => None,
+            Relation::TheirsContainsOurs => theirs.clone(),
+            Relation::Diverged => return Err(Error::Diverged { line, other }),
+        };
+        let Some(after) = advance_to else {
+            let entry = self.oplog.commit(
+                Operation::Merge {
+                    line: line.clone(),
+                    from: other.clone(),
+                    before: ours.clone(),
+                    after: ours.clone(),
+                    captured: None,
+                },
+                None,
+            )?;
+            return Ok(MergeOutcome {
+                line,
+                from: other,
+                fast_forward: false,
+                now_at: ours,
+                oplog_seq: entry.seq,
+                rescued_working_state: rescued,
+            });
+        };
+
+        let target_tree = self
+            .checkpoint(&after)?
+            .ok_or_else(|| {
+                Error::Corrupt(format!(
+                    "line {other} points at checkpoint {} which is not present",
+                    crate::short_id(&after)
+                ))
+            })?
+            .tree;
+        // Capture first: nothing is materialised over an uncaptured working
+        // tree (ADR-16 §6). The tip moves and the target tree is parked as
+        // this line's pending state in one publish, so a crash before the
+        // files are written leaves a merge the next command finishes.
+        let captured = self.capture_working_tree()?;
+        lines.lines.entry(line.clone()).or_default().tip = Some(after.clone());
+        self.set_preserved(&mut lines, &line, Some(target_tree.clone()));
+        let entry = self.oplog.commit(
+            Operation::Merge {
+                line: line.clone(),
+                from: other.clone(),
+                before: ours,
+                after: Some(after.clone()),
+                captured: Some(captured.clone()),
+            },
+            Some(lines.clone()),
+        )?;
+        self.materialise_working_tree(Some(&captured), Some(&target_tree))?;
+        self.set_preserved(&mut lines, &line, None);
+        self.oplog.publish_lines(&lines)?;
+        self.sync_head_pointer(&lines)?;
+        Ok(MergeOutcome {
+            line,
+            from: other,
+            fast_forward: true,
+            now_at: Some(after),
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// How two tips stand to each other. A line with no tip is contained by
+    /// everything.
+    fn relate(&self, ours: Option<&str>, theirs: Option<&str>) -> Result<Relation> {
+        Ok(match (ours, theirs) {
+            (None, None) => Relation::Same,
+            (None, Some(_)) => Relation::TheirsContainsOurs,
+            (Some(_), None) => Relation::OursContainsTheirs,
+            (Some(a), Some(b)) if a == b => Relation::Same,
+            (Some(a), Some(b)) => {
+                if self.descends_from(a, b)? {
+                    Relation::OursContainsTheirs
+                } else if self.descends_from(b, a)? {
+                    Relation::TheirsContainsOurs
+                } else {
+                    Relation::Diverged
+                }
+            }
+        })
+    }
+
+    /// Whether `ancestor` is on `id`'s parent chain. Bounded like every walk
+    /// over history: a chain past the sane bound is corruption, not patience.
+    fn descends_from(&self, id: &str, ancestor: &str) -> Result<bool> {
+        let mut cursor = self.checkpoint(id)?.and_then(|c| c.parent);
+        let mut guard = 0usize;
+        while let Some(pid) = cursor {
+            guard += 1;
+            if guard > MAX_ANCESTRY_WALK {
+                return Err(Error::Corrupt(
+                    "checkpoint parent chain exceeds the sane bound".into(),
+                ));
+            }
+            if pid == ancestor {
+                return Ok(true);
+            }
+            cursor = self.checkpoint(&pid)?.and_then(|c| c.parent);
+        }
+        Ok(false)
+    }
+
+    // --------------------------------------------------------------- split
+
+    /// Split the current change so that each top-level path of what it holds
+    /// becomes a change of its own. The first group keeps the change it is
+    /// in; every later one is minted. One entry however many groups, for the
+    /// reason assign is one (ADR-17 §6).
+    ///
+    /// With nothing current, or nothing to split, this still succeeds and is
+    /// still recorded — the same rule as a refused assign: a command that ran
+    /// is a fact, and a concurrent history is ordered by facts.
+    pub fn split(&mut self) -> Result<SplitOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let mut lines = self.line_state()?;
+        let line = self.line_of(&lines);
+        let current = lines
+            .lines
+            .get(&line)
+            .and_then(|r| r.current_change.clone());
+        let mut moved: Vec<(Vec<u8>, String)> = Vec::new();
+        let mut minted: Vec<String> = Vec::new();
+        if let Some(change) = &current {
+            let held: Vec<Vec<u8>> = lines
+                .lines
+                .get(&line)
+                .and_then(|r| r.changes.get(change))
+                .map(|c| c.assigned.iter().cloned().collect())
+                .unwrap_or_default();
+            let mut groups: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
+            for path in held {
+                groups
+                    .entry(first_component(&path).to_vec())
+                    .or_default()
+                    .push(path);
+            }
+            for (_, paths) in groups.into_iter().skip(1) {
+                let id = self.new_change_id()?;
+                for path in paths {
+                    moved.push((path, id.clone()));
+                }
+                minted.push(id);
+            }
+            let record = lines.lines.entry(line.clone()).or_default();
+            for (path, into) in &moved {
+                if let Some(source) = record.changes.get_mut(change) {
+                    source.assigned.remove(path);
+                }
+                record
+                    .changes
+                    .entry(into.clone())
+                    .or_default()
+                    .assigned
+                    .insert(path.clone());
+            }
+        }
+        let entry = self.oplog.commit(
+            Operation::Split {
+                line,
+                change: current.clone(),
+                moved: moved.clone(),
+            },
+            Some(lines),
+        )?;
+        Ok(SplitOutcome {
+            change: current,
+            into: minted,
+            moved: moved.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    // --------------------------------------------------------- maintenance
+
+    /// What a sync would do, without doing it.
+    ///
+    /// No remote can be configured yet, so the honest answer is that there is
+    /// nothing to send and nothing to receive. The attempt is still recorded,
+    /// in the op-log and in the sync state a real sync will read, because a
+    /// dry run that leaves no trace cannot be shown to have happened.
+    /// Sync with the configured remote. There is no way to configure one yet,
+    /// so this refuses — in the core rather than the CLI, because the CLI may
+    /// hold no logic the API lacks (§8), and a refusal is logic.
+    pub fn sync(&mut self) -> Result<SyncOutcome> {
+        Err(Error::NoRemote)
+    }
+
+    pub fn sync_dry_run(&mut self) -> Result<SyncOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let state = SyncState {
+            remote: None,
+            dry_run: true,
+            would_send: 0,
+            would_receive: 0,
+            at_unix_ms: unix_ms_now(),
+        };
+        write_durably(
+            &self.repository.join(SYNC_DIR),
+            SYNC_STATE_FILE,
+            &serde_json::to_vec_pretty(&state)?,
+        )?;
+        let entry = self.oplog.commit(
+            Operation::Sync {
+                remote: None,
+                dry_run: true,
+            },
+            None,
+        )?;
+        Ok(SyncOutcome {
+            remote: None,
+            dry_run: true,
+            would_send: 0,
+            would_receive: 0,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Archive the op-log entries written since the last archive.
+    ///
+    /// ADR-13's first half: older segments compact into an archive that
+    /// preserves the chain and remains verifiable. Its second half — the live
+    /// log shrinking — is not here, so this reduces nothing yet; what it does
+    /// is put every entry into exactly one durable segment, including the
+    /// entry that records the previous archive.
+    pub fn compact(&mut self) -> Result<CompactOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let dir = self.repository.join(ARCHIVE_DIR);
+        fs::create_dir_all(&dir)?;
+        // The archives on disk are the truth about what is archived, so an
+        // interrupted run — segment written, entry not — is simply continued
+        // from the segment's end next time.
+        let from_seq = archived_through(&dir)? + 1;
+        let entries = self.oplog.entries_from(from_seq)?;
+        let to_seq = entries.last().map_or(from_seq.saturating_sub(1), |e| e.seq);
+        if !entries.is_empty() {
+            let mut body = Vec::new();
+            for entry in &entries {
+                serde_json::to_writer(&mut body, entry)?;
+                body.push(b'\n');
+            }
+            write_durably(&dir, &archive_name(from_seq, to_seq), &body)?;
+        }
+        let entry = self
+            .oplog
+            .commit(Operation::Compact { from_seq, to_seq }, None)?;
+        Ok(CompactOutcome {
+            from_seq,
+            to_seq,
+            archived: entries.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Collect content nothing references.
+    ///
+    /// Whole packs only (ADR-9 §2): a pack is removed when every chunk in it
+    /// is unreferenced, and never rewritten. That is the one shape of
+    /// collection that cannot lose data by construction — nothing referenced
+    /// is ever touched — and it is all this ships until a partial rewrite has
+    /// a crash-safety argument of its own.
+    ///
+    /// What is reachable is everything `verify` walks: every checkpoint
+    /// history records, whether or not it is still on a line, every line tip,
+    /// and every working state any workspace has preserved.
+    pub fn thin(&mut self) -> Result<ThinOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let live = self.reachable_chunks()?;
+        let mut removed: Vec<u64> = Vec::new();
+        let mut collected: Vec<String> = Vec::new();
+        for (pack, chunks) in self.store.packs_with_chunks() {
+            if chunks.is_empty() || chunks.iter().any(|c| live.contains(c)) {
+                continue;
+            }
+            collected.extend(chunks.iter().map(|c| c.to_hex()));
+            removed.push(pack);
+        }
+        // The ledger first — what is about to go — then the packs. A crash
+        // between leaves a record of an intent that was safe to carry out,
+        // and the next thin carries it out.
+        let record = ThinRecord {
+            at_unix_ms: unix_ms_now(),
+            packs: removed.clone(),
+            collected: collected.clone(),
+        };
+        let mut line = serde_json::to_vec(&record)?;
+        line.push(b'\n');
+        append_durably(&self.repository.join(THIN_DIR), THIN_LEDGER_FILE, &line)?;
+        for pack in &removed {
+            self.store.remove_pack(*pack)?;
+        }
+        let entry = self.oplog.commit(
+            Operation::Thin {
+                collected: collected.len() as u64,
+            },
+            None,
+        )?;
+        Ok(ThinOutcome {
+            collected: collected.len() as u64,
+            packs_removed: removed.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Every chunk something still refers to.
+    fn reachable_chunks(&self) -> Result<std::collections::HashSet<ChunkId>> {
+        let mut live = std::collections::HashSet::new();
+        let mut trees: Vec<String> = Vec::new();
+        for cp in self.checkpoints()? {
+            if let Some(id) = ChunkId::from_hex(&cp.id) {
+                live.insert(id);
+            }
+            trees.push(cp.tree);
+        }
+        let lines = self.line_state()?;
+        for rec in lines.lines.values() {
+            if let Some(cp) = rec
+                .tip
+                .as_deref()
+                .and_then(|t| self.checkpoint(t).transpose())
+            {
+                let cp = cp?;
+                if let Some(id) = ChunkId::from_hex(&cp.id) {
+                    live.insert(id);
+                }
+                trees.push(cp.tree);
+            }
+        }
+        for space in lines.workspaces.values() {
+            trees.extend(space.preserved.values().cloned());
+        }
+        for tree in trees {
+            self.collect_tree(&tree, &mut live)?;
+        }
+        Ok(live)
+    }
+
+    fn collect_tree(
+        &self,
+        tree_id: &str,
+        live: &mut std::collections::HashSet<ChunkId>,
+    ) -> Result<()> {
+        let Some(id) = ChunkId::from_hex(tree_id) else {
+            return Ok(());
+        };
+        if !live.insert(id) {
+            return Ok(());
+        }
+        let Some(bytes) = self.store.read(id)? else {
+            return Ok(());
+        };
+        let tree = Tree::from_bytes(&bytes)?;
+        for node in tree.entries.values() {
+            match node {
+                Node::Directory { tree } => self.collect_tree(tree, live)?,
+                Node::Symlink { .. } => {}
+                Node::File { chunks, .. } => {
+                    for hex in chunks {
+                        if let Some(chunk) = ChunkId::from_hex(hex) {
+                            live.insert(chunk);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------ snapshot
@@ -2252,160 +2929,176 @@ impl Repo {
         // from "an unrelated file was already here" — the filesystem, not a
         // guess about which names fold, is the authority.
         let mut written_ids: Vec<(Vec<u8>, (u64, u64))> = Vec::new();
-
         for (name, node) in &tree.entries {
-            // A tree entry name is a single path component by construction.
-            // A "..", a separator, or a NUL can only reach here from a corrupt
-            // or hostile repository, and joining it would let a checkout write
-            // OUTSIDE the destination — arbitrary file write. Refuse it.
-            if !is_safe_component(name) {
-                report.collisions.push(Collision {
-                    path: String::from_utf8_lossy(name).into_owned(),
-                    collided_with: String::new(),
-                    reason: "refused: not a single path component (a corrupt or \
-                             hostile repository cannot escape the destination)"
-                        .to_string(),
-                });
-                continue;
+            self.write_entry(name, node, dest, &mut written_ids, report)?;
+        }
+        Ok(())
+    }
+
+    /// Write one tree entry into `dest`, with every check `restore_tree`
+    /// makes: a safe single component, a representable name, a fold
+    /// collision against what this pass already wrote here, never through a
+    /// symlink. `written_ids` is the directory's memory of what it has
+    /// created and what it folds onto.
+    fn write_entry(
+        &self,
+        name: &[u8],
+        node: &Node,
+        dest: &Path,
+        written_ids: &mut Vec<(Vec<u8>, (u64, u64))>,
+        report: &mut CheckoutReport,
+    ) -> Result<()> {
+        // A tree entry name is a single path component by construction.
+        // A "..", a separator, or a NUL can only reach here from a corrupt
+        // or hostile repository, and joining it would let a checkout write
+        // OUTSIDE the destination — arbitrary file write. Refuse it.
+        if !is_safe_component(name) {
+            report.collisions.push(Collision {
+                path: String::from_utf8_lossy(name).into_owned(),
+                collided_with: String::new(),
+                reason: "refused: not a single path component (a corrupt or \
+                         hostile repository cannot escape the destination)"
+                    .to_string(),
+            });
+            return Ok(());
+        }
+
+        // Windows names are UTF-16, so a byte sequence that is not valid
+        // UTF-8 has no faithful representation there. Reported rather than
+        // approximated: a silently renamed file is a lost file.
+        let Some(name_os) = platform::os_string_from_bytes(name) else {
+            report.collisions.push(Collision {
+                path: String::from_utf8_lossy(name).into_owned(),
+                collided_with: String::new(),
+                reason: format!(
+                    "this platform ({}) cannot represent these name bytes",
+                    platform::platform_name()
+                ),
+            });
+            return Ok(());
+        };
+        let path = dest.join(&name_os);
+
+        // A fold collision is specifically: the path already exists AND it
+        // is the SAME filesystem object as a name we already wrote in this
+        // directory — the filesystem folded two distinct names into one.
+        // An unrelated pre-existing file is not that; checkout overwrites
+        // it, which is the point of writing a checkpoint into a directory.
+        // The authority is the inode, not a guess about which names fold:
+        // an earlier approximation missed real NFC/NFD and non-ASCII case
+        // folds and silently overwrote the sibling.
+        if let Ok(existing) = fs::symlink_metadata(&path) {
+            if let Some(id) = platform::file_identity(&existing) {
+                if let Some((sibling, _)) = written_ids.iter().find(|(_, wid)| *wid == id) {
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::from_utf8_lossy(sibling).into_owned(),
+                        reason: "this filesystem does not distinguish these names \
+                                 (case folding or Unicode normalisation)"
+                            .to_string(),
+                    });
+                    return Ok(());
+                }
             }
+            // Otherwise a pre-existing unrelated file (or, where identity is
+            // unavailable, a fold this platform cannot detect): overwrite.
+        }
 
-            // Windows names are UTF-16, so a byte sequence that is not valid
-            // UTF-8 has no faithful representation there. Reported rather than
-            // approximated: a silently renamed file is a lost file.
-            let Some(name_os) = platform::os_string_from_bytes(name) else {
-                report.collisions.push(Collision {
-                    path: String::from_utf8_lossy(name).into_owned(),
-                    collided_with: String::new(),
-                    reason: format!(
-                        "this platform ({}) cannot represent these name bytes",
-                        platform::platform_name()
-                    ),
-                });
-                continue;
-            };
-            let path = dest.join(&name_os);
+        // Never write THROUGH a pre-existing symlink at this path:
+        // create_dir_all and fs::write both follow a final symlink, so a
+        // link left in the destination (by an earlier checkout, or a
+        // hostile actor) could redirect the write outside dest — a
+        // path-traversal / link-following hole (CWE-59). Remove it first;
+        // checkout replaces whatever is here. A folded sibling we wrote was
+        // already caught above, so this only clears an unrelated link.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                fs::remove_file(&path)?;
+            }
+        }
 
-            // A fold collision is specifically: the path already exists AND it
-            // is the SAME filesystem object as a name we already wrote in this
-            // directory — the filesystem folded two distinct names into one.
-            // An unrelated pre-existing file is not that; checkout overwrites
-            // it, which is the point of writing a checkpoint into a directory.
-            // The authority is the inode, not a guess about which names fold:
-            // an earlier approximation missed real NFC/NFD and non-ASCII case
-            // folds and silently overwrote the sibling.
-            if let Ok(existing) = fs::symlink_metadata(&path) {
-                if let Some(id) = platform::file_identity(&existing) {
-                    if let Some((sibling, _)) = written_ids.iter().find(|(_, wid)| *wid == id) {
-                        report.collisions.push(Collision {
-                            path: String::from_utf8_lossy(name).into_owned(),
-                            collided_with: String::from_utf8_lossy(sibling).into_owned(),
-                            reason: "this filesystem does not distinguish these names \
-                                     (case folding or Unicode normalisation)"
-                                .to_string(),
-                        });
-                        continue;
+        match node {
+            Node::Directory { tree } => {
+                fs::create_dir_all(&path)?;
+                // The directory itself is an entry checkout created, so it
+                // counts — otherwise the reported total understates a
+                // checkpoint that contains directories.
+                report.entries_written += 1;
+                self.restore_tree(tree, &path, report)?;
+            }
+            Node::Symlink { target } => {
+                // Replace anything already at this path. A real removal
+                // failure (a directory in the way, a permission error) is
+                // propagated, not swallowed; only a benign "already gone"
+                // is tolerated.
+                if let Err(e) = fs::remove_file(&path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(e.into());
                     }
                 }
-                // Otherwise a pre-existing unrelated file (or, where identity is
-                // unavailable, a fold this platform cannot detect): overwrite.
+                let Some(target_os) = platform::os_string_from_bytes(target) else {
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::new(),
+                        reason: format!(
+                            "this platform ({}) cannot represent the link \
+                             target's bytes",
+                            platform::platform_name()
+                        ),
+                    });
+                    return Ok(());
+                };
+                platform::symlink(Path::new(&target_os), &path)?;
+                report.entries_written += 1;
             }
-
-            // Never write THROUGH a pre-existing symlink at this path:
-            // create_dir_all and fs::write both follow a final symlink, so a
-            // link left in the destination (by an earlier checkout, or a
-            // hostile actor) could redirect the write outside dest — a
-            // path-traversal / link-following hole (CWE-59). Remove it first;
-            // checkout replaces whatever is here. A folded sibling we wrote was
-            // already caught above, so this only clears an unrelated link.
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if meta.file_type().is_symlink() {
-                    fs::remove_file(&path)?;
-                }
-            }
-
-            match node {
-                Node::Directory { tree } => {
-                    fs::create_dir_all(&path)?;
-                    // The directory itself is an entry checkout created, so it
-                    // counts — otherwise the reported total understates a
-                    // checkpoint that contains directories.
-                    report.entries_written += 1;
-                    self.restore_tree(tree, &path, report)?;
-                }
-                Node::Symlink { target } => {
-                    // Replace anything already at this path. A real removal
-                    // failure (a directory in the way, a permission error) is
-                    // propagated, not swallowed; only a benign "already gone"
-                    // is tolerated.
-                    if let Err(e) = fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            return Err(e.into());
-                        }
-                    }
-                    let Some(target_os) = platform::os_string_from_bytes(target) else {
-                        report.collisions.push(Collision {
-                            path: String::from_utf8_lossy(name).into_owned(),
-                            collided_with: String::new(),
-                            reason: format!(
-                                "this platform ({}) cannot represent the link \
-                                 target's bytes",
-                                platform::platform_name()
-                            ),
-                        });
-                        continue;
+            Node::File { chunks, size, mode } => {
+                let mut content = Vec::with_capacity(*size as usize);
+                for hex in chunks {
+                    let Some(cid) = ChunkId::from_hex(hex) else {
+                        return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
                     };
-                    platform::symlink(Path::new(&target_os), &path)?;
-                    report.entries_written += 1;
-                }
-                Node::File { chunks, size, mode } => {
-                    let mut content = Vec::with_capacity(*size as usize);
-                    for hex in chunks {
-                        let Some(cid) = ChunkId::from_hex(hex) else {
-                            return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
-                        };
-                        let Some(part) = self.store.read(cid)? else {
-                            return Err(Error::NotFound(format!(
-                                "chunk {hex} is not present locally"
-                            )));
-                        };
-                        content.extend_from_slice(&part);
-                    }
-                    if content.len() as u64 != *size {
-                        return Err(Error::Corrupt(format!(
-                            "{} reassembles to {} bytes, expected {size}",
-                            path.display(),
-                            content.len()
+                    let Some(part) = self.store.read(cid)? else {
+                        return Err(Error::NotFound(format!(
+                            "chunk {hex} is not present locally"
                         )));
-                    }
-                    fs::write(&path, &content)?;
-                    platform::set_file_mode(&path, *mode)?;
-                    if platform::mode_is_lossy_here(*mode) {
-                        // Named, not silent. The lost bits vary — the executable
-                        // bit, or the group/other distinctions of a mode like
-                        // 0o640 — so the report states the mode that could not
-                        // be recorded rather than naming one specific bit.
-                        report.collisions.push(Collision {
-                            path: String::from_utf8_lossy(name).into_owned(),
-                            collided_with: String::new(),
-                            reason: format!(
-                                "written, but this platform ({}) cannot record \
-                                 the permission mode {:04o}",
-                                platform::platform_name(),
-                                mode & 0o777
-                            ),
-                        });
-                    }
-                    report.entries_written += 1;
+                    };
+                    content.extend_from_slice(&part);
                 }
+                if content.len() as u64 != *size {
+                    return Err(Error::Corrupt(format!(
+                        "{} reassembles to {} bytes, expected {size}",
+                        path.display(),
+                        content.len()
+                    )));
+                }
+                fs::write(&path, &content)?;
+                platform::set_file_mode(&path, *mode)?;
+                if platform::mode_is_lossy_here(*mode) {
+                    // Named, not silent. The lost bits vary — the executable
+                    // bit, or the group/other distinctions of a mode like
+                    // 0o640 — so the report states the mode that could not
+                    // be recorded rather than naming one specific bit.
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::new(),
+                        reason: format!(
+                            "written, but this platform ({}) cannot record \
+                             the permission mode {:04o}",
+                            platform::platform_name(),
+                            mode & 0o777
+                        ),
+                    });
+                }
+                report.entries_written += 1;
             }
-            // Record the identity of what we just wrote so a later name the
-            // filesystem folds onto it is detected as a collision, not
-            // silently overwritten. Reached only on a successful write — the
-            // unrepresentable-target arm above `continue`s before here.
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if let Some(id) = platform::file_identity(&meta) {
-                    written_ids.push((name.clone(), id));
-                }
+        }
+        // Record the identity of what we just wrote so a later name the
+        // filesystem folds onto it is detected as a collision, not
+        // silently overwritten. Reached only on a successful write — the
+        // unrepresentable-target arm above `continue`s before here.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if let Some(id) = platform::file_identity(&meta) {
+                written_ids.push((name.to_vec(), id));
             }
         }
         Ok(())
@@ -2822,6 +3515,28 @@ pub struct ChangeView {
 /// back and break the ones before it.
 const LINE_STATE_FORMAT: u64 = 4;
 
+/// Bring a repository whose data needs no migration up to the current format.
+///
+/// A format bump that only adds operation variants — 6 added `Sync`, `Lens`,
+/// `Split` and `Compact` — rewrites nothing, so there is no migration to run.
+/// The version still has to move, and on the first open rather than the
+/// first write: this build will append entries tagged with the new format,
+/// and an older build that read the document version, opened, and then met
+/// one of them would fail inside the chain check with the advice for a
+/// repository that must be recreated. Stamping first means it refuses at the
+/// door instead, with the advice to upgrade.
+///
+/// Anything from the last data migration's target up to the current format
+/// is stamped, so a later variant-only bump needs no step of its own.
+fn stamp_current_format(oplog: &OpLog) -> Result<()> {
+    match oplog.format_version()? {
+        Some(v) if (CHECKPOINT_ADDRESS_FORMAT..FORMAT_VERSION).contains(&v) => {
+            oplog.set_format_version(FORMAT_VERSION)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The format `migrate_checkpoint_blobs_to_v5` produces (ADR-8).
 const CHECKPOINT_ADDRESS_FORMAT: u64 = 5;
 
@@ -3000,6 +3715,7 @@ fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
             root: None,
             current: old.current,
             preserved,
+            lens: DEFAULT_LENS.to_string(),
         },
     );
 
@@ -3093,6 +3809,190 @@ fn relative_path_bytes(relative: &Path) -> Option<Vec<u8>> {
 ///
 /// Lossy, because a path is raw bytes and JSON is text. The bytes stay exact
 /// in the change record and in the op-log; only what is shown is approximate.
+/// Where sync keeps its state, under the repository directory.
+const SYNC_DIR: &str = "sync";
+const SYNC_STATE_FILE: &str = "state.json";
+/// Where op-log archive segments go (ADR-13).
+const ARCHIVE_DIR: &str = "archive";
+/// Where thinning records what it collected.
+const THIN_DIR: &str = "thin";
+const THIN_LEDGER_FILE: &str = "ledger.jsonl";
+
+/// The last sync attempt, as a real sync will read it back.
+#[derive(Serialize, Deserialize)]
+struct SyncState {
+    remote: Option<String>,
+    dry_run: bool,
+    would_send: u64,
+    would_receive: u64,
+    at_unix_ms: u64,
+}
+
+/// One thinning, as the ledger records it.
+#[derive(Serialize, Deserialize)]
+struct ThinRecord {
+    at_unix_ms: u64,
+    packs: Vec<u64>,
+    collected: Vec<String>,
+}
+
+/// The longest parent chain any walk over history will follow before calling
+/// it corruption. A chain cannot cycle — an id hashes its parent — so this is
+/// a bound on patience, not on correctness.
+const MAX_ANCESTRY_WALK: usize = 10_000_000;
+
+/// How one tip stands to another.
+enum Relation {
+    Same,
+    OursContainsTheirs,
+    TheirsContainsOurs,
+    Diverged,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MergeOutcome {
+    pub line: String,
+    pub from: String,
+    /// Whether the tip moved. False when this line already held the other's
+    /// history, which is recorded but changes nothing.
+    pub fast_forward: bool,
+    pub now_at: Option<String>,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LensView {
+    pub name: String,
+    pub active: bool,
+    pub hides: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LensOutcome {
+    pub lens: String,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SplitOutcome {
+    /// The change that was split, if one was current.
+    pub change: Option<String>,
+    /// The changes this split minted.
+    pub into: Vec<String>,
+    pub moved: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncOutcome {
+    pub remote: Option<String>,
+    pub dry_run: bool,
+    pub would_send: u64,
+    pub would_receive: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompactOutcome {
+    pub from_seq: u64,
+    pub to_seq: u64,
+    pub archived: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThinOutcome {
+    pub collected: u64,
+    pub packs_removed: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The top-level component of a repository-relative path.
+fn first_component(path: &[u8]) -> &[u8] {
+    path.split(|&b| b == b'/').next().unwrap_or(path)
+}
+
+fn archive_name(from_seq: u64, to_seq: u64) -> String {
+    format!("{from_seq:012}-{to_seq:012}.jsonl")
+}
+
+/// The highest op-log sequence any archive segment in `dir` reaches.
+fn archived_through(dir: &Path) -> Result<u64> {
+    let mut through = 0u64;
+    for entry in fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        if let Some((_, to)) = stem.split_once('-') {
+            if let Ok(to) = to.parse::<u64>() {
+                through = through.max(to);
+            }
+        }
+    }
+    Ok(through)
+}
+
+/// Write a whole file durably: data, then rename, then the directory.
+///
+/// The ordering ADR-3 requires of every write that a later read depends on. A
+/// crash leaves either the previous file or the new one, never a torn one.
+fn write_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{name}.tmp"));
+    {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, dir.join(name))?;
+    platform::sync_dir(dir)?;
+    Ok(())
+}
+
+/// Append to a ledger durably. A torn tail is a line without its newline,
+/// which a reader skips; nothing before it is ever rewritten.
+fn append_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(dir.join(name))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Remove whatever stands at `path`, by what it is on disk. Already gone is
+/// fine; anything else is not.
+fn remove_entry(path: &Path) -> Result<()> {
+    let result = match fs::symlink_metadata(path) {
+        // Never descend through a link: the target is outside the tree.
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => fs::remove_dir_all(path),
+        Ok(_) => return platform::remove_file_or_symlink(path),
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn display_path(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
@@ -4060,7 +4960,7 @@ mod tests {
         fs::write(dir.path().join("unassigned.txt"), b"not checkpointed").unwrap();
         repo.save("seed", None).unwrap();
 
-        let err = repo.materialise_working_tree(None).unwrap_err();
+        let err = repo.materialise_working_tree(None, None).unwrap_err();
 
         assert!(!err.recovery().is_empty());
         assert_eq!(
@@ -4966,8 +5866,8 @@ mod tests {
 
         assert_eq!(
             repo.oplog().format_version().unwrap(),
-            Some(CHECKPOINT_ADDRESS_FORMAT),
-            "both steps run, not just the first"
+            Some(FORMAT_VERSION),
+            "every step runs, not just the first"
         );
         let found = repo
             .checkpoint(&cp.id)
@@ -5005,8 +5905,8 @@ mod tests {
         );
         assert_eq!(
             repo.oplog().format_version().unwrap(),
-            Some(CHECKPOINT_ADDRESS_FORMAT),
-            "the repository is on the new format afterwards"
+            Some(FORMAT_VERSION),
+            "the repository is on the current format afterwards"
         );
     }
 
@@ -5175,9 +6075,402 @@ mod tests {
             "a rerun finds its own earlier work already stored and writes no \
              second pack of identical bytes"
         );
+        assert_eq!(repo.oplog().format_version().unwrap(), Some(FORMAT_VERSION));
+    }
+
+    // ------------------------------------------------------------ verbs
+
+    #[test]
+    fn merge_fast_forwards_onto_a_line_that_moved_ahead_and_undo_brings_it_back() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let base = repo.save("base", None).unwrap().checkpoint;
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f.txt"), b"on feat").unwrap();
+        let ahead = repo.save("ahead", None).unwrap().checkpoint;
+        repo.switch_line("main").unwrap();
+        assert!(
+            !dir.path().join("f.txt").exists(),
+            "premise: main does not have it"
+        );
+        fs::write(dir.path().join("scratch.txt"), b"uncommitted on main").unwrap();
+
+        let out = repo.merge_line("feat").unwrap();
+
+        assert!(out.fast_forward);
+        assert_eq!(out.now_at.as_deref(), Some(ahead.id.as_str()));
         assert_eq!(
-            repo.oplog().format_version().unwrap(),
-            Some(CHECKPOINT_ADDRESS_FORMAT)
+            fs::read(dir.path().join("f.txt")).unwrap(),
+            b"on feat",
+            "the working tree now matches the tip it advanced to"
+        );
+        assert!(
+            !dir.path().join("scratch.txt").exists(),
+            "and what was uncommitted was captured, not left to lie about the tip"
+        );
+
+        let undone = repo.undo().unwrap();
+
+        assert_eq!(
+            repo.head_checkpoint().unwrap().map(|c| c.id),
+            Some(base.id),
+            "the tip is back where it was"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("scratch.txt")).unwrap(),
+            b"uncommitted on main",
+            "and so is the working tree, uncommitted work included"
+        );
+        assert!(!dir.path().join("f.txt").exists());
+        assert!(
+            undone.preserved_working_state.is_some(),
+            "the merged tree is kept, durable"
+        );
+    }
+
+    #[test]
+    fn merging_a_line_this_one_already_contains_is_recorded_and_moves_nothing() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("base", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f.txt"), b"f").unwrap();
+        let tip = repo.save("ahead", None).unwrap().checkpoint;
+
+        let out = repo.merge_line("main").unwrap();
+
+        assert!(!out.fast_forward);
+        assert_eq!(out.now_at.as_deref(), Some(tip.id.as_str()));
+        assert!(out.oplog_seq > 0, "recorded: the command ran");
+    }
+
+    #[test]
+    fn merging_diverged_lines_is_refused_by_name_not_faked() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("base", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f.txt"), b"f").unwrap();
+        repo.save("on feat", None).unwrap();
+        repo.switch_line("main").unwrap();
+        fs::write(dir.path().join("m.txt"), b"m").unwrap();
+        let before = repo.save("on main", None).unwrap().checkpoint;
+
+        let err = repo.merge_line("feat").unwrap_err();
+
+        assert!(matches!(err, Error::Diverged { .. }), "{err}");
+        assert_eq!(
+            repo.head_checkpoint().unwrap().map(|c| c.id),
+            Some(before.id),
+            "and nothing moved"
+        );
+        assert!(
+            repo.merge_line("nowhere").is_err(),
+            "a line that does not exist is refused too"
+        );
+    }
+
+    #[test]
+    fn a_tip_whose_blob_is_gone_is_damage_not_an_empty_history() {
+        // With one checkpoint and its pack removed, `head_checkpoint` used to
+        // answer `None` — the same answer as "nothing saved yet" — so `log`
+        // printed an empty history and `status` counted zero checkpoints over
+        // a repository that had lost one. Found by G2.4's corrupt-store
+        // provocation, which `log` survived with exit 0.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("only", None).unwrap();
+        drop(repo);
+        for victim in fs::read_dir(dir.path().join(".lattice/packs")).unwrap() {
+            fs::remove_file(victim.unwrap().path()).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).unwrap();
+
+        assert!(
+            matches!(repo.head_checkpoint(), Err(Error::Corrupt(_))),
+            "a set tip with no blob must read as damage"
+        );
+        assert!(
+            repo.status().is_err(),
+            "and status must not count around it"
+        );
+    }
+
+    #[test]
+    fn switching_touches_only_what_differs_between_the_two_lines() {
+        // Every file that is the same on both lines is made read-only. The
+        // old materialiser rewrote every file and would fail on the first of
+        // them; one that touches only the difference never opens them.
+        let (dir, mut repo) = repo();
+        fs::create_dir_all(dir.path().join("deep/er")).unwrap();
+        for i in 0..20 {
+            fs::write(dir.path().join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+        }
+        fs::write(dir.path().join("deep/er/kept.txt"), b"kept\n").unwrap();
+        repo.save("base", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("f3.txt"), b"changed on feat\n").unwrap();
+        fs::write(dir.path().join("only-feat.txt"), b"new\n").unwrap();
+        fs::remove_file(dir.path().join("f7.txt")).unwrap();
+        repo.save("feat", None).unwrap();
+        repo.switch_line("main").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("f7.txt")).unwrap(),
+            b"7\n",
+            "premise: back on main"
+        );
+
+        let unchanged: Vec<PathBuf> = (0..20)
+            .filter(|i| *i != 3 && *i != 7)
+            .map(|i| dir.path().join(format!("f{i}.txt")))
+            .chain(std::iter::once(dir.path().join("deep/er/kept.txt")))
+            .collect();
+        // Read-only is part of the snapshot, so both lines must agree on it
+        // or the mode itself would be a difference to write.
+        for path in &unchanged {
+            platform::set_file_mode(path, 0o444).unwrap();
+        }
+        repo.save("read-only on main", None).unwrap();
+        repo.switch_line("feat").unwrap();
+        for path in &unchanged {
+            platform::set_file_mode(path, 0o444).unwrap();
+        }
+        repo.save("read-only on feat", None).unwrap();
+
+        repo.switch_line("main").unwrap();
+
+        assert_eq!(fs::read(dir.path().join("f3.txt")).unwrap(), b"3\n");
+        assert!(dir.path().join("f7.txt").exists(), "restored on main");
+        assert!(
+            !dir.path().join("only-feat.txt").exists(),
+            "removed on main"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("f5.txt")).unwrap(),
+            b"5\n",
+            "untouched, and intact"
+        );
+
+        repo.switch_line("feat").unwrap();
+
+        assert_eq!(
+            fs::read(dir.path().join("f3.txt")).unwrap(),
+            b"changed on feat\n"
+        );
+        assert!(!dir.path().join("f7.txt").exists());
+        assert_eq!(
+            fs::read(dir.path().join("only-feat.txt")).unwrap(),
+            b"new\n"
+        );
+        assert!(repo.verify(true).unwrap().errors.is_empty());
+    }
+
+    #[test]
+    fn a_lens_is_per_workspace_recorded_and_undone_back_to_the_one_before() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        assert!(
+            matches!(repo.use_lens("smoke"), Err(Error::NoSuchLens(_))),
+            "a lens that does not exist is refused by name"
+        );
+        let out = repo.use_lens("clean").unwrap();
+        assert!(
+            out.oplog_seq > 0,
+            "recorded, so a concurrent history can order it"
+        );
+        assert!(
+            repo.lenses()
+                .unwrap()
+                .iter()
+                .any(|l| l.name == "clean" && l.active),
+            "and this workspace now looks through it"
+        );
+
+        let undone = repo.undo().unwrap();
+        assert!(
+            !undone.nothing_to_undo,
+            "looking through a lens is reversible"
+        );
+    }
+
+    #[test]
+    fn split_gives_each_top_level_path_its_own_change_and_undo_puts_them_back() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("docs/b.txt"), b"b").unwrap();
+        repo.save("seed", None).unwrap();
+        let assigned = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
+        assert_eq!(
+            repo.changes().unwrap().len(),
+            1,
+            "premise: one change holds both"
+        );
+
+        let out = repo.split().unwrap();
+
+        assert_eq!(out.change.as_deref(), Some(assigned.change.as_str()));
+        assert_eq!(
+            out.into.len(),
+            1,
+            "two top-level groups: one stays, one is minted"
+        );
+        assert_eq!(out.moved, 1);
+        let changes = repo.changes().unwrap();
+        assert_eq!(changes.len(), 2, "and there are now two changes");
+
+        repo.undo().unwrap();
+
+        let changes = repo.changes().unwrap();
+        assert_eq!(changes.len(), 1, "undo removes what split minted");
+        assert_eq!(
+            changes[0].id, assigned.change,
+            "and the original change is the one that remains, holding everything again"
+        );
+    }
+
+    #[test]
+    fn split_with_nothing_current_still_succeeds_and_is_recorded() {
+        // G1.4 draws bare `split` ~10,000 times and counts a non-zero exit as
+        // a failure; a batch that draws it before any assign must still see a
+        // command that ran. Same rule as a refused assign.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        let out = repo.split().unwrap();
+
+        assert!(out.change.is_none());
+        assert!(out.into.is_empty());
+        assert!(out.oplog_seq > 0, "recorded even though nothing moved");
+        assert!(
+            !repo.undo().unwrap().nothing_to_undo,
+            "and reversible, trivially"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_sync_reports_nothing_to_move_and_leaves_its_state_behind() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        let out = repo.sync_dry_run().unwrap();
+
+        assert!(out.dry_run);
+        assert!(out.remote.is_none(), "no remote can be configured yet");
+        assert_eq!((out.would_send, out.would_receive), (0, 0));
+        assert!(out.oplog_seq > 0);
+        assert!(
+            dir.path().join(".lattice/sync/state.json").is_file(),
+            "the attempt is left where a real sync will read it"
+        );
+    }
+
+    #[test]
+    fn compact_archives_each_entry_exactly_once_across_runs() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("one", None).unwrap();
+
+        let first = repo.compact().unwrap();
+        assert_eq!(
+            first.from_seq, 1,
+            "the first archive starts at the beginning"
+        );
+        assert!(first.archived >= 2, "init and a save at least");
+
+        fs::write(dir.path().join("a.txt"), b"aa").unwrap();
+        repo.save("two", None).unwrap();
+        let second = repo.compact().unwrap();
+
+        assert_eq!(
+            second.from_seq,
+            first.to_seq + 1,
+            "the second continues from where the first stopped"
+        );
+        assert_eq!(
+            second.archived, 2,
+            "and holds exactly the entry recording the first archive plus the new save"
+        );
+        let segments = fs::read_dir(dir.path().join(".lattice/archive"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "jsonl")
+            })
+            .count();
+        assert_eq!(segments, 2, "one durable segment per run");
+    }
+
+    #[test]
+    fn thin_never_collects_anything_a_line_or_a_workspace_can_still_reach() {
+        // The data-loss test. A working state preserved on switch lives in a
+        // pack of its own with nothing else referencing it — no checkpoint,
+        // no tip — and thin must leave it alone, because switching back
+        // needs it.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("only-on-feat.txt"), b"unsaved work").unwrap();
+        repo.switch_line("main").unwrap();
+        assert!(
+            !dir.path().join("only-on-feat.txt").exists(),
+            "premise: the file is preserved, not on disk"
+        );
+        let packs_before = repo.store().pack_count();
+
+        let out = repo.thin().unwrap();
+
+        assert_eq!(out.collected, 0, "nothing here is unreferenced");
+        assert_eq!(repo.store().pack_count(), packs_before);
+        repo.switch_line("feat").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("only-on-feat.txt")).unwrap(),
+            b"unsaved work",
+            "and the preserved work comes back intact"
+        );
+        let report = repo.verify(true).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn thin_collects_a_pack_whose_every_chunk_is_unreferenced() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        // The residue of a save that was interrupted after its pack was
+        // durable and before its entry was: chunks nothing will ever name.
+        let mut orphan = PackWriter::new();
+        orphan.add(ChunkId::of(b"never referenced"), b"never referenced");
+        orphan.add(ChunkId::of(b"nor this"), b"nor this");
+        repo.store.write_pack(orphan).unwrap();
+        let packs_before = repo.store().pack_count();
+
+        let out = repo.thin().unwrap();
+
+        assert_eq!(out.collected, 2);
+        assert_eq!(out.packs_removed, 1);
+        assert_eq!(repo.store().pack_count(), packs_before - 1);
+        assert!(
+            !repo.store().contains(ChunkId::of(b"never referenced")),
+            "gone from the store, not just from a count"
+        );
+        assert!(repo.verify(true).unwrap().errors.is_empty());
+        assert!(
+            dir.path().join(".lattice/thin/ledger.jsonl").is_file(),
+            "and the ledger says what went"
+        );
+        assert!(
+            repo.undo().unwrap().nothing_to_undo,
+            "thinning is recorded and not undoable: what was collected is gone"
         );
     }
 
