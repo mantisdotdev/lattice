@@ -67,7 +67,12 @@ const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 /// a new shape changes their ids, which is what the chain exists to detect —
 /// so the tag is the only mechanism that can work, and it can only be
 /// introduced AT a break.
-pub const FORMAT_VERSION: u64 = 4;
+///
+/// 5 moves a checkpoint's blob to the address its id already named (ADR-8).
+/// Entries are untouched — the ids they carry are unchanged, because the bytes
+/// hashed to produce them are the bytes now stored — so this break is again
+/// outside the chain, and is migrated rather than refused.
+pub const FORMAT_VERSION: u64 = 5;
 
 /// The oldest format this build can read. Below this the per-entry tag does
 /// not exist, so an entry's original serialisation cannot be reproduced and
@@ -449,12 +454,13 @@ impl Entry {
     /// rather than a version field.
     fn compute_id(seq: u64, prev: &str, at: u64, op: &Operation, format: u64) -> Result<String> {
         let payload = match format {
-            // 3 and 4 serialise an operation identically — the break between
-            // them is in the line state, which is a published document and not
-            // hashed. The tag is still inside the payload, so an entry written
-            // at 3 and one written at 4 hash differently, and each verifies
-            // under its own rule.
-            3 | 4 => serde_json::to_vec(&(seq, prev, at, op, format))?,
+            // 3, 4 and 5 serialise an operation identically. Each break since
+            // 3 has been outside the hashed payload — 4 changed the line state,
+            // a published document; 5 changed where a checkpoint blob is
+            // stored, which is content. The tag is still inside the payload, so
+            // entries written at different formats hash differently and each
+            // verifies under its own rule.
+            3..=5 => serde_json::to_vec(&(seq, prev, at, op, format))?,
             other => {
                 return Err(Error::UnsupportedFormat(format!(
                     "entry {seq} records on-disk format {other}, which this build cannot hash"

@@ -100,9 +100,23 @@ pub enum Error {
     #[error("{0}")]
     Busy(String),
 
-    /// The repository was written in an on-disk format this build cannot read.
+    /// The repository was written in an on-disk format OLDER than this build
+    /// can read, so its entries cannot be re-hashed and the repository must be
+    /// recreated.
     #[error("{0}")]
     UnsupportedFormat(String),
+
+    /// The repository was written by a NEWER build than this one.
+    ///
+    /// A separate variant because it is the one case where the repository is
+    /// perfectly healthy and the software is what is behind — and because the
+    /// recovery is the opposite of `UnsupportedFormat`'s. Sharing a variant,
+    /// they shared a recovery, and it told the user to start a fresh
+    /// repository and re-save their work: advice that destroys a history a
+    /// newer build reads without complaint. An error message that costs a user
+    /// their history is worse than no message.
+    #[error("{0}")]
+    FormatFromNewerBuild(String),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -120,9 +134,10 @@ impl Error {
             Error::NotARepository(_) => Category::NotARepository,
             Error::NotFound(_) => Category::NotFound,
             Error::Corrupt(_) => Category::Corrupt,
-            Error::Invalid(_) | Error::InvalidLine(_) | Error::UnsupportedFormat(_) => {
-                Category::Invalid
-            }
+            Error::Invalid(_)
+            | Error::InvalidLine(_)
+            | Error::UnsupportedFormat(_)
+            | Error::FormatFromNewerBuild(_) => Category::Invalid,
             Error::NoSuchLine(_) | Error::NoSuchChange(_) => Category::NotFound,
             // Neither `Io` nor `Invalid`: nothing failed, and the command was
             // not wrong. The repository was in use, which is a state the model
@@ -146,7 +161,9 @@ impl Error {
             | Error::InvalidChange(_)
             | Error::ChangeAlreadyCheckpointed(_)
             | Error::ChangeHoldsNothing(_) => Concept::Change,
-            Error::Busy(_) | Error::UnsupportedFormat(_) => Concept::Workspace,
+            Error::Busy(_) | Error::UnsupportedFormat(_) | Error::FormatFromNewerBuild(_) => {
+                Concept::Workspace
+            }
             Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
         }
     }
@@ -192,6 +209,11 @@ impl Error {
             Error::UnsupportedFormat(_) => {
                 "this repository predates the current on-disk format; start a fresh \
                  one with `ltx init` and re-save your work into it"
+            }
+            Error::FormatFromNewerBuild(_) => {
+                "this repository is newer than this build of Lattice — install a \
+                 current build and it will open; do NOT re-create it, the \
+                 repository is intact and nothing here is damaged"
             }
             Error::InvalidLine(_) => {
                 "choose a name of letters, digits, dot, underscore, dash or slash; \

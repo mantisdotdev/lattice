@@ -59,10 +59,14 @@ enum Command {
     Status,
     /// Show history.
     Log {
-        /// Show every operation, including anything a lens would hide. Until
-        /// lenses exist there is nothing hidden, so this is the full history —
-        /// the forensic view is simply already complete. Consumed by the G1.1
-        /// and G1.3 harnesses.
+        /// Show every line's history, including anything a lens would hide.
+        /// Until lenses exist there is nothing hidden, so this differs from the
+        /// default view only by covering lines other than the current one.
+        // A `///` here is what `ltx log --help` prints, so it says what the
+        // flag does for the person reading it. The measurement note belongs in
+        // a comment: G1.1 and G1.3 both consume this view, and naming their
+        // harnesses in help text puts the project's own scaffolding in front of
+        // a user who has no idea what a gate is.
         #[arg(long)]
         forensic: bool,
         /// Most recent N entries.

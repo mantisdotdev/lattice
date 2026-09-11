@@ -8,32 +8,35 @@ ADR-6 recorded one question and declined to answer it:
     any time budget is not answered here and must be measured before G1.4 is
     claimed.
 
-This measures it. The answer is no, and the reason is not the tree walk.
+This measures it. The first run answered no, and located why: **a checkpoint's
+identity was not its storage address.** `Checkpoint::body_id` hashed
+`(tree, message, parent, at_unix_ms)` while the blob was stored under the hash
+of the whole serialised struct, so nothing mapped one to the other and finding a
+checkpoint meant reading and deserialising every chunk in the store. `status`,
+which saves nothing, was slower than a save, because it did that twice.
 
-One cost dominates, and it is not the tree walk. **A checkpoint's identity is
-not its storage address.** `Checkpoint::body_id` hashes `(tree, message, parent,
-at_unix_ms)`, while the blob is stored under the hash of the whole serialised
-struct — so nothing maps one to the other, and finding a checkpoint means
-reading and deserialising every chunk in the store until one matches. The source
-says so itself: "a checkpoint is content-addressed like everything else, but its
-own address is over its body rather than its serialised form, so the lookup is by
-scanning the addresses we know ... a checkpoint index is a later refinement."
+ADR-8 made the body itself the blob, at the body's own address. `status` at
+10,000 files went from seconds to tens of milliseconds and stopped growing with
+the tree at all; an incremental save kept a cost that does grow, which is the
+tree walk doing work the save actually needs.
 
-`--attribute` is what shows this rather than asserts it: it times each read
+`--attribute` is what showed this rather than asserted it: it times each read
 command separately on one tree, so what is INDEXED and what is SCANNED separate
 by two orders of magnitude in one artifact. The numbers are not repeated here —
-`bench/results/raw/adr6-attribution.json` holds them, and a figure copied into a
-comment is a figure that drifts from its measurement.
+`bench/results/raw/adr6-attribution.json` holds the pre-ADR-8 run, and a figure
+copied into a comment is a figure that drifts from its measurement.
 
-`save` pays the same scan, through `head_checkpoint`. `PackWriter::retain_unknown`
-asking `Store::contains` per chunk is a second cost but NOT a scan of the same
-kind: `contains` binary-searches each pack's index and reads no payload. It
-grows with the pack count rather than the blob count, so it is nothing at the
-few saves measured here and material only once a history has many packs.
+Weigh the two differently. `ltx status` reports the head checkpoint and some
+counts and does NOT compare the working tree against the tip, so its whole cost
+was the scan and a flat line afterwards is the expected shape rather than a
+surprising one. The incremental save is the number that reflects work: a save
+walks the tree, and it is still the command this probe exists to worry about.
 
-Both predate the workspace slice, which is why `--ltx` exists: pointing it at a
-binary built from another revision produces a second arm, and the two together
-show the finding is not a regression.
+`PackWriter::retain_unknown` asking `Store::contains` per chunk remains, and is
+NOT a scan of the same kind: `contains` binary-searches each pack's index and
+reads no payload. It grows with the pack count rather than the blob count, so it
+is nothing at the few saves measured here and material only once a history has
+many packs.
 
 Measured, not projected: the numbers below are of real commands on real trees.
 The projection at the end IS an extrapolation and is labelled as one.
@@ -41,9 +44,13 @@ The projection at the end IS an extrapolation and is labelled as one.
 One arm per run, one file per arm — the same shape as the concurrency probe's
 locked and unlocked artifacts. A single file holding both would leave a reader,
 and the ADR-evidence check, unable to tell which arm a quoted number came from.
+`--ltx` points the probe at a binary built from another revision, which is how
+the before-and-after arms of ADR-8 were produced on one machine with one probe.
+Comparing against an artifact from an EARLIER version of this file would not
+have been sound: `status_s` became a median here, having been one observation.
 
-    python3 scripts/probe_scaling.py --out bench/results/raw/adr6-scaling.json
-    python3 scripts/probe_scaling.py --ltx /other/ltx --out .../adr6-scaling-baseline.json
+    python3 scripts/probe_scaling.py --out bench/results/raw/adr8-scaling.json
+    python3 scripts/probe_scaling.py --ltx /other/ltx --out .../adr8-scaling-before.json
     python3 scripts/probe_scaling.py --attribute --sizes 10000 \
         --out bench/results/raw/adr6-attribution.json
 """
@@ -113,16 +120,23 @@ def measure(ltx: Path, files: int, samples: int) -> dict | None:
                 return None
             edits.append(elapsed)
 
-        # A command that saves nothing at all.
-        rc, status = run(ltx, ["status"], work)
-        if rc != 0:
-            return None
+        # A command that saves nothing at all. Sampled like the saves are: it
+        # is the sharpest number this probe reports, and one observation of a
+        # sharp number is an anecdote.
+        statuses = []
+        for _ in range(samples):
+            rc, elapsed = run(ltx, ["status"], work)
+            if rc != 0:
+                return None
+            statuses.append(elapsed)
 
         return {
             "files": files,
+            # One observation by nature — a repository has exactly one first
+            # save, so a median would need a repository per sample.
             "first_save_s": round(first_save, 3),
             "incremental_save_s": round(statistics.median(edits), 3),
-            "status_s": round(status, 3),
+            "status_s": round(statistics.median(statuses), 3),
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)

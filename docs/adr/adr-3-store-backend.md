@@ -1,6 +1,7 @@
 # ADR-3 — Store backend: append-only packs for content, embedded transactional store for metadata
 
 **Status:** Accepted · **Stage:** G0.6 · **Constrains:** G1.1, G1.4, G1.8, G1.9, §5.1
+**Amended by:** ADR-8 — checkpoints are content in packs, not rows in redb
 
 ## Context
 

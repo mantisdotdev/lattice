@@ -49,14 +49,41 @@ impl Checkpoint {
     /// and, worse, letting the stored `id` field be trusted directly lets any
     /// ordinary file whose bytes deserialise as a Checkpoint impersonate one.
     fn body_id(&self) -> Result<String> {
-        let body = serde_json::to_vec(&(&self.tree, &self.message, &self.parent, self.at_unix_ms))?;
-        Ok(ChunkId::of(&body).to_hex())
+        Ok(ChunkId::of(&self.body_bytes()?).to_hex())
     }
 
-    /// True iff the blob's declared `id` actually hashes its body. A blob that
-    /// fails this is not a checkpoint, whatever its `id` field claims.
-    fn is_authentic(&self) -> bool {
-        matches!(self.body_id(), Ok(computed) if computed == self.id)
+    /// The body's serialised form — tree, message, parent, timestamp — in the
+    /// order and encoding every checkpoint id in every repository was hashed
+    /// from. Changing this re-addresses all of them, so it changes only at a
+    /// format break that says so.
+    fn body_bytes(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&(
+            &self.tree,
+            &self.message,
+            &self.parent,
+            self.at_unix_ms,
+        ))?)
+    }
+
+    /// Rebuild a checkpoint from the blob found at `id`.
+    ///
+    /// There is no authenticity check here and none is needed. `Store::read`
+    /// re-hashes every chunk it returns and refuses a mismatch, so bytes that
+    /// arrive from address `id` are by construction the bytes whose hash is
+    /// `id` — which is the definition this checkpoint's identity was always
+    /// meant to have (ADR-8 §2). `oplog_seq` is filled in by the caller, which
+    /// is the only thing that knows it.
+    fn from_body(id: &str, body: &[u8]) -> Option<Checkpoint> {
+        let (tree, message, parent, at_unix_ms) =
+            serde_json::from_slice::<(String, String, Option<String>, u64)>(body).ok()?;
+        Some(Checkpoint {
+            id: id.to_string(),
+            tree,
+            message,
+            parent,
+            at_unix_ms,
+            oplog_seq: 0,
+        })
     }
 }
 
@@ -305,7 +332,7 @@ impl Repo {
         // First, and before the format probe opens the database: everything
         // below this line assumes exclusive access.
         let lock = platform::lock_exclusive(&dir.join("lock"), LOCK_WAIT)?;
-        let store = Store::open(&dir.join("packs"))?;
+        let mut store = Store::open(&dir.join("packs"))?;
         let meta = dir.join("meta.redb");
         // The gate runs BEFORE an OpLog is built over the database, because
         // building one deserialises the newest entry to recover the chain
@@ -324,21 +351,40 @@ impl Repo {
         // A format NEWER than this build is refused too: its entries may use
         // variants this build cannot parse, and guessing at them is how a
         // reader corrupts a repository it did not understand.
-        match OpLog::format_version_at(&meta)? {
+        //
+        // The two refusals are DIFFERENT errors, because their recoveries are
+        // opposites. Too old means the entries cannot be re-hashed and the
+        // repository has to be recreated. Too new means the repository is
+        // intact and this build is behind — and telling that user to recreate
+        // it, as one shared message did, destroys a history a current build
+        // opens without complaint.
+        let found = OpLog::format_version_at(&meta)?;
+        let describe = |v: Option<u64>| {
+            v.map(|v| v.to_string())
+                .unwrap_or_else(|| "1 (unversioned)".into())
+        };
+        match found {
             Some(v) if (MIN_READABLE_FORMAT..=FORMAT_VERSION).contains(&v) => {}
+            Some(v) if v > FORMAT_VERSION => {
+                return Err(Error::FormatFromNewerBuild(format!(
+                    "this repository is on-disk format {v} but this build reads \
+                     formats {MIN_READABLE_FORMAT}–{FORMAT_VERSION}"
+                )))
+            }
             other => {
                 return Err(Error::UnsupportedFormat(format!(
                     "this repository is on-disk format {} but this build reads formats {}–{}",
-                    other
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "1 (unversioned)".into()),
+                    describe(other),
                     MIN_READABLE_FORMAT,
                     FORMAT_VERSION
                 )))
             }
         }
         let oplog = OpLog::open(&meta)?;
+        // In order, each step naming the format it produces: a format-3
+        // repository runs both, a format-4 repository runs only the second.
         migrate_line_state_to_v4(&oplog)?;
+        migrate_checkpoint_blobs_to_v5(&mut store, &oplog)?;
         // Which workspace is this? Matched by canonical path, because that is
         // the only thing a command run in a directory knows about itself.
         let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -506,8 +552,12 @@ impl Repo {
         // checkpoint whose blob was never written. So the blob comes first, and
         // is written exactly once — `oplog_seq` is not part of its identity, so
         // there is nothing to fill in afterward.
-        let checkpoint_bytes = serde_json::to_vec(&checkpoint)?;
-        packer.add(ChunkId::of(&checkpoint_bytes), &checkpoint_bytes);
+        // The blob IS the body, stored at the body's own address (ADR-8). The
+        // id is therefore not written into the blob at all — it is where the
+        // blob lives — so nothing can claim an id it does not hash to, and
+        // finding a checkpoint is a lookup rather than a scan.
+        let body = checkpoint.body_bytes()?;
+        packer.add(ChunkId::of(&body), &body);
         // Write only content the store does not already hold. Unchanged files
         // and unchanged subtrees are already durable in earlier packs; a save
         // that re-stored them would re-persist the whole working tree on every
@@ -637,28 +687,22 @@ impl Repo {
     }
 
     pub fn checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
-        if ChunkId::from_hex(id).is_none() {
+        let Some(address) = ChunkId::from_hex(id) else {
             return Err(Error::Invalid(format!("{id} is not a checkpoint address")));
         };
-        // A checkpoint is content-addressed like everything else, but its own
-        // address is over its body rather than its serialised form, so the
-        // lookup is by scanning the addresses we know. Small and adequate for
-        // the current history sizes; a checkpoint index is a later refinement.
-        for candidate in self.store.all_chunk_ids() {
-            if let Some(bytes) = self.store.read(candidate)? {
-                if let Ok(mut cp) = serde_json::from_slice::<Checkpoint>(&bytes) {
-                    // Authenticate before trusting: the blob's declared id must
-                    // be the one asked for AND must actually hash its body.
-                    // Without the second check, any ordinary file whose bytes
-                    // deserialise as a Checkpoint could impersonate one.
-                    if cp.id == id && cp.is_authentic() {
-                        cp.oplog_seq = self.oplog_seq_for(id)?.unwrap_or(0);
-                        return Ok(Some(cp));
-                    }
-                }
-            }
-        }
-        Ok(None)
+        // One lookup. A checkpoint's id IS the address of its body (ADR-8), so
+        // the store answers directly; before format 5 this read every blob in
+        // the repository looking for one that claimed the id.
+        let Some(body) = self.store.read(address)? else {
+            return Ok(None);
+        };
+        // Bytes at this address that are not a body are not this checkpoint —
+        // the same answer the scan gave for a blob it could not deserialise.
+        let Some(mut cp) = Checkpoint::from_body(id, &body) else {
+            return Ok(None);
+        };
+        cp.oplog_seq = self.oplog_seq_for(id)?.unwrap_or(0);
+        Ok(Some(cp))
     }
 
     /// Op-log sequence of the Save that created a checkpoint, if any. This is
@@ -690,30 +734,43 @@ impl Repo {
     /// if some Save entry references its id and its body authenticates — so a
     /// file that merely looks like a checkpoint never appears here.
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>> {
-        let mut seq_by_id: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
+        let mut seq_by_id: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
         for entry in self.oplog.entries()? {
             if let Operation::Save { checkpoint, .. } = &entry.operation {
+                // Last reference wins, so a checkpoint named by more than one
+                // Save reports the newest — the order the previous scan
+                // produced, kept.
                 seq_by_id.insert(checkpoint.clone(), entry.seq);
             }
         }
 
+        // One read per checkpoint history records, rather than one per blob the
+        // store holds. A checkpoint whose blob is absent — a partial clone —
+        // is omitted, exactly as it was when the store was scanned for it.
         let mut out: Vec<Checkpoint> = Vec::new();
-        for candidate in self.store.all_chunk_ids() {
-            if let Some(bytes) = self.store.read(candidate)? {
-                if let Ok(mut cp) = serde_json::from_slice::<Checkpoint>(&bytes) {
-                    if let Some(&seq) = seq_by_id.get(&cp.id) {
-                        if cp.is_authentic() {
-                            cp.oplog_seq = seq;
-                            out.push(cp);
-                        }
-                    }
-                }
+        for (id, seq) in seq_by_id {
+            if let Some(mut cp) = self.checkpoint_at(&id)? {
+                cp.oplog_seq = seq;
+                out.push(cp);
             }
         }
         out.sort_by_key(|c| std::cmp::Reverse(c.oplog_seq));
-        out.dedup_by(|a, b| a.id == b.id);
         Ok(out)
+    }
+
+    /// The checkpoint body stored at `id`, with `oplog_seq` left at zero.
+    ///
+    /// `checkpoint` is the public form and resolves the sequence; callers that
+    /// already know it use this and do not pay for a second lookup.
+    fn checkpoint_at(&self, id: &str) -> Result<Option<Checkpoint>> {
+        let Some(address) = ChunkId::from_hex(id) else {
+            return Ok(None);
+        };
+        Ok(self
+            .store
+            .read(address)?
+            .and_then(|body| Checkpoint::from_body(id, &body)))
     }
 
     /// Checkpoints reachable from the current head, newest first.
@@ -2754,6 +2811,114 @@ pub struct ChangeView {
     pub current: bool,
 }
 
+/// The format `migrate_line_state_to_v4` produces.
+///
+/// Written out rather than as `FORMAT_VERSION`, and the difference is not
+/// cosmetic: 4 is no longer the newest format. A format-3 repository must
+/// migrate to 4 and THEN to 5, and spelling this `FORMAT_VERSION` would have
+/// stamped it 5 while its checkpoint blobs still sat at the old addresses —
+/// skipping a migration it needs, silently, with no version left to say so.
+/// Each migration names the format it produces, so adding another cannot reach
+/// back and break the ones before it.
+const LINE_STATE_FORMAT: u64 = 4;
+
+/// The format `migrate_checkpoint_blobs_to_v5` produces (ADR-8).
+const CHECKPOINT_ADDRESS_FORMAT: u64 = 5;
+
+/// Store every checkpoint's body at the address its id already named (ADR-8).
+///
+/// Before format 5 a checkpoint blob was the serialised struct, stored under
+/// the hash of THAT, while its id was the hash of its body — so the two never
+/// agreed and every lookup read every blob in the store. This is the last time
+/// this repository does that: one pass, and afterwards a checkpoint is found by
+/// reading its address.
+///
+/// Safe to interrupt, and safe to repeat, for three separate reasons:
+///
+/// * packs are append-only, so nothing is overwritten and the pre-5 blobs stay
+///   exactly where they are;
+/// * a body is written at the hash of itself, so writing it twice is writing
+///   the same bytes to the same address;
+/// * the version moves LAST, so a crash anywhere before it leaves a format-4
+///   repository that simply migrates again.
+///
+/// A checkpoint history records whose blob is absent is skipped rather than
+/// refused. That is a partial clone, which format 4 already tolerated by
+/// omitting it from `checkpoints()`, and a migration is the wrong place to
+/// start failing on it — `verify` is where that hole is reported.
+fn migrate_checkpoint_blobs_to_v5(store: &mut Store, oplog: &OpLog) -> Result<()> {
+    if oplog.format_version()? != Some(LINE_STATE_FORMAT) {
+        return Ok(());
+    }
+
+    // Only checkpoints history actually records. A blob that merely looks like
+    // one is not given an address in the new scheme.
+    let mut wanted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in oplog.entries()? {
+        if let Operation::Save { checkpoint, .. } = &entry.operation {
+            wanted.insert(checkpoint.clone());
+        }
+    }
+
+    let mut packer = PackWriter::new();
+    let mut unreadable = 0usize;
+    for candidate in store.all_chunk_ids() {
+        if wanted.is_empty() {
+            break;
+        }
+        let bytes = match store.read(candidate) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
+            // Damage must not lock the user out. This is the first thing that
+            // ever made `Repo::open` read content, so a chunk that fails to
+            // read would otherwise fail every command in the product —
+            // `verify` included, which is the one a user runs to find out what
+            // is wrong. The damage is counted and weighed below, not ignored.
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        let Ok(old) = serde_json::from_slice::<Checkpoint>(&bytes) else {
+            continue;
+        };
+        if !wanted.contains(&old.id) {
+            continue;
+        }
+        // The authenticity check format 4 made on every read, made once here
+        // instead. A blob whose declared id does not hash its body was never
+        // this checkpoint, and migrating it would give a forgery the address
+        // the real one needs — the one thing this rewrite must not do.
+        let body = old.body_bytes()?;
+        if ChunkId::of(&body).to_hex() != old.id {
+            continue;
+        }
+        wanted.remove(&old.id);
+        packer.add(ChunkId::of(&body), &body);
+    }
+
+    // A rerun after an interrupted migration finds its own earlier work already
+    // stored; without this it would write a second pack of identical bytes.
+    packer.retain_unknown(store);
+    store.write_pack(packer)?;
+
+    // A checkpoint left unmigrated beside a chunk that could not be read may
+    // BE that chunk — nothing can tell, because identifying it is what reading
+    // it would have done. Leaving the version at 4 is what makes a repaired or
+    // refetched store finish the migration on a later open; bumping it would
+    // make a recoverable checkpoint permanently unreadable, and content that
+    // could have come back is not a thing to trade for a faster open.
+    //
+    // The cost is that a store which stays damaged re-scans on every open. That
+    // is slow and it is loud, which is the right way round.
+    if unreadable > 0 && !wanted.is_empty() {
+        return Ok(());
+    }
+    // Durable content first, then the version that declares it so (ADR-3).
+    oplog.set_format_version(CHECKPOINT_ADDRESS_FORMAT)?;
+    Ok(())
+}
+
 /// Bring a format-3 line state to format 4, keeping a copy of the old one.
 ///
 /// The first migration this project has run, and the mechanism ADR-17 §9 built
@@ -2771,7 +2936,7 @@ fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
     }
     let Some(raw) = oplog.raw_line_state()? else {
         // Nothing published: nothing to migrate, only the version to move.
-        oplog.set_format_version(FORMAT_VERSION)?;
+        oplog.set_format_version(LINE_STATE_FORMAT)?;
         return Ok(());
     };
 
@@ -2787,7 +2952,7 @@ fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
                 // any more — the publish and the version bump are one
                 // transaction — but cheap to survive if it arrives by another
                 // route, and the alternative is a repository that will not open.
-                oplog.set_format_version(FORMAT_VERSION)?;
+                oplog.set_format_version(LINE_STATE_FORMAT)?;
                 return Ok(());
             }
             // Readable as neither: this is damage, not a migration that has
@@ -2798,7 +2963,7 @@ fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
             // no way back. The version stays at 3 so both remain available.
             return Err(Error::Corrupt(format!(
                 "the line state reads as neither format 3 nor format \
-                 {FORMAT_VERSION}: {not_v3}"
+                 {LINE_STATE_FORMAT}: {not_v3}"
             )));
         }
     };
@@ -2844,7 +3009,7 @@ fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
     // that is gone, and reports a serde error whose recovery says this is
     // probably a bug in Lattice — every command failing, with no way forward.
     // An interruption now leaves the repository wholly on one side or the other.
-    oplog.publish_migrated_lines(&LineState { lines, workspaces }, FORMAT_VERSION)?;
+    oplog.publish_migrated_lines(&LineState { lines, workspaces }, LINE_STATE_FORMAT)?;
     Ok(())
 }
 
@@ -4724,6 +4889,298 @@ mod tests {
         );
     }
 
+    /// Build a repository whose ONLY copy of `checkpoint` is the pre-format-5
+    /// blob — the serialised struct, at the hash of that — and stamp it format
+    /// 4. No build produces one any more, which is the situation a migration
+    /// exists for.
+    ///
+    /// `extra` is written into the same pack unexamined, so a test can plant a
+    /// second blob beside the real one.
+    fn format_four_repository(cp: &Checkpoint, extra: &[Vec<u8>]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            let mut packer = PackWriter::new();
+            let legacy = serde_json::to_vec(cp).unwrap();
+            packer.add(ChunkId::of(&legacy), &legacy);
+            for blob in extra {
+                packer.add(ChunkId::of(blob), blob);
+            }
+            repo.store.write_pack(packer).unwrap();
+
+            let mut lines = repo.line_state().unwrap();
+            lines.lines.get_mut(DEFAULT_LINE).unwrap().tip = Some(cp.id.clone());
+            repo.oplog
+                .commit(
+                    Operation::Save {
+                        message: cp.message.clone(),
+                        checkpoint: cp.id.clone(),
+                        line: DEFAULT_LINE.into(),
+                        change: None,
+                    },
+                    Some(lines),
+                )
+                .unwrap();
+            repo.oplog.set_format_version(LINE_STATE_FORMAT).unwrap();
+        }
+        dir
+    }
+
+    /// A checkpoint whose id is its body's hash, as every checkpoint's is.
+    fn checkpoint_of(tree: &str, message: &str) -> Checkpoint {
+        let mut cp = Checkpoint {
+            id: String::new(),
+            tree: tree.to_string(),
+            message: message.to_string(),
+            parent: None,
+            at_unix_ms: 1_700_000_000_000,
+            oplog_seq: 0,
+        };
+        cp.id = cp.body_id().unwrap();
+        cp
+    }
+
+    #[test]
+    fn the_oldest_readable_repository_migrates_through_both_steps() {
+        // Format 3 is the oldest this build reads, and reaching 5 from there
+        // means running BOTH migrations in order. The existing format-3 test
+        // cannot show this: it builds its repository with the current code, so
+        // its checkpoint blob is already at the right address and the second
+        // migration has nothing to do. Here the blob is in the pre-5 shape AND
+        // the line state is in the format-3 shape, which is what a repository
+        // written by that build actually looked like.
+        let cp = checkpoint_of(&"ef".repeat(32), "ancient");
+        let dir = format_four_repository(&cp, &[]);
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            let legacy = serde_json::json!({
+                "current": DEFAULT_LINE,
+                "lines": { DEFAULT_LINE: { "tip": cp.id, "working": null } },
+            });
+            log.publish_raw_line_state(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("a format-3 repository still opens");
+
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(CHECKPOINT_ADDRESS_FORMAT),
+            "both steps run, not just the first"
+        );
+        let found = repo
+            .checkpoint(&cp.id)
+            .unwrap()
+            .expect("and the checkpoint is readable at its own address");
+        assert_eq!(found.message, "ancient");
+        assert_eq!(
+            repo.current_line().unwrap(),
+            DEFAULT_LINE,
+            "with the line state migrated too"
+        );
+    }
+
+    #[test]
+    fn a_format_four_checkpoint_is_found_at_its_own_address_after_migrating() {
+        // ADR-8. Before format 5 a checkpoint blob was the serialised struct
+        // stored under the hash of THAT, while its id was the hash of its body,
+        // so the two never agreed and a lookup read every blob in the store.
+        // The migration writes the body where the id already said it lived.
+        let cp = checkpoint_of(&"ab".repeat(32), "seed");
+        let dir = format_four_repository(&cp, &[]);
+
+        let repo = Repo::open(dir.path()).expect("a format-4 repository still opens");
+
+        let found = repo
+            .checkpoint(&cp.id)
+            .unwrap()
+            .expect("the checkpoint must be readable by its address after migrating");
+        assert_eq!(found.tree, cp.tree);
+        assert_eq!(found.message, "seed");
+        assert_eq!(
+            repo.checkpoints().unwrap().len(),
+            1,
+            "and history must still record exactly the one checkpoint"
+        );
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(CHECKPOINT_ADDRESS_FORMAT),
+            "the repository is on the new format afterwards"
+        );
+    }
+
+    #[test]
+    fn migrating_does_not_let_a_forgery_take_the_address_the_real_blob_needs() {
+        // The forged blob claims the real id while its body hashes to something
+        // else. The scan meets it FIRST — chosen deliberately below — so a
+        // migration that struck the id off its list before authenticating would
+        // then skip the real blob, and the checkpoint would be lost by the very
+        // pass meant to preserve it.
+        let cp = checkpoint_of(&"ab".repeat(32), "real");
+        let real_address = ChunkId::of(&serde_json::to_vec(&cp).unwrap());
+
+        // `all_chunk_ids` is sorted by address, so "first" is arrangeable: vary
+        // the forgery until its address sorts below the real blob's.
+        let forged = (0u32..10_000)
+            .find_map(|n| {
+                let blob = serde_json::to_vec(&Checkpoint {
+                    id: cp.id.clone(),
+                    tree: "cd".repeat(32),
+                    message: format!("forged {n}"),
+                    parent: None,
+                    at_unix_ms: 0,
+                    oplog_seq: 0,
+                })
+                .unwrap();
+                (ChunkId::of(&blob) < real_address).then_some(blob)
+            })
+            .expect("no forgery sorted before the real blob, so this would test nothing");
+
+        let dir = format_four_repository(&cp, &[forged]);
+        let repo = Repo::open(dir.path()).unwrap();
+
+        let found = repo.checkpoint(&cp.id).unwrap().expect("the real one");
+        assert_eq!(found.tree, cp.tree, "the forgery must not be served");
+        assert_eq!(found.message, "real");
+    }
+
+    #[test]
+    fn one_unreadable_chunk_does_not_make_the_whole_repository_unopenable() {
+        // The migration reads every chunk in the store, which is a new reason
+        // for `Repo::open` to touch content at all. If a single damaged chunk
+        // anywhere made the open fail, every command would fail with it —
+        // including `verify`, the one command a user would run to find out
+        // what is wrong. A repository must stay openable so it can be
+        // diagnosed.
+        let cp = checkpoint_of(&"ab".repeat(32), "seed");
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            let mut packer = PackWriter::new();
+            let legacy = serde_json::to_vec(&cp).unwrap();
+            packer.add(ChunkId::of(&legacy), &legacy);
+            // A chunk filed under an address its bytes do not hash to, which
+            // is what a torn write or a bit-flip leaves behind — and placed
+            // BEFORE the real blob in address order, since the scan stops as
+            // soon as it has found every checkpoint it was looking for. Left
+            // to chance this test passes without the damaged chunk ever being
+            // read, which would be no test at all.
+            let real_address = ChunkId::of(&legacy);
+            let damaged = (0u32..10_000)
+                .map(|n| format!("damaged {n}"))
+                .find(|s| ChunkId::of(s.as_bytes()) < real_address)
+                .expect("no address sorted before the real blob, so this would test nothing");
+            packer.add(ChunkId::of(damaged.as_bytes()), b"but not these bytes");
+            repo.store.write_pack(packer).unwrap();
+
+            let mut lines = repo.line_state().unwrap();
+            lines.lines.get_mut(DEFAULT_LINE).unwrap().tip = Some(cp.id.clone());
+            repo.oplog
+                .commit(
+                    Operation::Save {
+                        message: cp.message.clone(),
+                        checkpoint: cp.id.clone(),
+                        line: DEFAULT_LINE.into(),
+                        change: None,
+                    },
+                    Some(lines),
+                )
+                .unwrap();
+            repo.oplog.set_format_version(LINE_STATE_FORMAT).unwrap();
+        }
+
+        let repo = Repo::open(dir.path())
+            .expect("a damaged chunk must not lock the user out of the repository");
+
+        assert!(
+            repo.checkpoint(&cp.id).unwrap().is_some(),
+            "and the intact checkpoint beside it still migrates"
+        );
+    }
+
+    #[test]
+    fn damage_that_might_be_a_checkpoint_holds_the_version_back() {
+        // Here the damaged chunk IS where a checkpoint's blob should be, so the
+        // migration cannot complete. Nothing can tell whether an unreadable
+        // chunk was the missing checkpoint — identifying it is exactly what
+        // reading it would have done — so the version stays at 4, and a store
+        // that is later repaired or refetched finishes the migration on its
+        // next open. Bumping it here would make a recoverable checkpoint
+        // permanently unreadable.
+        let cp = checkpoint_of(&"ab".repeat(32), "seed");
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            let mut packer = PackWriter::new();
+            // The blob's bytes, filed under an address they do not hash to.
+            packer.add(
+                ChunkId::of(b"where the checkpoint should be"),
+                &serde_json::to_vec(&cp).unwrap(),
+            );
+            repo.store.write_pack(packer).unwrap();
+
+            let mut lines = repo.line_state().unwrap();
+            lines.lines.get_mut(DEFAULT_LINE).unwrap().tip = Some(cp.id.clone());
+            repo.oplog
+                .commit(
+                    Operation::Save {
+                        message: cp.message.clone(),
+                        checkpoint: cp.id.clone(),
+                        line: DEFAULT_LINE.into(),
+                        change: None,
+                    },
+                    Some(lines),
+                )
+                .unwrap();
+            repo.oplog.set_format_version(LINE_STATE_FORMAT).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("still openable, so it can be diagnosed");
+
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(LINE_STATE_FORMAT),
+            "an unfinished migration must not declare itself finished"
+        );
+        assert!(
+            repo.checkpoint(&cp.id).unwrap().is_none(),
+            "the premise: the checkpoint did not migrate"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_checkpoint_migration_simply_runs_again() {
+        // The version moves last, so a crash before it leaves a format-4
+        // repository. Re-running must write the same bodies to the same
+        // addresses and finish, not double-write or refuse.
+        let cp = checkpoint_of(&"ab".repeat(32), "seed");
+        let dir = format_four_repository(&cp, &[]);
+
+        let packs_before = {
+            let repo = Repo::open(dir.path()).unwrap();
+            repo.store().pack_count()
+        };
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.set_format_version(LINE_STATE_FORMAT).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("it migrates again");
+
+        assert!(repo.checkpoint(&cp.id).unwrap().is_some(), "still readable");
+        assert_eq!(
+            repo.store().pack_count(),
+            packs_before,
+            "a rerun finds its own earlier work already stored and writes no \
+             second pack of identical bytes"
+        );
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(CHECKPOINT_ADDRESS_FORMAT)
+        );
+    }
+
     #[test]
     fn a_line_state_readable_as_neither_format_is_damage_not_a_finished_migration() {
         // The two cases share a branch if the migration only asks "did the
@@ -4862,6 +5319,51 @@ mod tests {
                 "a refusal must carry a way back to safety"
             );
         }
+    }
+
+    #[test]
+    fn a_repository_from_a_newer_build_is_never_told_to_re_create_itself() {
+        // The two format refusals shared one recovery, which said to start a
+        // fresh repository and re-save the work into it. For a format this
+        // build is too OLD to read, that is right. For one written by a NEWER
+        // build it destroys a history that a current build opens without
+        // complaint — a user who follows the advice loses everything, on the
+        // say-so of an error message.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let repo = Repo::init(dir.path()).unwrap();
+            repo.oplog.set_format_version(FORMAT_VERSION + 1).unwrap();
+        }
+
+        let newer = Repo::open(dir.path()).unwrap_err();
+
+        assert!(
+            !newer.recovery().contains("ltx init"),
+            "a healthy repository must never be told to re-create itself: {}",
+            newer.recovery()
+        );
+        assert!(
+            newer.recovery().contains("build"),
+            "and it must say what IS behind, which is this build: {}",
+            newer.recovery()
+        );
+
+        // The older direction keeps the advice that suits it, so the split is
+        // a distinction and not a blanket change of message.
+        let older = tempfile::tempdir().unwrap();
+        {
+            let repo = Repo::init(older.path()).unwrap();
+            repo.oplog
+                .set_format_version(MIN_READABLE_FORMAT - 1)
+                .unwrap();
+        }
+        assert!(
+            Repo::open(older.path())
+                .unwrap_err()
+                .recovery()
+                .contains("ltx init"),
+            "a repository this build genuinely cannot read still has to be recreated"
+        );
     }
 
     #[test]
@@ -5601,9 +6103,11 @@ mod tests {
         fs::write(dir.path().join("forged.json"), &forged).unwrap();
         repo.save("store the forgery", None).unwrap();
 
-        // Looking up the real id must still return the real checkpoint: the
-        // forgery's declared id does not hash its body, so it fails to
-        // authenticate.
+        // Looking up the real id must still return the real checkpoint. Since
+        // ADR-8 this cannot even be attempted: the forgery is stored at the
+        // hash of its own bytes, which is not the id it claims, so it never
+        // occupies the address the lookup goes to. The test stays because the
+        // property is what matters, not the mechanism that provides it.
         let got = repo.checkpoint(&real.id).unwrap().unwrap();
         assert_eq!(got.tree, real.tree, "the forgery must not be served");
         assert_ne!(got.message, "forged");
