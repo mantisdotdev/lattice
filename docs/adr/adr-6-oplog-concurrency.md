@@ -138,12 +138,66 @@ not a hypothetical.
   workers took 10.3 s wall clock on the reference machine (`wall_clock_s` in the
   locked artifact). The unlocked arm is far quicker only because it did almost
   none of the work, so the two are not comparable and no speed claim is made
-  from them. G1.4's real shape is
-  80,000 operations over a tree that grows to ~80,000 files, where each `save`
-  walks and hashes the whole tree; **whether that fits any time budget is not
-  answered here and must be measured before G1.4 is claimed.** ADR-4's 6.3-hour
-  figure was about fsync, which group commit addresses within a process; it says
-  nothing about a per-command lock held across a full tree walk.
+  from them. G1.4's real shape is 80,000 operations over a tree that grows to
+  ~80,000 files. **Whether that fits any time budget was left unanswered here;
+  it has since been measured, and the answer is no** — see the section below.
+  ADR-4's 6.3-minute figure was about fsync, which group commit addresses within
+  a process; it says nothing about what a command costs before it ever reaches
+  the log.
+
+## Measured afterwards: G1.4 does not fit, and the lock is not why
+
+`scripts/probe_scaling.py` answers the question this ADR declined to.
+`bench/results/raw/adr6-scaling.json` is the run:
+
+```json
+{
+  "files": 10000,
+  "first_save_s": 0.23,
+  "incremental_save_s": 4.184,
+  "status_s": 13.121
+}
+```
+
+**The ratio carries the argument, not the absolute.** These are wall-clock
+timings on one shared machine and they move between runs — an earlier run of the
+identical command recorded 1.45 s for the incremental save. What is stable is
+the shape, across every run and both arms: the first save of a ten-thousand-file
+tree is a fraction of a second, the **next** save — changing one file — is an
+order of magnitude more for a fraction of the work, and `status`, which saves
+nothing at all, is slower still.
+
+So the cost is not the tree walk, and it is not the repository lock either. Two
+things scale with what a repository has accumulated rather than with what it was
+asked to do:
+
+- **`PackWriter::retain_unknown` asks `Store::contains` for every chunk it
+  holds, and `contains` scans every pack.** One pack is written per save, so a
+  save is O(chunks in the tree × packs in the store): it gets slower with every
+  save that came before it. That is why the first save is fast and the second
+  is not.
+- **`Repo::checkpoint` has no index.** It reads and deserialises every chunk in
+  the store looking for one blob, and `status` does that twice — once through
+  `head_checkpoint`, once through `checkpoints`.
+
+Both predate this ADR and both are acknowledged where they are written ("small
+and adequate for the current history sizes; a checkpoint index is a later
+refinement"). `bench/results/raw/adr6-scaling-baseline.json` is the same probe
+against a binary built from `main`, before the workspace slice, and the two arms
+track each other — so the finding cannot be mistaken for a regression from the
+lock.
+
+Extrapolating — and this part IS extrapolation, labelled as such in the artifact
+— a mean tree of 40,000 files puts an incremental save in the tens of seconds,
+which over 80,000 operations is hundreds of hours. The extrapolation is linear
+from measured points that are growing *worse* than linearly, so it is a floor
+rather than an estimate, and the precise figure is not worth arguing about: no
+plausible correction brings it near a budget anyone would accept.
+
+**G1.4 cannot be claimed until this is addressed**, and addressing it is its own
+slice with its own ADR: a chunk index that makes `contains` a lookup rather than
+a scan, and a checkpoint index that makes `checkpoint` one too. Neither is a
+concurrency question, which is why neither is decided here.
 - **Readers are excluded too, and need not be.** `ltx log`, `status` and
   `change list` mutate nothing, and could hold a shared lock — but redb takes an
   exclusive lock on its own file regardless, so a shared lock here would buy
