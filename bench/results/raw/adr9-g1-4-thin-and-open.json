@@ -1,0 +1,68 @@
+{
+  "probe": "G1.4 full run on the release binary at merge commit 3163466 (PR #21), started 2026-09-12 03:23:43 IST; timings taken on a copy-on-write clone of the run repository in a freshly created workspace, best of two, release binary, while the run continued",
+  "gate": "G1.4",
+  "clone_op_log_seq": 16609,
+  "clone_packs": 2014,
+  "clone_files_in_workspace": 976,
+  "before_ms": {
+    "workspace list": 114,
+    "status": 249,
+    "log --limit 1": 160,
+    "save": 177,
+    "assign .": 143,
+    "split": 131,
+    "start line": 157,
+    "switch main": 227,
+    "undo": 145,
+    "internals thin": 970,
+    "internals compact": 127,
+    "sync --dry-run": 137,
+    "lens use clean": 128
+  },
+  "throughput_ops_per_min": [
+    {
+      "from_seq": 2008,
+      "to_seq": 4024,
+      "ops_per_min": 1036.9
+    },
+    {
+      "from_seq": 4024,
+      "to_seq": 8002,
+      "ops_per_min": 699.5
+    },
+    {
+      "from_seq": 10293,
+      "to_seq": 16427,
+      "ops_per_min": 299.0
+    }
+  ],
+  "interleaved_medians_ms": {
+    "note": "the two binaries run alternately on the same clone, three runs each, median; the run and a backup were using the disk throughout",
+    "old": {
+      "workspace list": 129,
+      "status": 244,
+      "log --limit 1": 187,
+      "save probe": 184,
+      "switch main": 277,
+      "undo": 315,
+      "internals thin": 1227,
+      "assign .": 142
+    },
+    "new": {
+      "workspace list": 50,
+      "status": 261,
+      "log --limit 1": 174,
+      "save probe": 204,
+      "switch main": 88,
+      "undo": 142,
+      "internals thin": 177,
+      "assign .": 62
+    }
+  },
+  "thin_before_ms": 1227,
+  "thin_after_ms": 177,
+  "switch_before_ms": 277,
+  "switch_after_ms": 88,
+  "workspace_list_before_ms": 129,
+  "workspace_list_after_ms": 50
+}
