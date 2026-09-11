@@ -186,7 +186,12 @@ impl Error {
             Error::Busy(_) | Error::UnsupportedFormat(_) | Error::FormatFromNewerBuild(_) => {
                 Concept::Workspace
             }
-            Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::None,
+            // The machine holding the repository refused, or what it holds
+            // did not parse. That is about the workspace — the directory the
+            // user is standing in — which is also what `NotARepository` and
+            // `Busy` are about. `None` said nothing, and an error that names
+            // no concept leaves the user without orientation (G2.4).
+            Error::Io(_) | Error::Database(_) | Error::Serde(_) => Concept::Workspace,
         }
     }
 
@@ -333,9 +338,14 @@ mod tests {
         // A user who runs the suggested command must not hit "unrecognized
         // subcommand". This keeps the advice tracking the actual CLI surface,
         // so adopt/sync/undo cannot be advertised before they are built.
+        // Hand-maintained, and therefore a trap: a recovery naming a command
+        // missing from this list fails, but a VARIANT missing from `cases`
+        // below is simply never checked. G2.4 covers that gap from outside,
+        // by triggering errors through the shipped CLI.
         const IMPLEMENTED: &[&str] = &[
             "init", "save", "status", "log", "verify", "checkout", "undo", "start", "switch",
-            "line", "assign", "change",
+            "line", "assign", "change", "workspace", "lens", "sync", "merge", "split", "thin",
+            "internals",
         ];
         let cases: Vec<Error> = vec![
             Error::NotARepository(PathBuf::from("/tmp")),
@@ -351,6 +361,13 @@ mod tests {
             Error::ChangeHoldsNothing("x".into()),
             Error::Busy("x".into()),
             Error::UnsupportedFormat("x".into()),
+            Error::FormatFromNewerBuild("x".into()),
+            Error::NoSuchLens("x".into()),
+            Error::NoRemote,
+            Error::Diverged {
+                line: "a".into(),
+                other: "b".into(),
+            },
             Error::Serde(serde_json::from_str::<i32>("nope").unwrap_err()),
         ];
         for e in cases {

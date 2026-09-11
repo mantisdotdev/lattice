@@ -678,13 +678,26 @@ impl Repo {
     }
 
     /// The checkpoint the CURRENT line points at.
+    ///
+    /// `None` means the line has no tip. A tip whose blob is not present is
+    /// not that: it is a hole in the history spine, and reading it as "no
+    /// history" would let `log` print an empty history and `status` count
+    /// zero checkpoints over a repository that has lost one. A save writes
+    /// its content before the entry that names it, so nothing short of
+    /// damage produces this — and damage is reported, never rounded down.
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
         let state = self.line_state()?;
         let current = self.line_of(&state);
         let Some(tip) = state.lines.get(&current).and_then(|r| r.tip.clone()) else {
             return Ok(None);
         };
-        self.checkpoint(&tip)
+        match self.checkpoint(&tip)? {
+            Some(cp) => Ok(Some(cp)),
+            None => Err(Error::Corrupt(format!(
+                "line {current} points at checkpoint {} which is not present",
+                crate::short_id(&tip)
+            ))),
+        }
     }
 
     pub fn checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
@@ -5994,6 +6007,30 @@ mod tests {
             repo.merge_line("nowhere").is_err(),
             "a line that does not exist is refused too"
         );
+    }
+
+    #[test]
+    fn a_tip_whose_blob_is_gone_is_damage_not_an_empty_history() {
+        // With one checkpoint and its pack removed, `head_checkpoint` used to
+        // answer `None` — the same answer as "nothing saved yet" — so `log`
+        // printed an empty history and `status` counted zero checkpoints over
+        // a repository that had lost one. Found by G2.4's corrupt-store
+        // provocation, which `log` survived with exit 0.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("only", None).unwrap();
+        drop(repo);
+        for victim in fs::read_dir(dir.path().join(".lattice/packs")).unwrap() {
+            fs::remove_file(victim.unwrap().path()).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).unwrap();
+
+        assert!(
+            matches!(repo.head_checkpoint(), Err(Error::Corrupt(_))),
+            "a set tip with no blob must read as damage"
+        );
+        assert!(repo.status().is_err(), "and status must not count around it");
     }
 
     #[test]
