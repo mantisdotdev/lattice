@@ -1,0 +1,35 @@
+{
+  "probe": "two G1.4 pilots on the release binary at commit 8bf4741 (closed-change fix included), 2026-09-12 IST; the frozen harness file imported unchanged with OPS_PER_WORKSPACE overridden",
+  "ops_total": 8000,
+  "workspaces": 8,
+  "failures": 20,
+  "failures_by_op": {
+    "switch main": 5,
+    "undo": 13,
+    "start line": 2
+  },
+  "failures_by_workspace": {
+    "0": 8,
+    "1": 11,
+    "2": 1
+  },
+  "linearizability_violations": 0,
+  "unsequenced": 0,
+  "deadlocks": 0,
+  "captured_pilot": {
+    "note": "second pilot, stdout of every failed operation captured",
+    "captured_ops_total": 2400,
+    "captured_failures": 22,
+    "captured_failures_by_op": {
+      "start line": 4,
+      "undo --json": 15,
+      "switch main": 3
+    },
+    "distinct_errors": [
+      {
+        "error": "this line preserved no working state, so there is nothing to restore; the working tree has been left exactly as it is",
+        "count": 22
+      }
+    ]
+  }
+}

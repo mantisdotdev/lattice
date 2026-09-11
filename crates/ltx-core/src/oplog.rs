@@ -77,7 +77,14 @@ const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 /// rewritten and nothing migrates; the bump exists so a build that predates the
 /// variants refuses the repository with a way forward instead of failing to
 /// parse an entry it never heard of.
-pub const FORMAT_VERSION: u64 = 6;
+///
+/// 7 records, on `Switch` and `StartLine`, the workspace that made them, so an
+/// undo can tell whose switch it is reversing (ADR-7, correction of
+/// 2026-09-12). Additive: the field is skipped when empty, so an entry written
+/// at 6 or earlier hashes exactly as it did and nothing migrates. The bump
+/// exists so a build that does not know the field refuses the repository
+/// rather than re-hashing an entry without it and reporting a broken chain.
+pub const FORMAT_VERSION: u64 = 7;
 
 /// The oldest format this build can read. Below this the per-entry tag does
 /// not exist, so an entry's original serialisation cannot be reproduced and
@@ -314,6 +321,12 @@ pub enum Operation {
         /// record says what happened and the inverse reads it — otherwise undo
         /// would delete a line the FIRST start created.
         created: bool,
+        /// The workspace whose working tree this changed. Its inverse belongs
+        /// to that workspace alone — applied anywhere else it would put one
+        /// working tree's switch onto another. Empty on entries written before
+        /// format 7, which are treated as the undoing workspace's own.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        workspace: String,
     },
     /// Route working-tree paths into a change.
     ///
@@ -372,6 +385,9 @@ pub enum Operation {
     Switch {
         from: String,
         to: String,
+        /// The workspace that switched; see `StartLine::workspace`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        workspace: String,
     },
     Undo {
         undone_seq: u64,
@@ -537,7 +553,7 @@ impl Entry {
             // stored, which is content. The tag is still inside the payload, so
             // entries written at different formats hash differently and each
             // verifies under its own rule.
-            3..=6 => serde_json::to_vec(&(seq, prev, at, op, format))?,
+            3..=7 => serde_json::to_vec(&(seq, prev, at, op, format))?,
             other => {
                 return Err(Error::UnsupportedFormat(format!(
                     "entry {seq} records on-disk format {other}, which this build cannot hash"
@@ -1278,6 +1294,7 @@ mod tests {
                 name: "auth".into(),
                 from: "main".into(),
                 created: true,
+                workspace: "root".into(),
             })
             .unwrap();
         assert_eq!(a.seq, 1);
@@ -1420,6 +1437,7 @@ mod tests {
                         name: format!("t{t}-{i}"),
                         from: "main".into(),
                         created: true,
+                        workspace: "root".into(),
                     })
                     .unwrap();
                 }

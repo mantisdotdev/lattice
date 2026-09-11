@@ -1039,6 +1039,19 @@ impl Repo {
         consumed: &std::collections::HashSet<(String, String)>,
     ) -> Result<bool> {
         Ok(match op {
+            // Another workspace's view or working tree is not this one's to
+            // reverse: the inverse would apply that workspace's switch to this
+            // working tree, against preserved state this workspace never
+            // kept. An entry written before format 7 names no workspace and
+            // is treated as this one's, which is what every undo did until
+            // then.
+            Operation::StartLine { workspace, .. }
+            | Operation::Switch { workspace, .. }
+            | Operation::Lens { workspace, .. }
+                if !workspace.is_empty() && *workspace != self.workspace =>
+            {
+                false
+            }
             Operation::Save { checkpoint, .. } => match self.checkpoint(checkpoint)? {
                 Some(cp) => cp.parent.is_some(),
                 None => false,
@@ -1052,6 +1065,7 @@ impl Repo {
                 name,
                 from,
                 created: true,
+                ..
             } => {
                 let tip = lines.lines.get(name).and_then(|r| r.tip.clone());
                 let origin = lines.lines.get(from).and_then(|r| r.tip.clone());
@@ -1180,6 +1194,7 @@ impl Repo {
                 name,
                 from,
                 created,
+                ..
             } => {
                 let captured = self.capture_working_tree()?;
                 if *created {
@@ -1198,7 +1213,7 @@ impl Repo {
                 materialise = Some((captured, restored));
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
-            Operation::Switch { from, to } => {
+            Operation::Switch { from, to, .. } => {
                 if from != to {
                     let captured = self.capture_working_tree()?;
                     self.set_preserved(&mut lines, to, Some(captured.clone()));
@@ -1377,6 +1392,14 @@ impl Repo {
     }
 
     /// The working state this workspace preserved for `line`, if any.
+    /// The tree a checkpoint id names, or `None` when there is no checkpoint.
+    fn tip_tree(&self, tip: Option<&str>) -> Result<Option<String>> {
+        let Some(id) = tip else {
+            return Ok(None);
+        };
+        Ok(self.checkpoint_at(id)?.map(|cp| cp.tree))
+    }
+
     fn preserved(&self, lines: &LineState, line: &str) -> Option<String> {
         lines
             .workspaces
@@ -1864,6 +1887,7 @@ impl Repo {
                 name: name.clone(),
                 from,
                 created: true,
+                workspace: self.workspace.clone(),
             },
             Some(lines.clone()),
         )?;
@@ -1911,11 +1935,13 @@ impl Repo {
                         name: to.to_string(),
                         from: from.to_string(),
                         created: false,
+                        workspace: self.workspace.clone(),
                     }
                 } else {
                     Operation::Switch {
                         from: from.to_string(),
                         to: to.to_string(),
+                        workspace: self.workspace.clone(),
                     }
                 },
                 None,
@@ -1940,7 +1966,17 @@ impl Repo {
         // sees the current line holding preserved state and finishes the job.
         // Clearing it first would drop the only reference to that work.
         let tip = target.tip.clone();
-        let restored = self.preserved(&lines, to);
+        // What this workspace left on `to` when it last switched away — or,
+        // for a line it has never been on, the line's tip: that is what
+        // `workspace new` materialises, and joining a line is the same act.
+        // Published under `to` for the reason above: a crash between the
+        // entry and the bytes then leaves a pending switch the next command
+        // completes, exactly as a preserved tree would.
+        let restored = match self.preserved(&lines, to) {
+            Some(tree) => Some(tree),
+            None => self.tip_tree(tip.as_deref())?,
+        };
+        self.set_preserved(&mut lines, to, restored.clone());
         self.set_current_line(&mut lines, to);
 
         // Publish BEFORE materialising: a crash then leaves us unambiguously on
@@ -1952,11 +1988,13 @@ impl Repo {
                 name: to.to_string(),
                 from: from.to_string(),
                 created: false,
+                workspace: self.workspace.clone(),
             }
         } else {
             Operation::Switch {
                 from: from.to_string(),
                 to: to.to_string(),
+                workspace: self.workspace.clone(),
             }
         };
         let entry = self.oplog.commit(op, Some(lines.clone()))?;
@@ -5537,6 +5575,60 @@ mod tests {
         platform::lock_exclusive(&lock, std::time::Duration::from_millis(500)).expect(
             "closing the repository releases it — including on a kill, \
                      since the OS owns the release",
+        );
+    }
+
+    #[test]
+    fn a_workspace_joining_a_line_it_has_never_been_on_gets_the_line_s_tip() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        repo.start_line("feature").unwrap();
+        fs::write(dir.path().join("feature.txt"), b"on feature").unwrap();
+        repo.save("feature work", None).unwrap();
+        drop(repo);
+
+        let mut other = Repo::discover(&at).unwrap();
+        let out = other.switch_line("feature").unwrap();
+
+        assert_eq!(out.line, "feature");
+        assert_eq!(
+            fs::read(at.join("feature.txt")).unwrap(),
+            b"on feature",
+            "a workspace that never left the line gets its tip, as `workspace new` would"
+        );
+        assert_eq!(other.current_line().unwrap(), "feature");
+    }
+
+    #[test]
+    fn undo_in_one_workspace_leaves_another_workspace_s_switch_standing() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        drop(repo);
+        let mut other = Repo::discover(&at).unwrap();
+        other.start_line("feature").unwrap();
+        drop(other);
+
+        let mut repo = Repo::discover(dir.path()).unwrap();
+        let out = repo.undo().unwrap();
+
+        assert!(
+            out.nothing_to_undo,
+            "the other workspace's start is not this one's to reverse, and the \
+             seed save has no parent to fall back to"
+        );
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
+        drop(repo);
+        let other = Repo::discover(&at).unwrap();
+        assert_eq!(
+            other.current_line().unwrap(),
+            "feature",
+            "and the switch it made still stands"
         );
     }
 
