@@ -900,18 +900,39 @@ impl OpLog {
     ///
     /// One indexed lookup — the question "is this checkpoint part of history?"
     /// must not cost a scan of the whole log.
-    /// Every checkpoint a `Save` has recorded, by id. Read from the index,
-    /// so resolving what a user typed costs the keys of one table and no
-    /// entry is deserialised.
-    pub fn saved_checkpoints(&self) -> Result<Vec<String>> {
+    /// Every checkpoint a `Save` has recorded, with the sequence of the
+    /// newest Save naming it. Read from the index, so enumerating history's
+    /// checkpoints costs one table and no entry is deserialised — which is
+    /// what let a run of tens of thousands of operations keep loading the
+    /// whole log to answer `log`, `thin` and `status`.
+    pub fn saved_checkpoints(&self) -> Result<Vec<(String, u64)>> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(SAVED)?;
         let mut out = Vec::new();
         for item in table.iter()? {
-            let (key, _) = item?;
-            out.push(key.value().to_string());
+            let (key, value) = item?;
+            out.push((key.value().to_string(), value.value()));
         }
         Ok(out)
+    }
+
+    /// Visit entries newest first, stopping when `visit` returns `Ok(false)`.
+    ///
+    /// A reverse range over the table, so a caller that wants the newest few
+    /// pays for the newest few. `undo` wants exactly that: the highest live,
+    /// eligible entry, which is almost always within a handful of the tail.
+    /// Loading every entry to find it made each undo cost the size of history.
+    pub fn walk_newest_first(&self, mut visit: impl FnMut(Entry) -> Result<bool>) -> Result<()> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ENTRIES)?;
+        for item in table.range(0u64..)?.rev() {
+            let (_, value) = item?;
+            let entry: Entry = serde_json::from_slice(value.value())?;
+            if !visit(entry)? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub fn save_seq(&self, checkpoint: &str) -> Result<Option<u64>> {

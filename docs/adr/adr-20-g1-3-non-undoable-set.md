@@ -1,6 +1,6 @@
 # ADR-20 — G1.3 must enumerate the non-undoable set it was told to enumerate
 
-**Status:** Proposed · **Required by:** §0.3 (harness changes after freezing) · **Amends:** the frozen `harness/g1/g1_3_universal_undo.py`
+**Status:** Accepted · **Required by:** §0.3 (harness changes after freezing) · **Amends:** the frozen `harness/g1/g1_3_universal_undo.py`
 **Gates touched:** G1.3 (universal undo, HARD) — reverts to FAIL(stale) until re-measured under the amended harness
 
 ## Context
