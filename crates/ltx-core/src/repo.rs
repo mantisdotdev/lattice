@@ -1330,9 +1330,21 @@ impl Repo {
             .map(|(id, record)| {
                 // A record with no path of its own is the repository's root,
                 // which is wherever the repository is — so it is reported from
-                // the handle rather than from the record.
+                // the handle rather than from the record. From `self.repository`,
+                // NOT from `self.root`: run inside a workspace, `self.root` is
+                // that workspace's directory, and reporting it here printed the
+                // workspace's path twice, once under its own id and once under
+                // the repository's.
+                let repository_root = self
+                    .repository
+                    .parent()
+                    .unwrap_or(self.repository.as_path())
+                    .to_path_buf();
                 let (root, present) = match &record.root {
-                    None => (self.root.display().to_string(), self.root.is_dir()),
+                    None => (
+                        repository_root.display().to_string(),
+                        repository_root.is_dir(),
+                    ),
                     Some(bytes) => match platform::os_string_from_bytes(bytes) {
                         Some(name) => {
                             let path = Path::new(&name).to_path_buf();
@@ -4208,6 +4220,42 @@ mod tests {
         assert!(
             !gone.present,
             "and says so, rather than quietly listing somewhere that is gone"
+        );
+    }
+
+    #[test]
+    fn listing_from_inside_a_workspace_still_reports_the_repositorys_own_root() {
+        // The repository's root is a workspace with no path of its own, so
+        // `workspaces()` has to say where it is. Taken from `self.root` that
+        // answer is whichever directory the command ran in — so run from
+        // inside a workspace, the list printed that workspace's path twice,
+        // once under its own id and once under the repository's, and the
+        // repository's row claimed to be somewhere it is not.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        drop(repo);
+
+        let from_inside = Repo::discover(&at).unwrap();
+
+        let listed = from_inside.workspaces().unwrap();
+        let roots: Vec<&str> = listed.iter().map(|w| w.root.as_str()).collect();
+        assert_eq!(
+            roots
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2,
+            "two workspaces must report two different places, not one twice: {roots:?}"
+        );
+        let repository_root = fs::canonicalize(dir.path()).unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|w| fs::canonicalize(&w.root).ok() == Some(repository_root.clone())),
+            "and one of them is the repository's own root: {roots:?}"
         );
     }
 
