@@ -107,7 +107,26 @@ Three properties make this the safe shape of migration:
 recreated, which is what ADR-17 §9's per-entry format tag was introduced to
 guarantee, and this is the second migration to rely on it.
 
-### 4. The orphaned blobs are inert, and `verify` must keep saying so
+### 4. Damage met during the migration must not lock the user out
+
+This is the first thing that ever makes `Repo::open` read content, and that is
+a new way to fail. A chunk that does not read — a torn write, a bit flip, an
+address its bytes no longer hash to — would fail the open, and every command
+goes through the open. Including `verify`, which is the command a user runs to
+find out what is wrong. A repository that cannot be opened cannot be diagnosed.
+
+So an unreadable chunk is skipped and counted rather than propagated. What is
+done with the count is the part that matters: if any checkpoint is still
+unmigrated **and** some chunk could not be read, the version stays at 4. The two
+cannot be told apart — identifying an unreadable chunk is precisely what reading
+it would have done — so the missing checkpoint may be the damaged chunk, and
+declaring the migration finished would leave a checkpoint permanently unreadable
+that a refetch could have brought back. Holding the version back is what makes a
+repaired store finish the migration on a later open.
+
+Content that could come back is not a thing to trade for a faster open.
+
+### 5. The orphaned blobs are inert, and `verify` must keep saying so
 
 The old serialised-struct blobs remain in their packs after migration. They
 still hash to their own addresses, so `verify` is right about them and stays
@@ -232,7 +251,12 @@ G1.4's obstacle is now a different one.
    should be met again once it has. Making `status` a working-tree status is
    its own slice; §0.3 then governs whether G1.5's measurement has become
    stricter.
-3. **The migration's cost is the scan it abolishes.** One pass, once, at the
+3. **A store that stays damaged re-scans on every open.** §4 holds the version
+   back so a repaired store can finish, which means an unrepairable one never
+   finishes and pays the scan every time. That is slow and it is loud, which is
+   the right way round — but it is a real cost, and the thing that would remove
+   it is a way to re-run a migration on demand rather than only at open.
+4. **The migration's cost is the scan it abolishes.** One pass, once, at the
    first open after upgrade — seconds on the ten-thousand-file repository
    measured above. That is a one-time cost paid at an unpredictable moment
    rather than at an announced one, and no progress is reported while it runs.

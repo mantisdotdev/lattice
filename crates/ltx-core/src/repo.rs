@@ -2861,12 +2861,23 @@ fn migrate_checkpoint_blobs_to_v5(store: &mut Store, oplog: &OpLog) -> Result<()
     }
 
     let mut packer = PackWriter::new();
+    let mut unreadable = 0usize;
     for candidate in store.all_chunk_ids() {
         if wanted.is_empty() {
             break;
         }
-        let Some(bytes) = store.read(candidate)? else {
-            continue;
+        let bytes = match store.read(candidate) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
+            // Damage must not lock the user out. This is the first thing that
+            // ever made `Repo::open` read content, so a chunk that fails to
+            // read would otherwise fail every command in the product —
+            // `verify` included, which is the one a user runs to find out what
+            // is wrong. The damage is counted and weighed below, not ignored.
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
         };
         let Ok(old) = serde_json::from_slice::<Checkpoint>(&bytes) else {
             continue;
@@ -2890,6 +2901,19 @@ fn migrate_checkpoint_blobs_to_v5(store: &mut Store, oplog: &OpLog) -> Result<()
     // stored; without this it would write a second pack of identical bytes.
     packer.retain_unknown(store);
     store.write_pack(packer)?;
+
+    // A checkpoint left unmigrated beside a chunk that could not be read may
+    // BE that chunk — nothing can tell, because identifying it is what reading
+    // it would have done. Leaving the version at 4 is what makes a repaired or
+    // refetched store finish the migration on a later open; bumping it would
+    // make a recoverable checkpoint permanently unreadable, and content that
+    // could have come back is not a thing to trade for a faster open.
+    //
+    // The cost is that a store which stays damaged re-scans on every open. That
+    // is slow and it is loud, which is the right way round.
+    if unreadable > 0 && !wanted.is_empty() {
+        return Ok(());
+    }
     // Durable content first, then the version that declares it so (ADR-3).
     oplog.set_format_version(CHECKPOINT_ADDRESS_FORMAT)?;
     Ok(())
@@ -5019,6 +5043,110 @@ mod tests {
         let found = repo.checkpoint(&cp.id).unwrap().expect("the real one");
         assert_eq!(found.tree, cp.tree, "the forgery must not be served");
         assert_eq!(found.message, "real");
+    }
+
+    #[test]
+    fn one_unreadable_chunk_does_not_make_the_whole_repository_unopenable() {
+        // The migration reads every chunk in the store, which is a new reason
+        // for `Repo::open` to touch content at all. If a single damaged chunk
+        // anywhere made the open fail, every command would fail with it —
+        // including `verify`, the one command a user would run to find out
+        // what is wrong. A repository must stay openable so it can be
+        // diagnosed.
+        let cp = checkpoint_of(&"ab".repeat(32), "seed");
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            let mut packer = PackWriter::new();
+            let legacy = serde_json::to_vec(&cp).unwrap();
+            packer.add(ChunkId::of(&legacy), &legacy);
+            // A chunk filed under an address its bytes do not hash to, which
+            // is what a torn write or a bit-flip leaves behind — and placed
+            // BEFORE the real blob in address order, since the scan stops as
+            // soon as it has found every checkpoint it was looking for. Left
+            // to chance this test passes without the damaged chunk ever being
+            // read, which would be no test at all.
+            let real_address = ChunkId::of(&legacy);
+            let damaged = (0u32..10_000)
+                .map(|n| format!("damaged {n}"))
+                .find(|s| ChunkId::of(s.as_bytes()) < real_address)
+                .expect("no address sorted before the real blob, so this would test nothing");
+            packer.add(ChunkId::of(damaged.as_bytes()), b"but not these bytes");
+            repo.store.write_pack(packer).unwrap();
+
+            let mut lines = repo.line_state().unwrap();
+            lines.lines.get_mut(DEFAULT_LINE).unwrap().tip = Some(cp.id.clone());
+            repo.oplog
+                .commit(
+                    Operation::Save {
+                        message: cp.message.clone(),
+                        checkpoint: cp.id.clone(),
+                        line: DEFAULT_LINE.into(),
+                        change: None,
+                    },
+                    Some(lines),
+                )
+                .unwrap();
+            repo.oplog.set_format_version(LINE_STATE_FORMAT).unwrap();
+        }
+
+        let repo = Repo::open(dir.path())
+            .expect("a damaged chunk must not lock the user out of the repository");
+
+        assert!(
+            repo.checkpoint(&cp.id).unwrap().is_some(),
+            "and the intact checkpoint beside it still migrates"
+        );
+    }
+
+    #[test]
+    fn damage_that_might_be_a_checkpoint_holds_the_version_back() {
+        // Here the damaged chunk IS where a checkpoint's blob should be, so the
+        // migration cannot complete. Nothing can tell whether an unreadable
+        // chunk was the missing checkpoint — identifying it is exactly what
+        // reading it would have done — so the version stays at 4, and a store
+        // that is later repaired or refetched finishes the migration on its
+        // next open. Bumping it here would make a recoverable checkpoint
+        // permanently unreadable.
+        let cp = checkpoint_of(&"ab".repeat(32), "seed");
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            let mut packer = PackWriter::new();
+            // The blob's bytes, filed under an address they do not hash to.
+            packer.add(
+                ChunkId::of(b"where the checkpoint should be"),
+                &serde_json::to_vec(&cp).unwrap(),
+            );
+            repo.store.write_pack(packer).unwrap();
+
+            let mut lines = repo.line_state().unwrap();
+            lines.lines.get_mut(DEFAULT_LINE).unwrap().tip = Some(cp.id.clone());
+            repo.oplog
+                .commit(
+                    Operation::Save {
+                        message: cp.message.clone(),
+                        checkpoint: cp.id.clone(),
+                        line: DEFAULT_LINE.into(),
+                        change: None,
+                    },
+                    Some(lines),
+                )
+                .unwrap();
+            repo.oplog.set_format_version(LINE_STATE_FORMAT).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("still openable, so it can be diagnosed");
+
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(LINE_STATE_FORMAT),
+            "an unfinished migration must not declare itself finished"
+        );
+        assert!(
+            repo.checkpoint(&cp.id).unwrap().is_none(),
+            "the premise: the checkpoint did not migrate"
+        );
     }
 
     #[test]
