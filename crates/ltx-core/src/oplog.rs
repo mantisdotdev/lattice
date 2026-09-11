@@ -40,6 +40,8 @@ const HEADS: TableDefinition<&str, u64> = TableDefinition::new("heads");
 /// the whole class of key-namespace questions does not arise.
 const LINES: TableDefinition<&str, &[u8]> = TableDefinition::new("lines");
 const LINES_KEY: &str = "state";
+/// Where a migration parks the document it is about to replace.
+const SUPERSEDED_LINES_KEY: &str = "state-superseded";
 
 /// Checkpoint id -> the sequence of the `Save` that recorded it.
 ///
@@ -65,7 +67,7 @@ const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 /// a new shape changes their ids, which is what the chain exists to detect —
 /// so the tag is the only mechanism that can work, and it can only be
 /// introduced AT a break.
-pub const FORMAT_VERSION: u64 = 3;
+pub const FORMAT_VERSION: u64 = 4;
 
 /// The oldest format this build can read. Below this the per-entry tag does
 /// not exist, so an entry's original serialisation cannot be reproduced and
@@ -117,13 +119,6 @@ pub struct LineRecord {
     /// An id, not an op-log seq: undo moves a tip to `checkpoint.parent`, which
     /// has an id but no unambiguous sequence number.
     pub tip: Option<String>,
-    /// Tree address of the working state preserved for this line.
-    ///
-    /// Always `None` for the CURRENT line — becoming current consumes the
-    /// preserved state, ceasing to be current sets it. While a line is current
-    /// the bytes on disk are the truth. Every undo inverse is exact and
-    /// mechanical only because of this invariant (ADR-16 §1).
-    pub working: Option<String>,
     /// Live, un-checkpointed changes on this line, by id.
     ///
     /// Here rather than in a table of their own (ADR-17 §4): a switch already
@@ -151,11 +146,61 @@ pub struct LineRecord {
     pub current_change: Option<String>,
 }
 
+/// One working tree over a repository (§4.2, noun 6).
+///
+/// The repository's own root is a workspace too, not a special case: eight
+/// workspaces and none differ only in how many rows this table has.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRecord {
+    /// Where this workspace's working tree is, absolute, as raw bytes —
+    /// or `None` for the repository's OWN root.
+    ///
+    /// `None` rather than a recorded path, because the repository's root is
+    /// wherever the repository is: storing it would make renaming the
+    /// repository's directory break every record of where its own working tree
+    /// was, and repointing that on open is machinery for a fact that did not
+    /// need storing. Every OTHER workspace is somewhere else by definition, and
+    /// says where.
+    ///
+    /// Bytes rather than a `String`, following the doctrine tree entry names
+    /// follow: a path need not be valid UTF-8, and a workspace whose directory
+    /// this engine could not name would be one it could not find again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<Vec<u8>>,
+    /// The line this workspace is on.
+    ///
+    /// Per workspace rather than per repository (ADR-7 §3). One `current`
+    /// could not mean eight things: the moment one workspace switched, every
+    /// other would report being on a line whose bytes it does not have. That
+    /// is not a race the repository lock can fix, because it is not a race.
+    pub current: String,
+    /// Line -> the working state THIS workspace preserved for it.
+    ///
+    /// Was `LineRecord.working`, which assumed exactly one current line. The
+    /// bytes a line holds while it is not current are the bytes a particular
+    /// workspace left there, and two workspaces leave different ones.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub preserved: std::collections::BTreeMap<String, String>,
+}
+
 /// Which lines exist and which one is current.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineState {
-    pub current: String,
     pub lines: std::collections::BTreeMap<String, LineRecord>,
+    /// Working trees over this repository, by opaque id.
+    ///
+    /// In the same key as the lines, for ADR-16 §7's reason unchanged: a switch
+    /// mutates several facts at once and they must move together or not at all.
+    /// Eight workspaces rewriting one document is affordable precisely because
+    /// ADR-6 made them take turns.
+    ///
+    /// Additive, so no on-disk format break: the line state is a published
+    /// document, not hashed content — `Entry::compute_id` covers the operation
+    /// and nothing else — so a document written before this field existed reads
+    /// back with an empty map. The break comes later, when `current` moves in
+    /// here and stops being one field meaning eight things (ADR-7 §3).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub workspaces: std::collections::BTreeMap<String, WorkspaceRecord>,
 }
 
 /// The line every repository starts on. G1.1 and G1.4 both run `switch main`
@@ -165,14 +210,45 @@ pub struct LineState {
 pub const DEFAULT_LINE: &str = "main";
 
 impl LineState {
-    pub fn initial() -> Self {
+    /// The state a fresh repository starts in: one line, and one workspace —
+    /// the repository's own root, which is a workspace and not a special case
+    /// (ADR-7 §1).
+    pub fn initial(workspace: &str) -> Self {
         let mut lines = std::collections::BTreeMap::new();
         lines.insert(DEFAULT_LINE.to_string(), LineRecord::default());
-        LineState {
-            current: DEFAULT_LINE.to_string(),
-            lines,
-        }
+        let mut workspaces = std::collections::BTreeMap::new();
+        workspaces.insert(
+            workspace.to_string(),
+            WorkspaceRecord {
+                // The repository's own root: tracked, not stored.
+                root: None,
+                current: DEFAULT_LINE.to_string(),
+                preserved: std::collections::BTreeMap::new(),
+            },
+        );
+        LineState { lines, workspaces }
     }
+}
+
+/// The line state as format 3 wrote it, read only in order to migrate it.
+///
+/// A separate type rather than `#[serde(default)]` on the live one: these
+/// fields are GONE, and leaving them readable on `LineState` would leave two
+/// ways to say where a workspace is — the thing ADR-7 §3 removes.
+#[derive(Deserialize)]
+pub(crate) struct LineStateV3 {
+    pub current: String,
+    pub lines: std::collections::BTreeMap<String, LineRecordV3>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct LineRecordV3 {
+    pub tip: Option<String>,
+    pub working: Option<String>,
+    #[serde(default)]
+    pub changes: std::collections::BTreeMap<String, ChangeRecord>,
+    #[serde(default)]
+    pub current_change: Option<String>,
 }
 
 /// How long a committing thread waits for others to join its batch.
@@ -246,6 +322,25 @@ pub enum Operation {
         /// fact is what keeps the two lists from ever disagreeing.
         displaced: Vec<(Vec<u8>, String)>,
     },
+    /// Register a working tree over this repository.
+    ///
+    /// NOT undoable, and that is a decision rather than an oversight. ADR-7 §4
+    /// makes undo repository-scoped, so `ltx undo` run anywhere reverses the
+    /// log's last eligible entry whichever workspace appended it — and that
+    /// could be the entry that created the workspace somebody else is working
+    /// in at this moment. Undo exists to take back what you did, not to remove
+    /// the ground another person is standing on.
+    ///
+    /// Nothing is stranded by that. The files it materialised live outside the
+    /// repository entirely, so unlike an undone `start` there is no working
+    /// state for the ephemeral tier to preserve — the directory simply stays
+    /// where it is, with or without its marker.
+    Workspace {
+        id: String,
+        /// The working tree, as raw bytes: a path need not be valid UTF-8, and
+        /// a workspace this engine could not name is one it could not find.
+        root: Vec<u8>,
+    },
     Switch {
         from: String,
         to: String,
@@ -298,6 +393,7 @@ impl Operation {
                 | Operation::Adopt { .. }
                 | Operation::Redact { .. }
                 | Operation::Thin { .. }
+                | Operation::Workspace { .. }
         )
     }
 
@@ -307,6 +403,7 @@ impl Operation {
             Operation::Save { .. } => "save",
             Operation::StartLine { .. } => "start",
             Operation::Assign { .. } => "assign",
+            Operation::Workspace { .. } => "workspace",
             Operation::Switch { .. } => "switch",
             Operation::Undo { .. } => "undo",
             Operation::Adopt { .. } => "adopt",
@@ -352,7 +449,12 @@ impl Entry {
     /// rather than a version field.
     fn compute_id(seq: u64, prev: &str, at: u64, op: &Operation, format: u64) -> Result<String> {
         let payload = match format {
-            3 => serde_json::to_vec(&(seq, prev, at, op, format))?,
+            // 3 and 4 serialise an operation identically — the break between
+            // them is in the line state, which is a published document and not
+            // hashed. The tag is still inside the payload, so an entry written
+            // at 3 and one written at 4 hash differently, and each verifies
+            // under its own rule.
+            3 | 4 => serde_json::to_vec(&(seq, prev, at, op, format))?,
             other => {
                 return Err(Error::UnsupportedFormat(format!(
                     "entry {seq} records on-disk format {other}, which this build cannot hash"
@@ -718,6 +820,78 @@ impl OpLog {
             Some(v) => Ok(Some(serde_json::from_slice(v.value())?)),
             None => Ok(None),
         }
+    }
+
+    /// Publish a migrated line state and the format it is written at, together.
+    ///
+    /// One transaction, and it has to be. As two, a crash between them leaves a
+    /// NEW document under an OLD version — and the rerun reads the migrated
+    /// document with the old reader, fails on a field that is gone, and reports
+    /// a serde error whose recovery says this is probably a bug. Every command
+    /// then fails with no way forward, which is the opposite of what ordering
+    /// the writes was meant to achieve. Atomic by construction instead, the way
+    /// ADR-16 §7 makes the line publish atomic for the same reason.
+    pub fn publish_migrated_lines(&self, state: &LineState, version: u64) -> Result<()> {
+        let bytes = serde_json::to_vec(state)?;
+        let tx = self.db.begin_write()?;
+        {
+            let mut lines = tx.open_table(LINES)?;
+            lines.insert(LINES_KEY, bytes.as_slice())?;
+            let mut heads = tx.open_table(HEADS)?;
+            heads.insert(FORMAT_KEY, version)?;
+        }
+        // redb's commit is the durability barrier; it fsyncs.
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Publish a line state given as raw bytes.
+    ///
+    /// Test-only: `LINES["state"]` is authoritative and every read deserialises
+    /// it, so arbitrary bytes here turn every later command into a
+    /// deserialisation error. It exists to build the shape an older format
+    /// wrote, which no current build can produce.
+    #[cfg(test)]
+    pub(crate) fn publish_raw_line_state(&self, raw: &[u8]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(LINES)?;
+            table.insert(LINES_KEY, raw)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The document a migration replaced, if one did.
+    pub fn superseded_line_state(&self) -> Result<Option<Vec<u8>>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(LINES)?;
+        Ok(table.get(SUPERSEDED_LINES_KEY)?.map(|v| v.value().to_vec()))
+    }
+
+    /// The published line state as raw bytes, for a reader that must interpret
+    /// it under a format other than this build's.
+    pub fn raw_line_state(&self) -> Result<Option<Vec<u8>>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(LINES)?;
+        Ok(table.get(LINES_KEY)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Keep a superseded line state under its own key, before a migration
+    /// overwrites the live one.
+    ///
+    /// Never read by the engine. It exists so that a migration that goes wrong
+    /// leaves something to restore from — every earlier format break refused
+    /// to open, and a rewrite is the first one that could destroy rather than
+    /// decline.
+    pub fn keep_superseded_line_state(&self, raw: &[u8]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(LINES)?;
+            table.insert(SUPERSEDED_LINES_KEY, raw)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// The published line state, or `None` for a repository that has none.

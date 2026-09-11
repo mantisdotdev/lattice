@@ -96,10 +96,27 @@ impl std::fmt::Debug for Repo {
 }
 
 pub struct Repo {
+    /// The working tree this handle addresses.
+    ///
+    /// For a repository opened at its own root this is the directory holding
+    /// `.lattice`. For a workspace it is somewhere else entirely, which is what
+    /// a workspace IS (ADR-7) — so this and `repository` below are two facts,
+    /// not one derived from the other.
     root: PathBuf,
+    /// The `.lattice` directory: packs, op-log, HEAD, and the lock.
+    ///
+    /// Derived from `root` until a workspace could exist, and stored since,
+    /// because eight working trees share one of these.
+    repository: PathBuf,
     store: Store,
     oplog: OpLog,
-    change_id_bits: ChangeIdBits,
+    id_bits: OpaqueIdBits,
+    /// Which workspace this handle addresses, by opaque id.
+    ///
+    /// Resolved once at open time from the working tree's path. Every question
+    /// about "the current line" or "the preserved working state" is really a
+    /// question about a workspace, and this is which one (ADR-7 §3).
+    workspace: String,
     /// Exclusive access to this repository, held for as long as it is open.
     ///
     /// redb takes a NON-BLOCKING exclusive lock on its own file, so a second
@@ -125,16 +142,34 @@ pub struct Repo {
 /// killed from outside and recorded as a deadlock it is not.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Where a new change id gets its 128 bits (ADR-17 §3).
+/// How a handle found its repository, which decides which workspace it is.
+///
+/// Not a boolean, because the two carry different consequences when no record
+/// matches. Through the repository's own directory an unmatched root is
+/// ordinary — the repository may predate workspaces. Through a marker it is
+/// refused, because a marker with no record means a workspace that was moved or
+/// half-created, and writing to it would silently go nowhere.
+#[derive(Clone, Copy)]
+enum Reached {
+    Root,
+    Marker,
+}
+
+/// Where a new opaque id gets its 128 bits (ADR-17 §3).
+///
+/// Changes were the first noun to need an identity that is neither content-
+/// addressed nor user-coined; workspaces are the second, and both draw from
+/// here. Named for what it produces rather than for the first thing to want
+/// one.
 ///
 /// Injected rather than reached for: the engine never touches an entropy
 /// source itself, so a test or the property runner substitutes a counter and
 /// exercises the code that ships rather than a second path beside it.
 /// Fallible because a machine that cannot produce entropy has to say so, not
 /// mint a predictable identity.
-pub type ChangeIdBits = Box<dyn FnMut() -> Result<[u8; 16]> + Send>;
+pub type OpaqueIdBits = Box<dyn FnMut() -> Result<[u8; 16]> + Send>;
 
-fn os_change_id_bits() -> Result<[u8; 16]> {
+fn os_id_bits() -> Result<[u8; 16]> {
     let mut bits = [0u8; 16];
     getrandom::fill(&mut bits).map_err(|e| Error::Io(std::io::Error::from(e)))?;
     Ok(bits)
@@ -195,7 +230,12 @@ impl Repo {
         // entry would be an eligible undo target and undo-all would delete
         // `main` (ADR-16 §2). `Init` is not undoable, so `main` sits below the
         // undo floor.
-        oplog.commit_initial(Operation::Init, LineState::initial(), FORMAT_VERSION)?;
+        let workspace = change::mint(os_id_bits()?);
+        oplog.commit_initial(
+            Operation::Init,
+            LineState::initial(&workspace),
+            FORMAT_VERSION,
+        )?;
         // redb's create syncs `.lattice` itself, but the entry FOR `.lattice`
         // lives in `root` and is only committed once `root` is fsynced —
         // otherwise a crash can lose the whole repository directory after init
@@ -203,19 +243,36 @@ impl Repo {
         platform::sync_dir(root)?;
         Ok(Repo {
             root: root.to_path_buf(),
+            repository: dir,
             store,
             oplog,
-            change_id_bits: Box::new(os_change_id_bits),
+            id_bits: Box::new(os_id_bits),
+            workspace,
             _lock: lock,
         })
     }
 
     /// Find the repository containing `start`, walking upward.
+    ///
+    /// `.lattice` as a DIRECTORY is a repository. `.lattice` as a FILE is a
+    /// workspace, and names the repository whose directory holds the content
+    /// (ADR-7 §1). One name in two forms, so this walk learns one new thing
+    /// rather than searching for a second marker — which every ignore file and
+    /// every "am I in a repository" check would otherwise have to learn too.
     pub fn discover(start: &Path) -> Result<Self> {
         let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
         let mut cursor = start.as_path();
         loop {
-            if Self::repo_dir(cursor).is_dir() {
+            let marker = Self::repo_dir(cursor);
+            if marker.is_dir() {
+                // A pointer, or the repository itself. Distinguished by
+                // contents rather than by kind: see the marker doc below for
+                // why this is not a `.lattice` FILE.
+                let pointer = marker.join(MARKER_FILE);
+                if pointer.is_file() {
+                    let repository = read_workspace_marker(&pointer)?;
+                    return Self::open_workspace(cursor, &repository);
+                }
                 return Self::open(cursor);
             }
             match cursor.parent() {
@@ -226,7 +283,22 @@ impl Repo {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
-        let dir = Self::repo_dir(root);
+        Self::open_at(root, &Self::repo_dir(root), Reached::Root)
+    }
+
+    /// Open the repository at `repository`, working in the tree at `root`.
+    ///
+    /// The workspace half of `discover`. Separate from `open` only in that the
+    /// two directories are given rather than derived from each other.
+    fn open_workspace(root: &Path, repository: &Path) -> Result<Self> {
+        if !repository.is_dir() {
+            return Err(Error::NotARepository(repository.to_path_buf()));
+        }
+        Self::open_at(root, repository, Reached::Marker)
+    }
+
+    fn open_at(root: &Path, dir: &Path, reached: Reached) -> Result<Self> {
+        let dir = dir.to_path_buf();
         if !dir.is_dir() {
             return Err(Error::NotARepository(root.to_path_buf()));
         }
@@ -266,25 +338,74 @@ impl Repo {
             }
         }
         let oplog = OpLog::open(&meta)?;
+        migrate_line_state_to_v4(&oplog)?;
+        // Which workspace is this? Matched by canonical path, because that is
+        // the only thing a command run in a directory knows about itself.
+        let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let here = platform::bytes_from_os_str(here.as_os_str());
+        let state = oplog.line_state()?;
+        let known = state.as_ref().and_then(|state| {
+            let wanted: Option<Vec<u8>> = match reached {
+                // Whichever record claims no path of its own IS the
+                // repository's root, wherever that directory has moved to.
+                Reached::Root => None,
+                Reached::Marker => Some(here.clone()),
+            };
+            state
+                .workspaces
+                .iter()
+                .find(|(_, record)| record.root == wanted)
+                .map(|(id, _)| id.clone())
+        });
+        // A workspace the repository has no record of is REFUSED, not opened
+        // with an empty id. With one, `set_current_line` and `set_preserved`
+        // find nothing to write and silently do nothing — so a `switch` would
+        // capture the working tree, publish a state that references it
+        // nowhere, and then fail to materialise. The capture would be durable
+        // and unreachable, which is losing work while reporting an error about
+        // something else.
+        //
+        // Reachable two ways: a crash between `workspace new` writing the
+        // marker and committing the record, and a workspace directory that has
+        // been moved. Both leave a marker with no matching record.
+        let workspace = match (known, state, reached) {
+            (Some(id), _, _) => id,
+            // No published state at all is a repository mid-init, not a
+            // mismatch; the default line is the honest answer.
+            (None, None, _) => String::new(),
+            // Reached through the repository's own directory with no record
+            // claiming to be its root: a repository written before workspaces
+            // existed, or one whose root record was removed. The default line
+            // is the honest answer here too, and nothing is silently written.
+            (None, Some(_), Reached::Root) => String::new(),
+            (None, Some(_), Reached::Marker) => {
+                return Err(Error::Invalid(format!(
+                    "{} is marked as a workspace of {}, but that repository has \
+                     no record of it — it may have been moved, or created by a \
+                     command that did not finish",
+                    root.display(),
+                    dir.display()
+                )))
+            }
+        };
         Ok(Repo {
             root: root.to_path_buf(),
+            repository: dir,
             store,
             oplog,
-            change_id_bits: Box::new(os_change_id_bits),
+            id_bits: Box::new(os_id_bits),
+            workspace,
             _lock: lock,
         })
     }
 
-    /// Replace where new change ids get their bits.
+    /// Replace where new opaque ids get their bits.
     ///
     /// The one seam ADR-17 §3 asks for: entropy enters at this boundary and
     /// nowhere else, so a caller that needs a run to be reproducible passes a
     /// counter instead of the machine's entropy.
-    pub fn with_change_id_bits(
-        mut self,
-        bits: impl FnMut() -> Result<[u8; 16]> + Send + 'static,
-    ) -> Self {
-        self.change_id_bits = Box::new(bits);
+    pub fn with_id_bits(mut self, bits: impl FnMut() -> Result<[u8; 16]> + Send + 'static) -> Self {
+        self.id_bits = Box::new(bits);
         self
     }
 
@@ -310,7 +431,7 @@ impl Repo {
     pub fn save(&mut self, message: &str, change: Option<&str>) -> Result<SaveOutcome> {
         let rescued = self.complete_pending_switch()?;
         let mut lines = self.line_state()?;
-        let current = lines.current.clone();
+        let current = self.line_of(&lines);
 
         // Settle the scope before a byte is written. A `--change` that names
         // no open change, or one holding nothing, must leave the repository
@@ -435,7 +556,7 @@ impl Repo {
     }
 
     fn head_pointer_path(&self) -> PathBuf {
-        Self::repo_dir(&self.root).join("HEAD")
+        self.repository.join("HEAD")
     }
 
     fn write_head_pointer(&self, checkpoint_id: &str) -> Result<()> {
@@ -456,7 +577,7 @@ impl Repo {
         // durable — a rename is only committed once the containing directory
         // is fsynced, which is the barrier G1.1's replayer models.
         fs::rename(&tmp, &path)?;
-        platform::sync_dir(&Self::repo_dir(&self.root))?;
+        platform::sync_dir(&self.repository)?;
         Ok(())
     }
 
@@ -475,7 +596,7 @@ impl Repo {
         if let Some(state) = self.oplog.line_state()? {
             return Ok(state);
         }
-        let mut state = LineState::initial();
+        let mut state = LineState::initial(&self.workspace);
         if let Some(rec) = state.lines.get_mut(DEFAULT_LINE) {
             rec.tip = self.legacy_head_id()?;
         }
@@ -508,7 +629,8 @@ impl Repo {
     /// The checkpoint the CURRENT line points at.
     pub fn head_checkpoint(&self) -> Result<Option<Checkpoint>> {
         let state = self.line_state()?;
-        let Some(tip) = state.lines.get(&state.current).and_then(|r| r.tip.clone()) else {
+        let current = self.line_of(&state);
+        let Some(tip) = state.lines.get(&current).and_then(|r| r.tip.clone()) else {
             return Ok(None);
         };
         self.checkpoint(&tip)
@@ -898,7 +1020,8 @@ impl Repo {
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
-            | Operation::Thin { .. } => false,
+            | Operation::Thin { .. }
+            | Operation::Workspace { .. } => false,
         })
     }
 
@@ -965,19 +1088,19 @@ impl Repo {
                     lines.lines.remove(name);
                     outcome.preserved_working_state = Some(captured);
                 } else {
-                    lines.lines.entry(name.clone()).or_default().working = Some(captured);
+                    self.set_preserved(&mut lines, name, Some(captured));
                 }
-                let restored = lines.lines.entry(from.clone()).or_default().working.clone();
-                lines.current = from.clone();
+                let restored = self.preserved(&lines, from);
+                self.set_current_line(&mut lines, from);
                 materialise = Some(restored);
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
             }
             Operation::Switch { from, to } => {
                 if from != to {
                     let captured = self.capture_working_tree()?;
-                    lines.lines.entry(to.clone()).or_default().working = Some(captured);
-                    let restored = lines.lines.entry(from.clone()).or_default().working.clone();
-                    lines.current = from.clone();
+                    self.set_preserved(&mut lines, to, Some(captured));
+                    let restored = self.preserved(&lines, from);
+                    self.set_current_line(&mut lines, from);
                     materialise = Some(restored);
                 }
                 outcome.now_at = lines.lines.get(from).and_then(|r| r.tip.clone());
@@ -1026,7 +1149,8 @@ impl Repo {
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
-            | Operation::Thin { .. } => {
+            | Operation::Thin { .. }
+            | Operation::Workspace { .. } => {
                 return Err(Error::Invalid(format!(
                     "operation {} ({}) has no inverse",
                     entry.seq,
@@ -1049,21 +1173,204 @@ impl Repo {
             // materialisation cannot drop the only reference to that work. It
             // then reads as a pending switch, which the next command completes.
             self.materialise_working_tree(target.as_deref())?;
-            let current = lines.current.clone();
-            if let Some(rec) = lines.lines.get_mut(&current) {
-                rec.working = None;
-            }
+            let current = self.line_of(&lines);
+            self.set_preserved(&mut lines, &current, None);
             self.oplog.publish_lines(&lines)?;
         }
         self.sync_head_pointer(&lines)?;
         Ok(outcome)
     }
 
+    // --------------------------------------------------------- workspaces
+
+    /// The line this workspace is on.
+    ///
+    /// Falls back to the default line for a workspace with no record, which a
+    /// repository cannot normally reach: `init` registers its own root and
+    /// `workspace new` registers every other. It is a floor rather than a
+    /// silent default — the alternative is an engine that cannot answer "which
+    /// line am I on" at all.
+    fn line_of(&self, lines: &LineState) -> String {
+        lines
+            .workspaces
+            .get(&self.workspace)
+            .map(|w| w.current.clone())
+            .unwrap_or_else(|| DEFAULT_LINE.to_string())
+    }
+
+    /// The line this workspace is on.
+    ///
+    /// Workspace-relative, and two workspaces legitimately disagree — that is
+    /// the feature, not a race (ADR-7, consequences).
+    pub fn current_line(&self) -> Result<String> {
+        Ok(self.line_of(&self.line_state()?))
+    }
+
+    fn set_current_line(&self, lines: &mut LineState, line: &str) {
+        if let Some(space) = lines.workspaces.get_mut(&self.workspace) {
+            space.current = line.to_string();
+        }
+    }
+
+    /// The working state this workspace preserved for `line`, if any.
+    fn preserved(&self, lines: &LineState, line: &str) -> Option<String> {
+        lines
+            .workspaces
+            .get(&self.workspace)
+            .and_then(|w| w.preserved.get(line).cloned())
+    }
+
+    fn set_preserved(&self, lines: &mut LineState, line: &str, tree: Option<String>) {
+        let Some(space) = lines.workspaces.get_mut(&self.workspace) else {
+            return;
+        };
+        match tree {
+            Some(tree) => {
+                space.preserved.insert(line.to_string(), tree);
+            }
+            None => {
+                space.preserved.remove(line);
+            }
+        }
+    }
+
+    /// Create a working tree over this repository at `at`.
+    ///
+    /// The tip is materialised there and a marker written afterwards, in that
+    /// order (ADR-7 §2): a crash between them leaves a directory of files that
+    /// is not yet a workspace, which is inert. The reverse order would leave a
+    /// workspace whose content is incomplete — a workspace that lies.
+    pub fn new_workspace(&mut self, at: &Path) -> Result<WorkspaceOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        // Materialising over a directory that already holds something would
+        // overwrite work this command was never asked to touch. `checkout`
+        // deliberately overwrites what it finds, which is right for a
+        // destination the caller named and wrong for one it is adopting.
+        match fs::read_dir(at) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return Err(Error::Invalid(format!(
+                        "{} is not empty; a workspace is created in a new or \
+                         empty directory",
+                        at.display()
+                    )));
+                }
+            }
+            // Not there yet is the ordinary case.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else means the guard could not run. An unreadable but
+            // writable directory would otherwise slip past it and be
+            // overwritten by the materialiser, which overwrites what it finds.
+            Err(e) => return Err(e.into()),
+        }
+
+        // Content first. A repository with nothing saved yet has no tree to
+        // write, which is an empty workspace rather than an error.
+        let entries_written = match self.head_checkpoint()? {
+            Some(_) => self.checkout_into(None, at)?.entries_written,
+            None => {
+                fs::create_dir_all(at)?;
+                0
+            }
+        };
+        platform::sync_dir(at)?;
+
+        let id = change::mint((self.id_bits)()?);
+        let root = fs::canonicalize(at)?;
+        // Written after the content and its sync, so the marker's presence
+        // means the content is there.
+        let marker_dir = at.join(REPO_DIR);
+        fs::create_dir_all(&marker_dir)?;
+        fs::write(
+            marker_dir.join(MARKER_FILE),
+            format!("{MARKER_KEY}{}\n", self.repository.display()),
+        )?;
+        platform::sync_dir(&marker_dir)?;
+        platform::sync_dir(at)?;
+
+        let mut lines = self.line_state()?;
+        lines.workspaces.insert(
+            id.clone(),
+            crate::oplog::WorkspaceRecord {
+                root: Some(platform::bytes_from_os_str(root.as_os_str())),
+                // A new workspace starts on the line that made it, holding the
+                // tip that was just materialised into it.
+                current: self.line_of(&lines),
+                preserved: BTreeMap::new(),
+            },
+        );
+        let entry = self.oplog.commit(
+            Operation::Workspace {
+                id: id.clone(),
+                root: platform::bytes_from_os_str(root.as_os_str()),
+            },
+            Some(lines),
+        )?;
+
+        Ok(WorkspaceOutcome {
+            id,
+            root: root.display().to_string(),
+            entries_written,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Every working tree registered over this repository.
+    ///
+    /// A workspace whose directory is gone is reported as missing rather than
+    /// hidden: removing a directory does not remove its record, and pruning is
+    /// a verb rather than a side effect of noticing (ADR-7, consequences).
+    pub fn workspaces(&self) -> Result<Vec<WorkspaceView>> {
+        let lines = self.line_state()?;
+        let ids: Vec<&str> = lines.workspaces.keys().map(String::as_str).collect();
+        Ok(lines
+            .workspaces
+            .iter()
+            .map(|(id, record)| {
+                // A record with no path of its own is the repository's root,
+                // which is wherever the repository is — so it is reported from
+                // the handle rather than from the record. From `self.repository`,
+                // NOT from `self.root`: run inside a workspace, `self.root` is
+                // that workspace's directory, and reporting it here printed the
+                // workspace's path twice, once under its own id and once under
+                // the repository's.
+                let repository_root = self
+                    .repository
+                    .parent()
+                    .unwrap_or(self.repository.as_path())
+                    .to_path_buf();
+                let (root, present) = match &record.root {
+                    None => (
+                        repository_root.display().to_string(),
+                        repository_root.is_dir(),
+                    ),
+                    Some(bytes) => match platform::os_string_from_bytes(bytes) {
+                        Some(name) => {
+                            let path = Path::new(&name).to_path_buf();
+                            (path.display().to_string(), path.is_dir())
+                        }
+                        // A path this platform cannot name is reported as it
+                        // was stored rather than approximated into something
+                        // that would look real.
+                        None => (String::from_utf8_lossy(bytes).into_owned(), false),
+                    },
+                };
+                WorkspaceView {
+                    short: change::abbreviate(id, &ids),
+                    id: id.clone(),
+                    root,
+                    present,
+                }
+            })
+            .collect())
+    }
+
     // ------------------------------------------------------------ changes
 
     /// Mint an identity for a new change.
     fn new_change_id(&mut self) -> Result<String> {
-        Ok(change::mint((self.change_id_bits)()?))
+        Ok(change::mint((self.id_bits)()?))
     }
 
     /// Route working-tree paths into a change.
@@ -1090,7 +1397,7 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let (candidates, mut refused) = self.locate(paths)?;
         let mut lines = self.line_state()?;
-        let line = lines.current.clone();
+        let line = self.line_of(&lines);
         let record = lines.lines.entry(line.clone()).or_default();
         let from_current = record.current_change.clone();
 
@@ -1202,7 +1509,8 @@ impl Repo {
     /// G1.3 compares it for.
     pub fn changes(&self) -> Result<Vec<ChangeView>> {
         let lines = self.line_state()?;
-        let Some(record) = lines.lines.get(&lines.current) else {
+        let current = self.line_of(&lines);
+        let Some(record) = lines.lines.get(&current) else {
             return Ok(Vec::new());
         };
         let ids: Vec<&str> = record.changes.keys().map(String::as_str).collect();
@@ -1344,7 +1652,7 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let mut lines = self.line_state()?;
-        let from = lines.current.clone();
+        let from = self.line_of(&lines);
         if lines.lines.contains_key(&name) {
             let mut out = self.switch_to(lines, &from, &name, true)?;
             out.rescued_working_state = rescued;
@@ -1366,19 +1674,16 @@ impl Repo {
             .get(&from)
             .map(|r| (r.changes.clone(), r.current_change.clone()))
             .unwrap_or_default();
-        if let Some(rec) = lines.lines.get_mut(&from) {
-            rec.working = Some(captured);
-        }
+        self.set_preserved(&mut lines, &from, Some(captured));
         lines.lines.insert(
             name.clone(),
             LineRecord {
                 tip: tip.clone(),
-                working: None,
                 changes,
                 current_change,
             },
         );
-        lines.current = name.clone();
+        self.set_current_line(&mut lines, &name);
         let entry = self.oplog.commit(
             Operation::StartLine {
                 name: name.clone(),
@@ -1404,7 +1709,7 @@ impl Repo {
         let rescued = self.complete_pending_switch()?;
         let name = validate_line_name(name)?;
         let lines = self.line_state()?;
-        let from = lines.current.clone();
+        let from = self.line_of(&lines);
         if !lines.lines.contains_key(&name) {
             return Err(Error::NoSuchLine(format!("there is no line named {name}")));
         }
@@ -1452,18 +1757,16 @@ impl Repo {
         // Capture first: no materialisation ever happens without the current
         // working tree already durable in the store.
         let captured = self.capture_working_tree()?;
-        if let Some(rec) = lines.lines.get_mut(from) {
-            rec.working = Some(captured);
-        }
+        self.set_preserved(&mut lines, from, Some(captured));
         let target = lines.lines.entry(to.to_string()).or_default();
         // The preserved address is deliberately LEFT IN PLACE across the
         // publish. It is the marker that materialisation is still pending: if
         // we crash between publishing and writing the files, the next command
         // sees the current line holding preserved state and finishes the job.
         // Clearing it first would drop the only reference to that work.
-        let restored = target.working.clone();
         let tip = target.tip.clone();
-        lines.current = to.to_string();
+        let restored = self.preserved(&lines, to);
+        self.set_current_line(&mut lines, to);
 
         // Publish BEFORE materialising: a crash then leaves us unambiguously on
         // the target with a re-runnable idempotent materialisation, rather than
@@ -1486,9 +1789,7 @@ impl Repo {
         // Materialisation done: the bytes on disk are now the truth for this
         // line, so the preserved copy is consumed and the invariant that the
         // current line holds no preserved state is restored.
-        if let Some(rec) = lines.lines.get_mut(to) {
-            rec.working = None;
-        }
+        self.set_preserved(&mut lines, to, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
         Ok(LineOutcome {
@@ -1515,8 +1816,8 @@ impl Repo {
     /// switch.
     fn complete_pending_switch(&mut self) -> Result<Option<String>> {
         let lines = self.line_state()?;
-        let current = lines.current.clone();
-        let pending = lines.lines.get(&current).and_then(|r| r.working.clone());
+        let current = self.line_of(&lines);
+        let pending = self.preserved(&lines, &current);
         let Some(pending) = pending else {
             return Ok(None);
         };
@@ -1532,16 +1833,12 @@ impl Repo {
         if rescued == pending {
             // Nothing was written since the interruption; just consume the
             // marker without touching a single file.
-            if let Some(rec) = lines.lines.get_mut(&current) {
-                rec.working = None;
-            }
+            self.set_preserved(&mut lines, &current, None);
             self.oplog.publish_lines(&lines)?;
             return Ok(None);
         }
         self.materialise_working_tree(Some(&pending))?;
-        if let Some(rec) = lines.lines.get_mut(&current) {
-            rec.working = None;
-        }
+        self.set_preserved(&mut lines, &current, None);
         self.oplog.publish_lines(&lines)?;
         self.sync_head_pointer(&lines)?;
         // Durable, content-addressed, and named to the caller — the same
@@ -1649,7 +1946,11 @@ impl Repo {
 
     /// Keep the human-readable HEAD cache in step with the published state.
     fn sync_head_pointer(&self, lines: &LineState) -> Result<()> {
-        match lines.lines.get(&lines.current).and_then(|r| r.tip.clone()) {
+        match lines
+            .lines
+            .get(&self.line_of(lines))
+            .and_then(|r| r.tip.clone())
+        {
             Some(tip) => self.write_head_pointer(&tip),
             None => Ok(()),
         }
@@ -2137,24 +2438,34 @@ impl Repo {
                     ));
                 }
             }
-            if let Some(working) = &rec.working {
+        }
+        // Preserved working state is per workspace now, so it is checked per
+        // workspace — and so is the line each one claims to be on. A workspace
+        // pointing at a line that does not exist is exactly the damage the
+        // single-`current` version of this check looked for, once per place
+        // that can now be wrong.
+        for (id, space) in &state.workspaces {
+            let short = crate::short_id(id);
+            if !state.lines.contains_key(&space.current) {
+                report.structure_verified = false;
+                report.errors.push(format!(
+                    "workspace {short} is on line {}, which does not exist",
+                    space.current
+                ));
+            }
+            for (line, working) in &space.preserved {
                 let present = ChunkId::from_hex(working)
                     .map(|id| self.store.contains(id))
                     .unwrap_or(false);
                 if !present {
                     report.structure_verified = false;
                     report.errors.push(format!(
-                        "line {name} holds working state {} which is not present",
+                        "workspace {short} holds working state {} for line {line}, \
+                         which is not present",
                         crate::short_id(working)
                     ));
                 }
             }
-        }
-        if !state.lines.contains_key(&state.current) {
-            report.structure_verified = false;
-            report
-                .errors
-                .push(format!("the current line {} does not exist", state.current));
         }
 
         if complete && report.chunks_absent > 0 {
@@ -2339,6 +2650,29 @@ pub struct SaveOutcome {
     pub rescued_working_state: Option<String>,
 }
 
+/// What `workspace new` did.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceOutcome {
+    pub id: String,
+    pub root: String,
+    /// Entries materialised into it. Zero for a repository with nothing saved
+    /// yet, which is an empty workspace rather than a failure.
+    pub entries_written: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+/// One workspace, as `workspace list` reports it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceView {
+    pub id: String,
+    pub short: String,
+    pub root: String,
+    /// Whether its directory is still there. A record outlives the directory,
+    /// and saying so is better than quietly listing somewhere that is gone.
+    pub present: bool,
+}
+
 /// What `assign` did.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssignOutcome {
@@ -2418,6 +2752,150 @@ pub struct ChangeView {
     pub assigned: Vec<String>,
     /// Whether a bare `ltx assign` adds to this one.
     pub current: bool,
+}
+
+/// Bring a format-3 line state to format 4, keeping a copy of the old one.
+///
+/// The first migration this project has run, and the mechanism ADR-17 §9 built
+/// the per-entry format tag for: entries keep hashing under the tag they were
+/// written at, so only the published line state has to move.
+///
+/// **The pre-migration document is written to its own key first.** Every
+/// earlier format break REFUSED to open; this one REWRITES, and a rewrite that
+/// goes wrong is unrecoverable in a way a refusal never is. One extra key buys
+/// back the difference between "restore it" and "it is gone", which is not a
+/// trade worth thinking about twice.
+fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
+    if oplog.format_version()? != Some(3) {
+        return Ok(());
+    }
+    let Some(raw) = oplog.raw_line_state()? else {
+        // Nothing published: nothing to migrate, only the version to move.
+        oplog.set_format_version(FORMAT_VERSION)?;
+        return Ok(());
+    };
+
+    // Three cases, and they must be told apart. The order matters: a format-3
+    // document also satisfies the format-4 shape, because serde ignores the
+    // fields 4 dropped — so 3 is tried first, and its REQUIRED `current` is
+    // what distinguishes them.
+    let old = match serde_json::from_slice::<crate::oplog::LineStateV3>(&raw) {
+        Ok(old) => old,
+        Err(not_v3) => {
+            if serde_json::from_slice::<LineState>(&raw).is_ok() {
+                // Already migrated. Cannot arise from an interrupted migration
+                // any more — the publish and the version bump are one
+                // transaction — but cheap to survive if it arrives by another
+                // route, and the alternative is a repository that will not open.
+                oplog.set_format_version(FORMAT_VERSION)?;
+                return Ok(());
+            }
+            // Readable as neither: this is damage, not a migration that has
+            // already happened. Treating it as the latter would advance the
+            // version, which makes the migration return early forever — so the
+            // copy that `keep_superseded_line_state` would have written is
+            // never written, and the damaged document stays authoritative with
+            // no way back. The version stays at 3 so both remain available.
+            return Err(Error::Corrupt(format!(
+                "the line state reads as neither format 3 nor format \
+                 {FORMAT_VERSION}: {not_v3}"
+            )));
+        }
+    };
+
+    // The whole of the old state, verbatim, before anything is rewritten.
+    oplog.keep_superseded_line_state(&raw)?;
+
+    // One workspace: the repository's own root, which is where every format-3
+    // repository did all its work, since workspaces did not exist.
+    let workspace = change::mint(os_id_bits()?);
+    let mut preserved = BTreeMap::new();
+    let mut lines = BTreeMap::new();
+    for (name, record) in old.lines {
+        if let Some(tree) = record.working {
+            preserved.insert(name.clone(), tree);
+        }
+        lines.insert(
+            name,
+            LineRecord {
+                tip: record.tip,
+                changes: record.changes,
+                current_change: record.current_change,
+            },
+        );
+    }
+    let mut workspaces = BTreeMap::new();
+    workspaces.insert(
+        workspace,
+        crate::oplog::WorkspaceRecord {
+            // The repository's own root, which is where every format-3
+            // repository did all its work since workspaces did not exist. It
+            // records no path, because the repository's root is wherever the
+            // repository is.
+            root: None,
+            current: old.current,
+            preserved,
+        },
+    );
+
+    // The document and the version it is written at, in ONE transaction. As
+    // two, a crash between them leaves a format-4 document under a format-3
+    // version, and the rerun reads it with the v3 reader, fails on the `current`
+    // that is gone, and reports a serde error whose recovery says this is
+    // probably a bug in Lattice — every command failing, with no way forward.
+    // An interruption now leaves the repository wholly on one side or the other.
+    oplog.publish_migrated_lines(&LineState { lines, workspaces }, FORMAT_VERSION)?;
+    Ok(())
+}
+
+/// The file inside a workspace's `.lattice` naming the repository it belongs to.
+///
+/// A workspace's marker is a FILE INSIDE a `.lattice` directory, never a
+/// `.lattice` file. Git uses the file shape and it would be the obvious choice
+/// here, but the directory shape has the better property: `.lattice` then means
+/// exactly one thing to anything walking a tree, so ONE rule — "skip
+/// `.lattice`" — covers a repository and a workspace alike. Under the file
+/// shape a walker that skips the directory still trips over the file, and every
+/// ignore rule, tree comparison and "am I in a repository" check would need to
+/// learn a second shape. What distinguishes the two is what is inside
+/// (ADR-7 §1).
+const MARKER_FILE: &str = "repository";
+
+/// The first line of a workspace marker, naming the repository it belongs to.
+///
+/// One `key: value` line rather than a bare path, so a file that is not a
+/// marker is REFUSED rather than read as a path: treating any file found at
+/// that place as a pointer would send commands at whatever it happened to
+/// contain.
+const MARKER_KEY: &str = "repository: ";
+
+fn read_workspace_marker(marker: &Path) -> Result<PathBuf> {
+    // Bounded, per "nothing from outside is unbounded": a marker is one short
+    // line, and a caller who points this at a large file should not have it
+    // read into memory.
+    const MAX_MARKER_BYTES: u64 = 8 * 1024;
+    let size = fs::metadata(marker)?.len();
+    if size > MAX_MARKER_BYTES {
+        return Err(Error::Invalid(format!(
+            "{} is {size} bytes, too large to be a workspace marker",
+            marker.display()
+        )));
+    }
+    let text = fs::read_to_string(marker)?;
+    let Some(path) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(MARKER_KEY))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Err(Error::Invalid(format!(
+            "{} is not a workspace: a workspace marker's first line reads \
+             `{MARKER_KEY}<path>`",
+            marker.display()
+        )));
+    };
+    Ok(PathBuf::from(path))
 }
 
 /// A path relative to the root, as its components joined by `/`.
@@ -2973,7 +3451,7 @@ mod tests {
     fn counted_ids(dir_and_repo: (tempfile::TempDir, Repo)) -> (tempfile::TempDir, Repo) {
         let (dir, repo) = dir_and_repo;
         let mut n = 0u8;
-        let repo = repo.with_change_id_bits(move || {
+        let repo = repo.with_id_bits(move || {
             n += 1;
             let mut bits = [0u8; 16];
             bits[2] = n;
@@ -3606,6 +4084,294 @@ mod tests {
     }
 
     #[test]
+    fn a_new_workspace_holds_the_tip_and_addresses_the_repository_that_made_it() {
+        // G1.2 uses `workspace new` as its CHECKOUT mechanism and then verifies
+        // the adversarial corpus byte for byte at that path. It passes today
+        // only because the command fails and it falls back to `checkout
+        // --into`; the moment this succeeds, that gate measures it instead. A
+        // workspace that does not materialise the tip turns a passing HARD gate
+        // red rather than merely failing a new one (ADR-7 §2).
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"checkpointed").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/b.txt"), b"deeper").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+
+        let out = repo.new_workspace(&at).unwrap();
+
+        assert_eq!(fs::read(at.join("a.txt")).unwrap(), b"checkpointed");
+        assert_eq!(fs::read(at.join("sub/b.txt")).unwrap(), b"deeper");
+        assert!(out.entries_written > 0);
+
+        // And it is reachable as a workspace, not merely as a directory. The
+        // creating handle is dropped first: it holds the repository lock, and
+        // ADR-6 made that lock WAIT rather than fail, so discovering from
+        // inside this process while it is held blocks for the full timeout.
+        // That is the footgun the ADR records, and one process holding two
+        // handles is not something a command ever does.
+        drop(repo);
+        let from_there = Repo::discover(&at).expect("the marker names the repository");
+        assert_eq!(
+            from_there.head_checkpoint().unwrap().map(|c| c.message),
+            Some("seed".to_string())
+        );
+    }
+
+    #[test]
+    fn a_workspace_marker_is_a_file_inside_a_lattice_directory_never_a_lattice_file() {
+        // Not cosmetic. G1.2 compares the source and destination path sets
+        // byte for byte after a checkout and reports anything extra as
+        // "appeared after checkout, absent in source" — and its
+        // `collect_entries` prunes `.lattice` from `dirnames` only, so a
+        // `.lattice` FILE lands in `filenames` and is never filtered. The file
+        // shape turns that gate from PASS to FAIL. Verified against the frozen
+        // harness's own code; this test is what keeps it from coming back.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+
+        repo.new_workspace(&at).unwrap();
+
+        assert!(
+            at.join(".lattice").is_dir(),
+            "a workspace's marker must be pruned by a walk that prunes \
+             `.lattice` directories, which means it has to BE one"
+        );
+        assert!(at.join(".lattice/repository").is_file());
+    }
+
+    #[test]
+    fn a_workspace_is_refused_over_a_directory_that_already_holds_something() {
+        // `checkout` overwrites what it finds, which is right for a destination
+        // the caller named and wrong for one being adopted as a workspace.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("occupied");
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join("theirs.txt"), b"not ours to overwrite").unwrap();
+
+        let err = repo.new_workspace(&at).map(|_| ()).unwrap_err();
+
+        assert!(!err.recovery().is_empty());
+        assert_eq!(
+            fs::read(at.join("theirs.txt")).unwrap(),
+            b"not ours to overwrite",
+            "and it refused before writing anything"
+        );
+    }
+
+    #[test]
+    fn creating_a_workspace_is_recorded_but_cannot_be_undone() {
+        // ADR-7 §4 makes undo repository-scoped, so an undo run anywhere
+        // reverses the log's last eligible entry whichever workspace appended
+        // it. Were this undoable, that could be the entry that created the
+        // workspace someone else is working in right now.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        // A SECOND save, so the entry undo should reach is above the root
+        // floor. Without it the first save is permanently ineligible and the
+        // test could not tell "the workspace was skipped" from "nothing was
+        // eligible at all".
+        fs::write(dir.path().join("a.txt"), b"more").unwrap();
+        let second = repo.save("more", None).unwrap().checkpoint;
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+
+        let undone = repo.undo().unwrap();
+
+        assert_eq!(
+            undone.undone_checkpoint.as_deref(),
+            Some(second.id.as_str()),
+            "undo reaches past the workspace to the save before it"
+        );
+        assert_eq!(
+            repo.workspaces().unwrap().len(),
+            2,
+            "and the workspace stands — two, because the repository's own root \
+             is a workspace and not a special case (ADR-7 §1)"
+        );
+        assert!(at.join(".lattice/repository").is_file(), "marker and all");
+    }
+
+    #[test]
+    fn a_workspace_whose_directory_is_gone_is_listed_as_missing_not_hidden() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (holder, at) = outside("space");
+        let made = repo.new_workspace(&at).unwrap();
+        assert!(
+            repo.workspaces().unwrap().iter().all(|w| w.present),
+            "both the repository's own root and the new one are there"
+        );
+
+        drop(holder);
+
+        let listed = repo.workspaces().unwrap();
+        assert_eq!(listed.len(), 2, "the record outlives the directory");
+        let gone = listed
+            .iter()
+            .find(|w| w.id == made.id)
+            .expect("the workspace that was created");
+        assert!(
+            !gone.present,
+            "and says so, rather than quietly listing somewhere that is gone"
+        );
+    }
+
+    #[test]
+    fn listing_from_inside_a_workspace_still_reports_the_repositorys_own_root() {
+        // The repository's root is a workspace with no path of its own, so
+        // `workspaces()` has to say where it is. Taken from `self.root` that
+        // answer is whichever directory the command ran in — so run from
+        // inside a workspace, the list printed that workspace's path twice,
+        // once under its own id and once under the repository's, and the
+        // repository's row claimed to be somewhere it is not.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        let (_holder, at) = outside("space");
+        repo.new_workspace(&at).unwrap();
+        drop(repo);
+
+        let from_inside = Repo::discover(&at).unwrap();
+
+        let listed = from_inside.workspaces().unwrap();
+        let roots: Vec<&str> = listed.iter().map(|w| w.root.as_str()).collect();
+        assert_eq!(
+            roots
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2,
+            "two workspaces must report two different places, not one twice: {roots:?}"
+        );
+        let repository_root = fs::canonicalize(dir.path()).unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|w| fs::canonicalize(&w.root).ok() == Some(repository_root.clone())),
+            "and one of them is the repository's own root: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn a_marker_points_commands_at_the_repository_it_names() {
+        // `.lattice` as a directory holding a `repository` file is a workspace
+        // naming one (ADR-7 §1).
+        let repo_dir = tempfile::tempdir().unwrap();
+        fs::write(repo_dir.path().join("a.txt"), b"in the repository").unwrap();
+        let (_holder, space) = outside("space");
+        {
+            let mut repo = Repo::init(repo_dir.path()).unwrap();
+            repo.save("seed", None).unwrap();
+            repo.new_workspace(&space).unwrap();
+        }
+
+        let found = Repo::discover(&space).expect("the marker names a repository");
+
+        assert_eq!(
+            found.head_checkpoint().unwrap().map(|c| c.message),
+            Some("seed".to_string()),
+            "commands run in a workspace address the repository's history"
+        );
+        assert_eq!(
+            found.root().canonicalize().unwrap(),
+            space.canonicalize().unwrap(),
+            "and work in the workspace's own tree, not the repository's"
+        );
+    }
+
+    #[test]
+    fn a_repository_whose_directory_was_renamed_still_opens() {
+        // Renaming a project folder is ordinary, and it broke: the root
+        // workspace recorded an absolute path, so after a move nothing matched
+        // and the repository was refused as "marked as a workspace ... but that
+        // repository has no record of it" — an error which even named the cause
+        // while declining to handle it.
+        //
+        // The repository's root records no path now, because its location is
+        // the repository's location.
+        let holder = tempfile::tempdir().unwrap();
+        let before = holder.path().join("before");
+        fs::create_dir(&before).unwrap();
+        fs::write(before.join("a.txt"), b"a").unwrap();
+        {
+            let mut repo = Repo::init(&before).unwrap();
+            repo.save("seed", None).unwrap();
+            repo.start_line("feature").unwrap();
+        }
+        let after = holder.path().join("after");
+        fs::rename(&before, &after).unwrap();
+
+        let repo = Repo::open(&after).expect("a renamed repository still opens");
+
+        assert_eq!(
+            repo.current_line().unwrap(),
+            "feature",
+            "and remembers which line it was on, rather than resetting"
+        );
+    }
+
+    #[test]
+    fn a_marker_the_repository_has_no_record_of_is_refused() {
+        // Reachable two ways: a crash between `workspace new` writing the
+        // marker and committing the record, and a workspace directory that has
+        // been moved. Opening one anyway leaves the handle with no workspace to
+        // write to, so `set_current_line` and `set_preserved` find nothing and
+        // silently do nothing — and a later `switch` would capture the working
+        // tree, publish a state referencing it nowhere, then fail to
+        // materialise. The capture would be durable and unreachable: work lost
+        // behind an error about something else.
+        let repo_dir = tempfile::tempdir().unwrap();
+        fs::write(repo_dir.path().join("a.txt"), b"a").unwrap();
+        {
+            let mut repo = Repo::init(repo_dir.path()).unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        let orphan = tempfile::tempdir().unwrap();
+        fs::create_dir_all(orphan.path().join(".lattice")).unwrap();
+        fs::write(
+            orphan.path().join(".lattice/repository"),
+            format!(
+                "repository: {}\n",
+                repo_dir.path().join(".lattice").display()
+            ),
+        )
+        .unwrap();
+
+        let err = Repo::discover(orphan.path()).map(|_| ()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("no record of it"),
+            "the refusal names the mismatch and what could have caused it: {err}"
+        );
+        assert!(!err.recovery().is_empty());
+    }
+
+    #[test]
+    fn a_file_named_lattice_that_is_not_a_marker_is_refused_rather_than_followed() {
+        // `.lattice` is a name a user might create for their own reasons.
+        // Reading any file of that name as a path would send commands at
+        // whatever it happened to contain.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".lattice")).unwrap();
+        fs::write(dir.path().join(".lattice/repository"), b"notes to self\n").unwrap();
+
+        let err = Repo::discover(dir.path()).map(|_| ()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("not a workspace"),
+            "it says what the file is not, and what a marker looks like: {err}"
+        );
+        assert!(!err.recovery().is_empty());
+    }
+
+    #[test]
     fn a_repository_with_no_changes_lists_none() {
         let (_dir, repo) = repo();
         assert!(repo.changes().unwrap().is_empty());
@@ -3900,6 +4666,129 @@ mod tests {
             !repo.changes().unwrap().iter().any(|c| c.id == first.change),
             "the consumed change must not come back as pending"
         );
+    }
+
+    #[test]
+    fn a_format_three_repository_migrates_and_keeps_what_it_replaced() {
+        // The first migration this project has run, and the mechanism ADR-17 §9
+        // built the per-entry format tag for. Every earlier break REFUSED to
+        // open; this one REWRITES, so the document it replaces is kept.
+        //
+        // The format-3 state is written by hand because no build that produces
+        // one exists any more — which is exactly the situation a migration is
+        // for.
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoint = {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            fs::write(dir.path().join("a.txt"), b"a").unwrap();
+            repo.save("seed", None).unwrap().checkpoint
+        };
+        let legacy = serde_json::json!({
+            "current": "feature",
+            "lines": {
+                "main": { "tip": checkpoint.id, "working": null },
+                "feature": { "tip": checkpoint.id, "working": checkpoint.tree },
+            },
+        });
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.publish_raw_line_state(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let repo = Repo::open(dir.path()).expect("a format-3 repository still opens");
+
+        assert_eq!(
+            repo.current_line().unwrap(),
+            "feature",
+            "the line the repository was on becomes the line its workspace is on"
+        );
+        let state = repo.line_state().unwrap();
+        assert_eq!(state.lines.len(), 2, "both lines survive");
+        let space = state.workspaces.values().next().expect("one workspace");
+        assert_eq!(
+            space.preserved.get("feature").map(String::as_str),
+            Some(checkpoint.tree.as_str()),
+            "and the working state a line held moves to the workspace holding it"
+        );
+        assert_eq!(
+            repo.oplog().format_version().unwrap(),
+            Some(FORMAT_VERSION),
+            "the repository is on the new format afterwards"
+        );
+        assert!(
+            repo.oplog().superseded_line_state().unwrap().is_some(),
+            "and the document it replaced is still there to restore from — a \
+             rewrite that goes wrong is unrecoverable in a way a refusal is not"
+        );
+    }
+
+    #[test]
+    fn a_line_state_readable_as_neither_format_is_damage_not_a_finished_migration() {
+        // The two cases share a branch if the migration only asks "did the
+        // format-3 reader fail?". Treating damage as an already-finished
+        // migration advances the version, which makes the migration return
+        // early on every later open — so the copy it would have kept is never
+        // written, and the damaged document stays authoritative with no way
+        // back. The version must stay at 3.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            fs::write(dir.path().join("a.txt"), b"a").unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.publish_raw_line_state(b"{\"lines\": not json at all")
+                .unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let err = Repo::open(dir.path()).map(|_| ()).unwrap_err();
+
+        assert_eq!(
+            err.category(),
+            crate::error::Category::Corrupt,
+            "damage is reported as damage: {err}"
+        );
+        let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+        assert_eq!(
+            log.format_version().unwrap(),
+            Some(3),
+            "and the version stays put, so the migration — and the copy it \
+             keeps — are still available"
+        );
+    }
+
+    #[test]
+    fn a_migration_interrupted_before_its_version_bump_still_opens() {
+        // The migration writes the new document and bumps the version. If those
+        // are separate transactions, a crash between them leaves a format-4
+        // document under a format-3 version — and the rerun parses it as v3,
+        // fails on the missing `current`, and reports a serde error whose
+        // recovery text says this is probably a bug in Lattice. Every command
+        // fails and there is no way forward.
+        //
+        // That is the exact opposite of what the sequencing is for, so it is
+        // pinned here.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            fs::write(dir.path().join("a.txt"), b"a").unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        // The half-done state: a migrated document, an unmigrated version.
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let repo = Repo::open(dir.path())
+            .expect("a migration interrupted before its version bump must still open");
+
+        assert_eq!(repo.oplog().format_version().unwrap(), Some(FORMAT_VERSION));
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
     }
 
     #[test]
@@ -4293,7 +5182,7 @@ mod tests {
     fn init_creates_the_default_line_below_the_undo_floor() {
         let (_dir, repo) = repo();
         let state = repo.lines().unwrap();
-        assert_eq!(state.current, DEFAULT_LINE);
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
         assert!(state.lines.contains_key(DEFAULT_LINE));
         // main must not come from a StartLine entry, or undo-all would delete it.
         for entry in repo.oplog().entries().unwrap() {
@@ -4314,7 +5203,7 @@ mod tests {
         assert!(out.created);
         assert_eq!(out.line, "feature");
         let state = repo.lines().unwrap();
-        assert_eq!(state.current, "feature");
+        assert_eq!(repo.current_line().unwrap(), "feature");
         // A new line inherits the tip, so no baseline checkpoint disappears.
         assert_eq!(
             state.lines["feature"].tip.as_deref(),
@@ -4334,7 +5223,7 @@ mod tests {
         // and requires exit 0 every time.
         let out = repo.start_line("feature").unwrap();
         assert!(!out.created, "an existing line is not created again");
-        assert_eq!(repo.lines().unwrap().current, "feature");
+        assert_eq!(repo.current_line().unwrap(), "feature");
     }
 
     #[test]
@@ -4490,12 +5379,12 @@ mod tests {
         fs::write(dir.path().join("f"), b"1").unwrap();
         repo.save("seed", None).unwrap();
         repo.start_line("feature").unwrap();
-        assert_eq!(repo.lines().unwrap().current, "feature");
+        assert_eq!(repo.current_line().unwrap(), "feature");
 
         let out = repo.undo().unwrap();
         assert!(!out.nothing_to_undo);
         let state = repo.lines().unwrap();
-        assert_eq!(state.current, DEFAULT_LINE);
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
         assert!(
             !state.lines.contains_key("feature"),
             "undoing a start removes the line it created"
@@ -4537,11 +5426,11 @@ mod tests {
         repo.save("seed", None).unwrap();
         repo.start_line("feature").unwrap();
         repo.switch_line(DEFAULT_LINE).unwrap();
-        assert_eq!(repo.lines().unwrap().current, DEFAULT_LINE);
+        assert_eq!(repo.current_line().unwrap(), DEFAULT_LINE);
 
         repo.undo().unwrap();
         assert_eq!(
-            repo.lines().unwrap().current,
+            repo.current_line().unwrap(),
             "feature",
             "undoing a switch returns to the line it left"
         );

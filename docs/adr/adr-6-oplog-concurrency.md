@@ -138,12 +138,127 @@ not a hypothetical.
   workers took 10.3 s wall clock on the reference machine (`wall_clock_s` in the
   locked artifact). The unlocked arm is far quicker only because it did almost
   none of the work, so the two are not comparable and no speed claim is made
-  from them. G1.4's real shape is
-  80,000 operations over a tree that grows to ~80,000 files, where each `save`
-  walks and hashes the whole tree; **whether that fits any time budget is not
-  answered here and must be measured before G1.4 is claimed.** ADR-4's 6.3-hour
-  figure was about fsync, which group commit addresses within a process; it says
-  nothing about a per-command lock held across a full tree walk.
+  from them. G1.4's real shape is 80,000 operations over a tree that grows to
+  ~80,000 files. **Whether that fits any time budget was left unanswered here;
+  it has since been measured, and the answer is no** — see the section below.
+  ADR-4's 6.3-minute figure was about fsync, which group commit addresses within
+  a process; it says nothing about what a command costs before it ever reaches
+  the log.
+
+## Measured afterwards: G1.4 does not fit, and the lock is not why
+
+`scripts/probe_scaling.py` answers the question this ADR declined to.
+`bench/results/raw/adr6-scaling.json` is the run:
+
+```json
+{
+  "files": 10000,
+  "first_save_s": 0.23,
+  "incremental_save_s": 4.184,
+  "status_s": 13.121
+}
+```
+
+**The ratio carries the argument, not the absolute.** These are wall-clock
+timings on one shared machine and they move between runs: the attribution below
+records 11.524 s for the same `status` this run puts at 13.121 s, on the same
+machine and the same tree size. Both are committed, and the gap between them is
+the reason no absolute here is worth arguing about. What is stable is the shape,
+across every run and both arms: the first save of a ten-thousand-file tree is a
+fraction of a second, the **next** save — changing one file — is an order of
+magnitude more for a fraction of the work, and `status`, which saves nothing at
+all, is slower still.
+
+So the cost is not the tree walk, and it is not the repository lock either.
+
+**A checkpoint's identity is not its storage address.** `Checkpoint::body_id`
+hashes `(tree, message, parent, at_unix_ms)`; the blob is stored under the hash
+of the whole serialised struct. Nothing maps one to the other, so finding a
+checkpoint means reading and deserialising every chunk in the store until one
+matches. The source says so where it happens — "a checkpoint is
+content-addressed like everything else, but its own address is over its body
+rather than its serialised form, so the lookup is by scanning the addresses we
+know ... a checkpoint index is a later refinement."
+
+Timing each command separately puts it beyond doubt. `probe_scaling.py
+--attribute` does exactly that, and `bench/results/raw/adr6-attribution.json` is
+the run:
+
+```json
+{
+  "files": 10000,
+  "samples": 3,
+  "internals_oplog_s": 0.035,
+  "line_list_s": 0.036,
+  "log_forensic_s": 7.782,
+  "status_s": 11.524
+}
+```
+
+What is indexed is fast and what is scanned is not, with nothing in between.
+`internals oplog` and `line list` answer from redb and cost tens of milliseconds
+whatever the repository holds. `log --forensic` goes through `checkpoints()`,
+which reads every blob, and costs two hundred times as much. `status` calls
+`head_checkpoint` and `checkpoints()`, so it pays twice and is the slowest
+command in the product — while writing nothing and walking no tree.
+
+`save` pays it too, through `head_checkpoint`. A second cost, of a different
+shape, sits in `PackWriter::retain_unknown`: it asks `Store::contains` once per
+chunk offered, and `contains` binary-searches the index of every pack. It reads
+no payload and decompresses nothing, so it is not a scan of the same kind, and
+at the handful of saves this probe makes it is nothing. What it grows with is
+the number of packs — and a save writes a pack. At G1.4's 80,000 operations
+that is 80,000 index searches per chunk offered, which is why it is worth
+fixing even though it is not what dominates here.
+
+<!-- evidence: the `retain_unknown` paragraph is read from the source of Store::contains and PackWriter::retain_unknown, not measured; every number above it is quoted from bench/results/raw/adr6-attribution.json or bench/results/raw/adr6-scaling.json -->
+
+Both predate this ADR and both are acknowledged where they are written ("small
+and adequate for the current history sizes; a checkpoint index is a later
+refinement"). `bench/results/raw/adr6-scaling-baseline.json` is the same probe
+against a binary built from `main`, before the workspace slice, and the two arms
+track each other — so the finding cannot be mistaken for a regression from the
+lock.
+
+Extrapolating — and this part IS extrapolation, labelled as such in the artifact
+— a mean tree of 40,000 files puts an incremental save in the tens of seconds,
+which over 80,000 operations is hundreds of hours. The extrapolation is linear
+from measured points that are growing *worse* than linearly, so it is a floor
+rather than an estimate, and the precise figure is not worth arguing about: no
+plausible correction brings it near a budget anyone would accept.
+
+### It is not only G1.4
+
+The same two scans sit under three performance gates, whose targets are in
+`harness/gates.toml` and whose reference repo `scripts/corpus/build_reference_repo.py`
+describes as "a ~100k-file, ~2 GB-history reference repo":
+
+| Gate | Target | Measured at 10,000 files — a tenth of that repo |
+|---|---|---|
+| G1.5 `ltx status` p95 | < 100 ms | 13,121 ms |
+| G1.6 `ltx save` p95 | < 250 ms | 4,184 ms |
+| G1.7 `ltx log` p95 | < 100 ms | shares `checkpoints()` with `status` |
+
+**These are inferences from measurement, not gate results.** None of the three
+has been run — they need the reference repo, which is not built in this
+checkout — and the figures above are from the scaling probe, not from their
+harnesses. What the comparison establishes is the order of magnitude: at a tenth
+of the reference repo's size, `status` is already about 130× its target. No
+amount of measurement noise closes that.
+
+So the work below is not a tax paid for G1.4 alone. **G1.4, G1.5, G1.6 and G1.7
+are all waiting on the same two indexes**, which is worth knowing before
+deciding what to build next.
+
+### What is owed
+
+**G1.4 cannot be claimed until this is addressed**, and addressing it is its own
+slice with its own ADR. The shape is not open: the op-log already indexes
+checkpoint id → op-log sequence in its `SAVED` table, written in the same
+transaction as the `Save` that records it. One more column there — checkpoint id
+→ the chunk address its blob is stored at — turns every one of these scans into
+a lookup, at the cost of one key per checkpoint. That it is not decided here is
+deliberate; it is not a concurrency question.
 - **Readers are excluded too, and need not be.** `ltx log`, `status` and
   `change list` mutate nothing, and could hold a shared lock — but redb takes an
   exclusive lock on its own file regardless, so a shared lock here would buy
