@@ -436,11 +436,21 @@ fn run(cli: &Cli) -> Result<u8> {
                 || {
                     let mut out = format!("wrote {n} entries into {}", into.display());
                     for c in &report.collisions {
-                        out.push_str(&format!(
-                            "\n  not written: {} — this filesystem does not distinguish \
-                         it from {}",
-                            c.path, c.collided_with
-                        ));
+                        // A fold names the sibling it collided with; every
+                        // other reason — a redacted file, a name this platform
+                        // cannot spell, a mode it cannot record — carries its
+                        // own explanation and no sibling. Printing the fold
+                        // sentence for those said "does not distinguish it
+                        // from" and then nothing.
+                        if c.collided_with.is_empty() {
+                            out.push_str(&format!("\n  {}: {}", c.path, c.reason));
+                        } else {
+                            out.push_str(&format!(
+                                "\n  not written: {} — this filesystem does not distinguish \
+                             it from {}",
+                                c.path, c.collided_with
+                            ));
+                        }
                     }
                     out
                 },
