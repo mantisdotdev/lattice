@@ -142,6 +142,19 @@ pub struct Repo {
 /// killed from outside and recorded as a deadlock it is not.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How a handle found its repository, which decides which workspace it is.
+///
+/// Not a boolean, because the two carry different consequences when no record
+/// matches. Through the repository's own directory an unmatched root is
+/// ordinary — the repository may predate workspaces. Through a marker it is
+/// refused, because a marker with no record means a workspace that was moved or
+/// half-created, and writing to it would silently go nowhere.
+#[derive(Clone, Copy)]
+enum Reached {
+    Root,
+    Marker,
+}
+
 /// Where a new opaque id gets its 128 bits (ADR-17 §3).
 ///
 /// Changes were the first noun to need an identity that is neither content-
@@ -218,14 +231,9 @@ impl Repo {
         // `main` (ADR-16 §2). `Init` is not undoable, so `main` sits below the
         // undo floor.
         let workspace = change::mint(os_id_bits()?);
-        let root_bytes = platform::bytes_from_os_str(
-            fs::canonicalize(root)
-                .unwrap_or_else(|_| root.to_path_buf())
-                .as_os_str(),
-        );
         oplog.commit_initial(
             Operation::Init,
-            LineState::initial(&workspace, root_bytes),
+            LineState::initial(&workspace),
             FORMAT_VERSION,
         )?;
         // redb's create syncs `.lattice` itself, but the entry FOR `.lattice`
@@ -275,7 +283,7 @@ impl Repo {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
-        Self::open_at(root, &Self::repo_dir(root))
+        Self::open_at(root, &Self::repo_dir(root), Reached::Root)
     }
 
     /// Open the repository at `repository`, working in the tree at `root`.
@@ -286,10 +294,10 @@ impl Repo {
         if !repository.is_dir() {
             return Err(Error::NotARepository(repository.to_path_buf()));
         }
-        Self::open_at(root, repository)
+        Self::open_at(root, repository, Reached::Marker)
     }
 
-    fn open_at(root: &Path, dir: &Path) -> Result<Self> {
+    fn open_at(root: &Path, dir: &Path, reached: Reached) -> Result<Self> {
         let dir = dir.to_path_buf();
         if !dir.is_dir() {
             return Err(Error::NotARepository(root.to_path_buf()));
@@ -330,17 +338,23 @@ impl Repo {
             }
         }
         let oplog = OpLog::open(&meta)?;
-        migrate_line_state_to_v4(&oplog, root)?;
+        migrate_line_state_to_v4(&oplog)?;
         // Which workspace is this? Matched by canonical path, because that is
         // the only thing a command run in a directory knows about itself.
         let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let here = platform::bytes_from_os_str(here.as_os_str());
         let state = oplog.line_state()?;
         let known = state.as_ref().and_then(|state| {
+            let wanted: Option<Vec<u8>> = match reached {
+                // Whichever record claims no path of its own IS the
+                // repository's root, wherever that directory has moved to.
+                Reached::Root => None,
+                Reached::Marker => Some(here.clone()),
+            };
             state
                 .workspaces
                 .iter()
-                .find(|(_, record)| record.root == here)
+                .find(|(_, record)| record.root == wanted)
                 .map(|(id, _)| id.clone())
         });
         // A workspace the repository has no record of is REFUSED, not opened
@@ -354,12 +368,17 @@ impl Repo {
         // Reachable two ways: a crash between `workspace new` writing the
         // marker and committing the record, and a workspace directory that has
         // been moved. Both leave a marker with no matching record.
-        let workspace = match (known, state) {
-            (Some(id), _) => id,
+        let workspace = match (known, state, reached) {
+            (Some(id), _, _) => id,
             // No published state at all is a repository mid-init, not a
-            // workspace mismatch; the default line is the honest answer.
-            (None, None) => String::new(),
-            (None, Some(_)) => {
+            // mismatch; the default line is the honest answer.
+            (None, None, _) => String::new(),
+            // Reached through the repository's own directory with no record
+            // claiming to be its root: a repository written before workspaces
+            // existed, or one whose root record was removed. The default line
+            // is the honest answer here too, and nothing is silently written.
+            (None, Some(_), Reached::Root) => String::new(),
+            (None, Some(_), Reached::Marker) => {
                 return Err(Error::Invalid(format!(
                     "{} is marked as a workspace of {}, but that repository has \
                      no record of it — it may have been moved, or created by a \
@@ -577,7 +596,7 @@ impl Repo {
         if let Some(state) = self.oplog.line_state()? {
             return Ok(state);
         }
-        let mut state = LineState::initial(&self.workspace, Vec::new());
+        let mut state = LineState::initial(&self.workspace);
         if let Some(rec) = state.lines.get_mut(DEFAULT_LINE) {
             rec.tip = self.legacy_head_id()?;
         }
@@ -1273,7 +1292,7 @@ impl Repo {
         lines.workspaces.insert(
             id.clone(),
             crate::oplog::WorkspaceRecord {
-                root: platform::bytes_from_os_str(root.as_os_str()),
+                root: Some(platform::bytes_from_os_str(root.as_os_str())),
                 // A new workspace starts on the line that made it, holding the
                 // tip that was just materialised into it.
                 current: self.line_of(&lines),
@@ -1309,17 +1328,26 @@ impl Repo {
             .workspaces
             .iter()
             .map(|(id, record)| {
-                let root = platform::os_string_from_bytes(&record.root);
-                let present = root
-                    .as_ref()
-                    .map(|r| Path::new(r).is_dir())
-                    .unwrap_or(false);
+                // A record with no path of its own is the repository's root,
+                // which is wherever the repository is — so it is reported from
+                // the handle rather than from the record.
+                let (root, present) = match &record.root {
+                    None => (self.root.display().to_string(), self.root.is_dir()),
+                    Some(bytes) => match platform::os_string_from_bytes(bytes) {
+                        Some(name) => {
+                            let path = Path::new(&name).to_path_buf();
+                            (path.display().to_string(), path.is_dir())
+                        }
+                        // A path this platform cannot name is reported as it
+                        // was stored rather than approximated into something
+                        // that would look real.
+                        None => (String::from_utf8_lossy(bytes).into_owned(), false),
+                    },
+                };
                 WorkspaceView {
                     short: change::abbreviate(id, &ids),
                     id: id.clone(),
-                    root: root
-                        .map(|r| Path::new(&r).display().to_string())
-                        .unwrap_or_else(|| String::from_utf8_lossy(&record.root).into_owned()),
+                    root,
                     present,
                 }
             })
@@ -2725,7 +2753,7 @@ pub struct ChangeView {
 /// goes wrong is unrecoverable in a way a refusal never is. One extra key buys
 /// back the difference between "restore it" and "it is gone", which is not a
 /// trade worth thinking about twice.
-fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
+fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
     if oplog.format_version()? != Some(3) {
         return Ok(());
     }
@@ -2735,17 +2763,32 @@ fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
         return Ok(());
     };
 
-    // A document with no `current` is already migrated. That cannot arise from
-    // an interrupted migration any more — the publish and the version bump are
-    // one transaction — but it is cheap to survive, and the failure it guards
-    // against is a repository that will not open at all, reporting a serde
-    // error whose recovery text says this is probably a bug in Lattice. The
-    // order matters: a v3 document also satisfies the v4 shape, since serde
-    // ignores the fields v4 dropped, so v3 is tried first and its REQUIRED
-    // `current` is what tells the two apart.
-    let Ok(old) = serde_json::from_slice::<crate::oplog::LineStateV3>(&raw) else {
-        oplog.set_format_version(FORMAT_VERSION)?;
-        return Ok(());
+    // Three cases, and they must be told apart. The order matters: a format-3
+    // document also satisfies the format-4 shape, because serde ignores the
+    // fields 4 dropped — so 3 is tried first, and its REQUIRED `current` is
+    // what distinguishes them.
+    let old = match serde_json::from_slice::<crate::oplog::LineStateV3>(&raw) {
+        Ok(old) => old,
+        Err(not_v3) => {
+            if serde_json::from_slice::<LineState>(&raw).is_ok() {
+                // Already migrated. Cannot arise from an interrupted migration
+                // any more — the publish and the version bump are one
+                // transaction — but cheap to survive if it arrives by another
+                // route, and the alternative is a repository that will not open.
+                oplog.set_format_version(FORMAT_VERSION)?;
+                return Ok(());
+            }
+            // Readable as neither: this is damage, not a migration that has
+            // already happened. Treating it as the latter would advance the
+            // version, which makes the migration return early forever — so the
+            // copy that `keep_superseded_line_state` would have written is
+            // never written, and the damaged document stays authoritative with
+            // no way back. The version stays at 3 so both remain available.
+            return Err(Error::Corrupt(format!(
+                "the line state reads as neither format 3 nor format \
+                 {FORMAT_VERSION}: {not_v3}"
+            )));
+        }
     };
 
     // The whole of the old state, verbatim, before anything is rewritten.
@@ -2773,11 +2816,11 @@ fn migrate_line_state_to_v4(oplog: &OpLog, root: &Path) -> Result<()> {
     workspaces.insert(
         workspace,
         crate::oplog::WorkspaceRecord {
-            root: platform::bytes_from_os_str(
-                fs::canonicalize(root)
-                    .unwrap_or_else(|_| root.to_path_buf())
-                    .as_os_str(),
-            ),
+            // The repository's own root, which is where every format-3
+            // repository did all its work since workspaces did not exist. It
+            // records no path, because the repository's root is wherever the
+            // repository is.
+            root: None,
             current: old.current,
             preserved,
         },
@@ -4196,6 +4239,37 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_whose_directory_was_renamed_still_opens() {
+        // Renaming a project folder is ordinary, and it broke: the root
+        // workspace recorded an absolute path, so after a move nothing matched
+        // and the repository was refused as "marked as a workspace ... but that
+        // repository has no record of it" — an error which even named the cause
+        // while declining to handle it.
+        //
+        // The repository's root records no path now, because its location is
+        // the repository's location.
+        let holder = tempfile::tempdir().unwrap();
+        let before = holder.path().join("before");
+        fs::create_dir(&before).unwrap();
+        fs::write(before.join("a.txt"), b"a").unwrap();
+        {
+            let mut repo = Repo::init(&before).unwrap();
+            repo.save("seed", None).unwrap();
+            repo.start_line("feature").unwrap();
+        }
+        let after = holder.path().join("after");
+        fs::rename(&before, &after).unwrap();
+
+        let repo = Repo::open(&after).expect("a renamed repository still opens");
+
+        assert_eq!(
+            repo.current_line().unwrap(),
+            "feature",
+            "and remembers which line it was on, rather than resetting"
+        );
+    }
+
+    #[test]
     fn a_marker_the_repository_has_no_record_of_is_refused() {
         // Reachable two ways: a crash between `workspace new` writing the
         // marker and committing the record, and a workspace directory that has
@@ -4599,6 +4673,43 @@ mod tests {
             repo.oplog().superseded_line_state().unwrap().is_some(),
             "and the document it replaced is still there to restore from — a \
              rewrite that goes wrong is unrecoverable in a way a refusal is not"
+        );
+    }
+
+    #[test]
+    fn a_line_state_readable_as_neither_format_is_damage_not_a_finished_migration() {
+        // The two cases share a branch if the migration only asks "did the
+        // format-3 reader fail?". Treating damage as an already-finished
+        // migration advances the version, which makes the migration return
+        // early on every later open — so the copy it would have kept is never
+        // written, and the damaged document stays authoritative with no way
+        // back. The version must stay at 3.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut repo = Repo::init(dir.path()).unwrap();
+            fs::write(dir.path().join("a.txt"), b"a").unwrap();
+            repo.save("seed", None).unwrap();
+        }
+        {
+            let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+            log.publish_raw_line_state(b"{\"lines\": not json at all")
+                .unwrap();
+            log.set_format_version(3).unwrap();
+        }
+
+        let err = Repo::open(dir.path()).map(|_| ()).unwrap_err();
+
+        assert_eq!(
+            err.category(),
+            crate::error::Category::Corrupt,
+            "damage is reported as damage: {err}"
+        );
+        let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
+        assert_eq!(
+            log.format_version().unwrap(),
+            Some(3),
+            "and the version stays put, so the migration — and the copy it \
+             keeps — are still available"
         );
     }
 

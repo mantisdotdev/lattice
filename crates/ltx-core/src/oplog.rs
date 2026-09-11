@@ -152,12 +152,21 @@ pub struct LineRecord {
 /// workspaces and none differ only in how many rows this table has.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceRecord {
-    /// Where this workspace's working tree is, absolute, as raw bytes.
+    /// Where this workspace's working tree is, absolute, as raw bytes —
+    /// or `None` for the repository's OWN root.
+    ///
+    /// `None` rather than a recorded path, because the repository's root is
+    /// wherever the repository is: storing it would make renaming the
+    /// repository's directory break every record of where its own working tree
+    /// was, and repointing that on open is machinery for a fact that did not
+    /// need storing. Every OTHER workspace is somewhere else by definition, and
+    /// says where.
     ///
     /// Bytes rather than a `String`, following the doctrine tree entry names
     /// follow: a path need not be valid UTF-8, and a workspace whose directory
     /// this engine could not name would be one it could not find again.
-    pub root: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<Vec<u8>>,
     /// The line this workspace is on.
     ///
     /// Per workspace rather than per repository (ADR-7 §3). One `current`
@@ -204,14 +213,15 @@ impl LineState {
     /// The state a fresh repository starts in: one line, and one workspace —
     /// the repository's own root, which is a workspace and not a special case
     /// (ADR-7 §1).
-    pub fn initial(workspace: &str, root: Vec<u8>) -> Self {
+    pub fn initial(workspace: &str) -> Self {
         let mut lines = std::collections::BTreeMap::new();
         lines.insert(DEFAULT_LINE.to_string(), LineRecord::default());
         let mut workspaces = std::collections::BTreeMap::new();
         workspaces.insert(
             workspace.to_string(),
             WorkspaceRecord {
-                root,
+                // The repository's own root: tracked, not stored.
+                root: None,
                 current: DEFAULT_LINE.to_string(),
                 preserved: std::collections::BTreeMap::new(),
             },

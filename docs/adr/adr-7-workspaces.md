@@ -2,7 +2,7 @@
 
 **Status:** Accepted · **Builds on:** ADR-6 (concurrent access) · **Amends:** ADR-16 (§7, what the line state holds)
 **Answers:** ADR-16 open conflict 2 and ADR-17 open conflict 2, both of which deferred undo-under-concurrency to here
-**Gates:** G1.4 (concurrency, HARD), G1.2 (byte fidelity, HARD — **currently passing**), G1.3 (universal undo, HARD)
+**Gates:** G1.4 (concurrency, HARD), G1.2 (byte fidelity, HARD — **passing as last recorded, UNVERIFIED for this change**), G1.3 (universal undo, HARD)
 
 ## Context
 
@@ -22,8 +22,8 @@ argument could:
   fails, and then verifies the adversarial corpus at `<dest>` byte for byte —
   NFC/NFD pairs, invalid UTF-8, the executable bit, symlinks.
 
-That second one is the sharpest constraint in this document, because **G1.2
-passes today** — `bench/results/iteration-9.json` records it:
+That second one is the sharpest constraint in this document. The last recorded
+run of G1.2, in `bench/results/iteration-9.json`, passed:
 
 ```json
 {
@@ -34,15 +34,21 @@ passes today** — `bench/results/iteration-9.json` records it:
 }
 ```
 
-It passes by falling through to the fallback, because `workspace new` did not
-exist. The moment it starts succeeding, G1.2 measures it instead — so a
-workspace that does not materialise the tip tree exactly does not merely fail
-its own gate, it turns a passing HARD gate red.
+**That result does not validate what this ADR ships, and must not be read as
+doing so.** It was produced when `workspace new` did not exist, so the harness
+fell through to `checkout --into` — it measured the fallback, not the path the
+CLI now takes. The moment `workspace new` succeeds, G1.2 measures it instead. So
+a workspace that does not materialise the tip tree exactly does not merely fail
+its own gate; it turns a gate that was passing red, and the recorded PASS would
+be the last honest thing said about it.
 
-That gate cannot be re-run here: its corpus (`corpus/data/adversarial`) is not
-in this checkout, which is why the check below is its *comparison* applied to a
-small stand-in rather than the gate itself. Running the gate is owed before
-G1.2 is claimed again.
+**G1.2 is therefore UNVERIFIED for this change**, and re-running it is owed
+before the gate is claimed again. It cannot be run in this checkout: its corpus
+(`corpus/data/adversarial`) is deliberately not committed. What could be run is
+its *comparison* — `collect_entries` and the path-set diff, imported from the
+frozen harness — over a small stand-in with symlinks and an executable bit, and
+over both marker shapes below. That is evidence about the mechanism, not a gate
+result, and the distinction is the whole reason this paragraph exists.
 
 ADR-6 already settled that concurrent commands queue rather than race, so this
 ADR does not have to answer whether eight working trees can address one
