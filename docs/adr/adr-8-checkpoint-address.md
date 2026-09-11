@@ -1,7 +1,7 @@
 # ADR-8 — A checkpoint's address is its identity
 
-**Status:** Accepted · **Answers:** ADR-6's measured finding · **Amends:** ADR-3 (§ what a checkpoint blob holds)
-**Gates:** G1.4 (concurrency, HARD), G1.5/G1.6/G1.7 (latency) — **all four blocked by the defect below, none claimed by this ADR**
+**Status:** Accepted · **Answers:** ADR-6's measured finding · **Amends:** ADR-3 (Decision, "Metadata: redb")
+**Gates:** G1.4 (concurrency, HARD), G1.5/G1.6/G1.7 (latency) — all four were blocked by the defect below and this unblocks them; **none of the four is claimed here, and none has been run**
 
 ## Context
 
@@ -21,10 +21,11 @@ The largest row of `bench/results/raw/adr6-scaling.json`:
 ```
 
 Saving ten thousand files for the first time costs 0.23 s. Saving again, having
-changed exactly one of them, costs eighteen times that. `status`, which saves
-nothing at all, costs fifty-seven times it. Whatever dominates is therefore not
-the tree walk, not hashing, and not the repository lock — it is on the *read*
-path, and it grows with the size of the store rather than the size of the work.
+changed exactly one of them, costs eighteen times that. `status` costs
+fifty-seven times it — and `status` writes nothing, walks no tree and does not
+so much as look at the working files. Whatever dominates is therefore not the
+tree walk, not hashing, and not the repository lock. It is on the *read* path,
+and it grows with the size of the store rather than the size of the work.
 
 It is this, in `Repo::checkpoint`:
 
@@ -43,6 +44,27 @@ The structure is a *deliberate* one, and the reason it exists is sound: folding
 sequence is known, and trusting a blob's own `id` field would let any file whose
 bytes deserialise as a checkpoint impersonate one. Both stay true here. What is
 wrong is only that the two hashes were allowed to differ.
+
+### The divergence this actually is
+
+Calling it "a later refinement was owed" would be too kind, and the source note
+quoted above says it in those terms. ADR-3 decided where checkpoints live, and
+it did not put them here:
+
+> **Metadata: redb.** The op-log, references, checkpoint graph, changesets, lens
+> definitions and the provenance index live in a single embedded transactional
+> store.
+
+Its consequences even name the shape that follows: "a checkpoint in redb may
+reference chunks in a pack." A checkpoint row keyed by id in a transactional
+store is a direct lookup and always was. The implementation instead made the
+checkpoint a chunk — and once it was a chunk whose address was not its id, a
+scan was the only way left to find it.
+
+So the seconds this document measures are the cost of a divergence from an
+accepted decision, not of a refinement postponed. Recording that is the point of
+having ADRs at all, and §2 has to answer for it: it ratifies the divergence
+rather than reverting it, and owes a reason.
 
 ## Decision
 
@@ -63,22 +85,38 @@ same bytes. `Operation::Save { checkpoint }`, every line's `tip`, and every
 entry hash in the Merkle chain are untouched. This ADR moves bytes in the store
 and nothing else.
 
-### 2. An index was the other option, and it loses
+### 2. Keeping checkpoints in packs, against ADR-3, and why
 
-The obvious fix is a second redb table beside `SAVED`: checkpoint id → chunk
-address, written in the same transaction as the `Save`, so the two can never
-disagree. It is smaller to write and it needs no migration for new saves.
+Two other fixes were available and both are rejected here.
 
-It loses because it *adds* a thing to keep true. The blob would still carry an
-`id` field that has to be checked against what it hashes to, `is_authentic`
-would still exist, and the index would be a third place recording a fact the
-other two already imply. §1 instead deletes both: the blob carries no `id` —
-its address is where it lives — and `Store::read` already re-hashes every chunk
-it returns and refuses a mismatch. Authenticity stops being a check a caller
-must remember to make and becomes a property of having read the thing at all.
+**Put checkpoints in redb, as ADR-3 said.** This is the strongest of the three
+on atomicity: a checkpoint row and the `Save` entry that references it would
+land in one transaction, and the ordering invariant between the two stores would
+have one less thing to carry. It is rejected for one forward-looking reason and
+one present one. Partial clone (§5.6, G5.8) transfers packs, and a checkpoint
+that is a chunk rides along in the transfer unit the design already has, where a
+redb row would need a mechanism of its own — that argument is about a feature
+nothing implements yet, and is marked as such. The present reason is that every
+checkpoint in every existing repository is already a chunk, so this is the only
+one of the three that is a data move rather than an addressing change, and it is
+the one whose failure mode is losing content rather than losing speed.
 
-A blob that lies about what it is cannot be written, rather than being written
-and then caught.
+**Add a second redb table beside `SAVED`**, mapping checkpoint id → chunk
+address, written in the same transaction as the `Save`. Smaller to write, and no
+migration for new saves. It loses because it *adds* a thing to keep true: the
+blob would still carry an `id` field to be checked against what it hashes to,
+`is_authentic` would still exist, and the index would be a third place recording
+a fact the other two already imply.
+
+§1 instead deletes both. The blob carries no `id` — its address is where it
+lives — and `Store::read` already re-hashes every chunk it returns and refuses a
+mismatch. Authenticity stops being a check a caller must remember to make and
+becomes a property of having read the thing at all. A blob that lies about what
+it is cannot be written, rather than being written and then caught.
+
+The honest summary is that ADR-3's answer was better on atomicity and this one
+is better on everything else, and that the deciding argument is that it is
+reachable from where the repositories actually are.
 
 ### 3. Format 4 → 5, and it is a migration of content, not of entries
 
@@ -224,6 +262,9 @@ G1.4's obstacle is now a different one.
   in-memory struct keeps both, so no caller changes.
 - **`is_authentic` is deleted.** The check it performed is now done by
   `Store::read` for every chunk in the repository, not just for checkpoints.
+  The one place it survives is the migration, which reads pre-format-5 blobs
+  that still carry a declared `id` — and must not hand a forgery the address the
+  real checkpoint needs.
 - **G1.4, G1.5, G1.6 and G1.7 are unblocked, and none of them is claimed.**
   ADR-6 named all four as sharing this scan, and the section above shows it
   gone. That is not a gate result: each of those gates measures a reference
@@ -235,6 +276,11 @@ G1.4's obstacle is now a different one.
   different fix and it is not in this slice.
 - **The store gains no new index.** This is the point: the fastest lookup is the
   one whose data structure already existed.
+- **ADR-3's Decision is amended, not quietly outgrown.** Checkpoints are content
+  in packs, not rows in the metadata store. Its consequence — "a checkpoint in
+  redb may reference chunks in a pack" — becomes "an op-log entry in redb
+  references a checkpoint in a pack", which is the same ordering rule pointed at
+  a different pair and needs no change to the invariant G1.1 attacks.
 
 ## Open conflicts recorded, not resolved
 
