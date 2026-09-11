@@ -110,10 +110,17 @@ impl PackWriter {
     /// written is a separate failure surfaced by `verify` and recovered by
     /// refetch, not something a write-time check can prevent without paying
     /// that cost on every save.
-    pub fn retain_unknown(&mut self, store: &Store) {
-        self.pending.retain(|(id, _)| !store.contains(*id));
+    pub fn retain_unknown(&mut self, store: &Store) -> Result<()> {
+        let mut kept = Vec::with_capacity(self.pending.len());
+        for (id, payload) in std::mem::take(&mut self.pending) {
+            if !store.contains(id)? {
+                kept.push((id, payload));
+            }
+        }
+        self.pending = kept;
         self.seen = self.pending.iter().map(|(id, _)| (*id, ())).collect();
         self.bytes = self.pending.iter().map(|(_, p)| p.len()).sum();
+        Ok(())
     }
 
     pub fn chunk_count(&self) -> usize {
@@ -453,9 +460,21 @@ impl Pack {
 }
 
 /// The full chunk store: every pack in a directory.
+///
+/// Opening lists the directory and nothing more. The packs themselves — every
+/// index, read whole — are opened the first time a chunk is looked up, because
+/// most commands never look one up: status, log, assign, split, a lens change,
+/// a dry-run sync, compaction and the undo of a save all finish without
+/// touching content. Reading every index on every command cost the size of
+/// history each time — 24 ms of a 59 ms `workspace list` at 781 packs, and at
+/// the thousands of packs a long history holds, most of every command.
 pub struct Store {
     dir: PathBuf,
-    packs: Vec<(u64, Pack)>,
+    /// Every pack that has an index, ascending: what `open` reads.
+    ids: Vec<u64>,
+    /// The packs, once something needed them. A `OnceLock` so that a lookup
+    /// through `&self` can be the thing that opens them.
+    packs: std::sync::OnceLock<Vec<(u64, Pack)>>,
 }
 
 impl Store {
@@ -479,9 +498,21 @@ impl Store {
             }
         }
         ids.sort_unstable();
-        let mut packs = Vec::with_capacity(ids.len());
-        for id in ids {
-            match Pack::open(dir, id) {
+        Ok(Store {
+            dir: dir.to_path_buf(),
+            ids,
+            packs: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The packs, opened on first use.
+    fn packs(&self) -> Result<&[(u64, Pack)]> {
+        if let Some(packs) = self.packs.get() {
+            return Ok(packs);
+        }
+        let mut packs = Vec::with_capacity(self.ids.len());
+        for &id in &self.ids {
+            match Pack::open(&self.dir, id) {
                 Ok(pack) => packs.push((id, pack)),
                 // An index that will not parse is the residue of a crash during
                 // its creation: the pack+index+dir-sync sequence is the atomic
@@ -489,19 +520,18 @@ impl Store {
                 // completed. Treat it like a missing index and skip the pack,
                 // rather than letting one torn file make the whole repository
                 // unopenable. Bit-rot on a previously-good index is a different
-                // failure that `verify` surfaces; `open` must stay available.
+                // failure that `verify` surfaces; the store must stay usable.
                 Err(Error::Corrupt(_)) => continue,
                 Err(e) => return Err(e),
             }
         }
-        Ok(Store {
-            dir: dir.to_path_buf(),
-            packs,
-        })
+        // Another thread may have opened them meanwhile; both read the same
+        // files, so either answer serves.
+        Ok(self.packs.get_or_init(|| packs))
     }
 
     pub fn next_pack_id(&self) -> u64 {
-        self.packs.last().map(|(id, _)| id + 1).unwrap_or(0)
+        self.ids.last().map(|id| id + 1).unwrap_or(0)
     }
 
     pub fn read(&self, id: ChunkId) -> Result<Option<Vec<u8>>> {
@@ -512,7 +542,7 @@ impl Store {
         // older one, so a pack-level error is remembered and the search
         // continues; the error surfaces only if no pack yields an intact copy.
         let mut last_err: Option<Error> = None;
-        for (_, pack) in self.packs.iter().rev() {
+        for (_, pack) in self.packs()?.iter().rev() {
             match pack.read(id) {
                 Ok(Some(bytes)) => return Ok(Some(bytes)),
                 Ok(None) => {}
@@ -525,8 +555,8 @@ impl Store {
         }
     }
 
-    pub fn contains(&self, id: ChunkId) -> bool {
-        self.packs.iter().any(|(_, p)| p.locate(id).is_some())
+    pub fn contains(&self, id: ChunkId) -> Result<bool> {
+        Ok(self.packs()?.iter().any(|(_, p)| p.locate(id).is_some()))
     }
 
     pub fn write_pack(&mut self, writer: PackWriter) -> Result<usize> {
@@ -536,25 +566,31 @@ impl Store {
         let id = self.next_pack_id();
         let count = writer.chunk_count();
         writer.finish(&self.dir, id)?;
-        self.packs.push((id, Pack::open(&self.dir, id)?));
+        self.ids.push(id);
+        // Joins the opened packs only if they are open: writing one is not a
+        // reason to read every other.
+        if let Some(packs) = self.packs.get_mut() {
+            packs.push((id, Pack::open(&self.dir, id)?));
+        }
         Ok(count)
     }
 
-    pub fn chunk_count(&self) -> usize {
-        self.packs.iter().map(|(_, p)| p.len()).sum()
+    pub fn chunk_count(&self) -> Result<usize> {
+        Ok(self.packs()?.iter().map(|(_, p)| p.len()).sum())
     }
 
-    pub fn pack_count(&self) -> usize {
-        self.packs.len()
+    pub fn pack_count(&self) -> Result<usize> {
+        Ok(self.packs()?.len())
     }
 
     /// Every pack, with the chunks it holds. The unit `thin` reasons about:
     /// a pack is removed whole or not at all.
-    pub fn packs_with_chunks(&self) -> Vec<(u64, Vec<ChunkId>)> {
-        self.packs
+    pub fn packs_with_chunks(&self) -> Result<Vec<(u64, Vec<ChunkId>)>> {
+        Ok(self
+            .packs()?
             .iter()
             .map(|(id, pack)| (*id, pack.chunk_ids()))
-            .collect()
+            .collect())
     }
 
     /// Remove one pack and its index, durably.
@@ -565,10 +601,13 @@ impl Store {
     /// that reads as intact. The reverse order would leave an index pointing
     /// at bytes that are gone.
     pub fn remove_pack(&mut self, id: u64) -> Result<()> {
-        let Some(position) = self.packs.iter().position(|(pid, _)| *pid == id) else {
+        let Some(position) = self.ids.iter().position(|pid| *pid == id) else {
             return Err(Error::NotFound(format!("pack {id} is not in this store")));
         };
-        self.packs.remove(position);
+        self.ids.remove(position);
+        if let Some(packs) = self.packs.get_mut() {
+            packs.retain(|(pid, _)| *pid != id);
+        }
         fs::remove_file(self.dir.join(format!("{id:012}.idx")))?;
         fs::remove_file(self.dir.join(format!("{id:012}.pack")))?;
         crate::platform::sync_dir(&self.dir)?;
@@ -593,10 +632,12 @@ impl Store {
         id: u64,
         doomed: &std::collections::HashSet<ChunkId>,
     ) -> Result<usize> {
-        let Some(position) = self.packs.iter().position(|(pid, _)| *pid == id) else {
-            return Err(Error::NotFound(format!("pack {id} is not in this store")));
+        let chunks = {
+            let Some((_, pack)) = self.packs()?.iter().find(|(pid, _)| *pid == id) else {
+                return Err(Error::NotFound(format!("pack {id} is not in this store")));
+            };
+            pack.chunk_ids()
         };
-        let chunks = self.packs[position].1.chunk_ids();
         let mut kept = PackWriter::new();
         let mut dropped = 0usize;
         for chunk in chunks {
@@ -607,7 +648,15 @@ impl Store {
             // Read through the pack itself, not the store: the store would
             // happily answer from a duplicate elsewhere, and this pack's own
             // copy is what must be carried over.
-            let Some(bytes) = self.packs[position].1.read(chunk)? else {
+            let bytes = {
+                let (_, pack) = self
+                    .packs()?
+                    .iter()
+                    .find(|(pid, _)| *pid == id)
+                    .expect("found above and nothing removed it since");
+                pack.read(chunk)?
+            };
+            let Some(bytes) = bytes else {
                 return Err(Error::Corrupt(format!(
                     "pack {id} indexes {chunk:?} but cannot read it"
                 )));
@@ -621,11 +670,15 @@ impl Store {
         Ok(dropped)
     }
 
-    pub fn all_chunk_ids(&self) -> Vec<ChunkId> {
-        let mut out: Vec<ChunkId> = self.packs.iter().flat_map(|(_, p)| p.chunk_ids()).collect();
+    pub fn all_chunk_ids(&self) -> Result<Vec<ChunkId>> {
+        let mut out: Vec<ChunkId> = self
+            .packs()?
+            .iter()
+            .flat_map(|(_, p)| p.chunk_ids())
+            .collect();
         out.sort_unstable();
         out.dedup();
-        out
+        Ok(out)
     }
 
     pub fn dir(&self) -> &Path {
@@ -700,6 +753,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_written_before_the_store_has_opened_its_packs_is_still_readable() {
+        // Opening reads no pack; a write must not change that, and the first
+        // lookup afterwards has to see what was written as well as what was
+        // already there.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut first = PackWriter::new();
+        first.add(ChunkId::of(b"old"), b"old");
+        store.write_pack(first).unwrap();
+
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut second = PackWriter::new();
+        second.add(ChunkId::of(b"new"), b"new");
+        store.write_pack(second).unwrap();
+
+        assert_eq!(
+            store.read(ChunkId::of(b"old")).unwrap(),
+            Some(b"old".to_vec())
+        );
+        assert_eq!(
+            store.read(ChunkId::of(b"new")).unwrap(),
+            Some(b"new".to_vec())
+        );
+        assert!(store.contains(ChunkId::of(b"new")).unwrap());
+        assert_eq!(store.pack_count().unwrap(), 2);
+        assert_eq!(store.chunk_count().unwrap(), 2);
+    }
+
+    #[test]
     fn a_pack_without_its_index_is_ignored_on_open() {
         // The exact residue a crash between the two fsyncs leaves behind.
         let dir = tempfile::tempdir().unwrap();
@@ -712,7 +794,7 @@ mod tests {
         fs::remove_file(dir.path().join("000000000000.idx")).unwrap();
         let recovered = Store::open(dir.path()).unwrap();
         assert_eq!(
-            recovered.pack_count(),
+            recovered.pack_count().unwrap(),
             0,
             "an unindexed pack must not be loaded"
         );
@@ -736,7 +818,7 @@ mod tests {
 
         // The store still opens; the torn pack is skipped, not bricked.
         let store = Store::open(dir.path()).unwrap();
-        assert_eq!(store.pack_count(), 0);
+        assert_eq!(store.pack_count().unwrap(), 0);
         assert_eq!(store.read(id).unwrap(), None);
     }
 
@@ -757,7 +839,7 @@ mod tests {
 
         assert!(Pack::open(dir.path(), 0).is_err());
         let store = Store::open(dir.path()).unwrap();
-        assert_eq!(store.pack_count(), 0);
+        assert_eq!(store.pack_count().unwrap(), 0);
     }
 
     #[test]

@@ -123,6 +123,43 @@ about performance:
    > fsync-bound at a hundred thousand fresh repositories and needs the
    > machine to itself.
 
+   > **Corrected a third time, 2026-09-12, from the full run.** With the
+   > empty change records closed (ADR-17) the run held 1,037 operations a
+   > minute at entry 4,000 and 299 at entry 16,000, still falling. Timing every
+   > pool command on a clone of the run at entry 16,609 (2,014 packs) found two
+   > terms that grow with history: every command paid ~115 ms before doing
+   > anything, because opening the store read every pack index; and
+   > `internals thin` cost 970 ms, because its "bounded" walk starts at the
+   > oldest unanchored candidate, and a pack a switch captured whose file a
+   > later save reused is unanchored but reached — so it stays the oldest
+   > candidate forever and every thinning walks all of history from it.
+   > `bench/results/raw/adr9-g1-4-thin-and-open.json`, the two binaries run
+   > alternately on the same clone:
+   >
+   > ```json
+   > {
+   >   "thin_before_ms": 1227,
+   >   "thin_after_ms": 177,
+   >   "switch_before_ms": 277,
+   >   "switch_after_ms": 88,
+   >   "workspace_list_before_ms": 129,
+   >   "workspace_list_after_ms": 50
+   > }
+   > ```
+   >
+   > Two changes, neither a format change. The thin ledger records the
+   > candidates a thinning walked for and found live; a saved checkpoint is
+   > never unsaved, so they are left out of every later thinning's candidates
+   > and the walk's starting point moves forward (a pack recorded live is never
+   > reconsidered, so the worst case is a leak, never a loss). And the store
+   > opens its packs on first use rather than on every command: the commands
+   > that never look up a chunk — assign, split, lens, sync, compact, the undo
+   > of a save — no longer pay for the ones that do. What remains and still
+   > grows is the cost of the commands that must read content, which reaches
+   > every pack index; that is the pack count, and bounding it (merging packs)
+   > is blocked on the same ordering thin leans on, recorded above for
+   > `rewrite_pack_without`.
+
 ## Consequences
 
 - **G1.1 cannot pass under its frozen harness even with every verb built.**

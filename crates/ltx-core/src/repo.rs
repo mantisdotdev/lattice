@@ -568,7 +568,7 @@ impl Repo {
         // and unchanged subtrees are already durable in earlier packs; a save
         // that re-stored them would re-persist the whole working tree on every
         // one-byte edit.
-        packer.retain_unknown(&self.store);
+        packer.retain_unknown(&self.store)?;
         self.store.write_pack(packer)?;
 
         let record = lines.lines.entry(current.clone()).or_default();
@@ -2074,7 +2074,7 @@ impl Repo {
     fn capture_working_tree(&mut self) -> Result<String> {
         let mut packer = PackWriter::new();
         let tree = self.snapshot_dir(&self.root.clone(), &mut packer)?;
-        packer.retain_unknown(&self.store);
+        packer.retain_unknown(&self.store)?;
         self.store.write_pack(packer)?;
         Ok(tree)
     }
@@ -2466,7 +2466,7 @@ impl Repo {
         )?;
 
         let mut destroyed = 0usize;
-        for (pack, chunks) in self.store.packs_with_chunks() {
+        for (pack, chunks) in self.store.packs_with_chunks()? {
             if chunks.iter().any(|c| doomed.contains(c)) {
                 destroyed += self.store.rewrite_pack_without(pack, &doomed)?;
             }
@@ -2528,6 +2528,27 @@ impl Repo {
 
     /// Every chunk a redaction has destroyed, from the ledger. Empty when
     /// nothing has ever been redacted.
+    /// Packs an earlier thinning found still referenced, from the thin
+    /// ledger; empty when nothing has been thinned.
+    fn packs_found_live(&self) -> Result<std::collections::HashSet<u64>> {
+        let path = self.repository.join(THIN_DIR).join(THIN_LEDGER_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = std::collections::HashSet::new();
+        for line in text.lines() {
+            // A torn last line is a record that was never completed; a pack
+            // it would have named is simply walked for again.
+            let Ok(record) = serde_json::from_str::<ThinRecord>(line) else {
+                continue;
+            };
+            out.extend(record.live);
+        }
+        Ok(out)
+    }
+
     fn redacted_chunks(&self) -> Result<std::collections::HashSet<ChunkId>> {
         let path = self
             .repository
@@ -2902,16 +2923,26 @@ impl Repo {
         // case it leaves no candidate at all, so the walk over history below
         // never runs.
         let anchored = self.anchored_chunks()?;
+        // A pack an earlier thinning found live is not a candidate again: its
+        // chunks are reached from a saved checkpoint, and saved checkpoints
+        // are never unsaved. Without this the oldest candidate stays the
+        // oldest live-but-unanchored pack forever and every thinning walks
+        // all of history from there — the G1.4 rerun measured 970 ms per
+        // `internals thin` at op-log entry 16,600, growing with the log.
+        let found_live = self.packs_found_live()?;
         let candidates: Vec<(u64, Vec<ChunkId>)> = self
             .store
-            .packs_with_chunks()
+            .packs_with_chunks()?
             .into_iter()
-            .filter(|(_, chunks)| {
-                !chunks.is_empty() && !chunks.iter().any(|c| anchored.contains(c))
+            .filter(|(pack, chunks)| {
+                !found_live.contains(pack)
+                    && !chunks.is_empty()
+                    && !chunks.iter().any(|c| anchored.contains(c))
             })
             .collect();
         let mut removed: Vec<u64> = Vec::new();
         let mut collected: Vec<String> = Vec::new();
+        let mut still_live: Vec<u64> = Vec::new();
         // Redaction rewrites packs under fresh ids, which breaks the ordering
         // the bound below leans on. A store that has ever redacted walks all
         // of history; redaction is rare and thin's patience is cheap.
@@ -2930,6 +2961,7 @@ impl Repo {
             let live = self.reachable_chunks_from(oldest)?;
             for (pack, chunks) in candidates {
                 if chunks.iter().any(|c| live.contains(c)) {
+                    still_live.push(pack);
                     continue;
                 }
                 collected.extend(chunks.iter().map(|c| c.to_hex()));
@@ -2943,6 +2975,7 @@ impl Repo {
             at_unix_ms: unix_ms_now(),
             packs: removed.clone(),
             collected: collected.clone(),
+            live: still_live,
         };
         let mut line = serde_json::to_vec(&record)?;
         line.push(b'\n');
@@ -3007,7 +3040,7 @@ impl Repo {
             .filter_map(|(id, _)| ChunkId::from_hex(&id).map(|c| (c, id)))
             .collect();
         let mut recent: Vec<String> = Vec::new();
-        for (pack, chunks) in self.store.packs_with_chunks() {
+        for (pack, chunks) in self.store.packs_with_chunks()? {
             if pack < from_pack {
                 continue;
             }
@@ -3612,9 +3645,10 @@ impl Repo {
                 ));
             }
             for (line, working) in &space.preserved {
-                let present = ChunkId::from_hex(working)
-                    .map(|id| self.store.contains(id))
-                    .unwrap_or(false);
+                let present = match ChunkId::from_hex(working) {
+                    Some(id) => self.store.contains(id)?,
+                    None => false,
+                };
                 if !present {
                     report.structure_verified = false;
                     report.errors.push(format!(
@@ -3716,8 +3750,8 @@ impl Repo {
             head_change,
             checkpoints: self.checkpoints()?.len() as u64,
             operations: self.oplog.len()?,
-            chunks: self.store.chunk_count() as u64,
-            packs: self.store.pack_count() as u64,
+            chunks: self.store.chunk_count()? as u64,
+            packs: self.store.pack_count()? as u64,
         })
     }
 }
@@ -4000,7 +4034,7 @@ fn migrate_checkpoint_blobs_to_v5(store: &mut Store, oplog: &OpLog) -> Result<()
 
     let mut packer = PackWriter::new();
     let mut unreadable = 0usize;
-    for candidate in store.all_chunk_ids() {
+    for candidate in store.all_chunk_ids()? {
         if wanted.is_empty() {
             break;
         }
@@ -4037,7 +4071,7 @@ fn migrate_checkpoint_blobs_to_v5(store: &mut Store, oplog: &OpLog) -> Result<()
 
     // A rerun after an interrupted migration finds its own earlier work already
     // stored; without this it would write a second pack of identical bytes.
-    packer.retain_unknown(store);
+    packer.retain_unknown(store)?;
     store.write_pack(packer)?;
 
     // A checkpoint left unmigrated beside a chunk that could not be read may
@@ -4279,6 +4313,13 @@ struct ThinRecord {
     at_unix_ms: u64,
     packs: Vec<u64>,
     collected: Vec<String>,
+    /// Candidate packs this thinning walked for and found still referenced.
+    /// A saved checkpoint is never unsaved, so a pack history reaches once it
+    /// reaches for good; later thinnings leave these out of their candidates,
+    /// which is what keeps the walk's starting point moving forward. Absent
+    /// on records written before the field existed.
+    #[serde(default)]
+    live: Vec<u64>,
 }
 
 /// The longest parent chain any walk over history will follow before calling
@@ -5274,7 +5315,10 @@ mod tests {
             out.working_state, out.checkpoint.tree,
             "the working tree and the checkpointed tree genuinely differ here"
         );
-        assert!(repo.store().contains(ChunkId::of(b"not in the change")));
+        assert!(repo
+            .store()
+            .contains(ChunkId::of(b"not in the change"))
+            .unwrap());
     }
 
     #[test]
@@ -6578,7 +6622,7 @@ mod tests {
 
         let packs_before = {
             let repo = Repo::open(dir.path()).unwrap();
-            repo.store().pack_count()
+            repo.store().pack_count().unwrap()
         };
         {
             let log = OpLog::open(&dir.path().join(".lattice/meta.redb")).unwrap();
@@ -6589,7 +6633,7 @@ mod tests {
 
         assert!(repo.checkpoint(&cp.id).unwrap().is_some(), "still readable");
         assert_eq!(
-            repo.store().pack_count(),
+            repo.store().pack_count().unwrap(),
             packs_before,
             "a rerun finds its own earlier work already stored and writes no \
              second pack of identical bytes"
@@ -6609,7 +6653,7 @@ mod tests {
         repo.save("still there", None).unwrap();
         let secret_chunk = ChunkId::of(b"hunter2, the whole of it");
         assert!(
-            repo.store().contains(secret_chunk),
+            repo.store().contains(secret_chunk).unwrap(),
             "premise: the content is stored"
         );
 
@@ -6620,7 +6664,7 @@ mod tests {
         assert_eq!(out.places_in_history, 2, "named by both checkpoints");
         assert!(out.chunks_destroyed >= 1);
         assert!(
-            !repo.store().contains(secret_chunk),
+            !repo.store().contains(secret_chunk).unwrap(),
             "and the bytes are gone from the store"
         );
         assert!(
@@ -6659,7 +6703,7 @@ mod tests {
             }
         }
         assert!(
-            !repo.store().contains(secret_chunk),
+            !repo.store().contains(secret_chunk).unwrap(),
             "undo-all never brings it back"
         );
     }
@@ -6681,7 +6725,9 @@ mod tests {
             "names the other path: {err}"
         );
         assert!(
-            repo.store().contains(ChunkId::of(b"the same bytes")),
+            repo.store()
+                .contains(ChunkId::of(b"the same bytes"))
+                .unwrap(),
             "and destroys nothing"
         );
     }
@@ -6697,7 +6743,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("--confirm-destroy"), "{err}");
         assert!(
-            repo.store().contains(ChunkId::of(b"s")),
+            repo.store().contains(ChunkId::of(b"s")).unwrap(),
             "nothing destroyed without it"
         );
 
@@ -7157,17 +7203,68 @@ mod tests {
             !dir.path().join("only-on-feat.txt").exists(),
             "premise: the file is preserved, not on disk"
         );
-        let packs_before = repo.store().pack_count();
+        let packs_before = repo.store().pack_count().unwrap();
 
         let out = repo.thin().unwrap();
 
         assert_eq!(out.collected, 0, "nothing here is unreferenced");
-        assert_eq!(repo.store().pack_count(), packs_before);
+        assert_eq!(repo.store().pack_count().unwrap(), packs_before);
         repo.switch_line("feat").unwrap();
         assert_eq!(
             fs::read(dir.path().join("only-on-feat.txt")).unwrap(),
             b"unsaved work",
             "and the preserved work comes back intact"
+        );
+        let report = repo.verify(true).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn thin_records_a_pack_it_found_live_and_does_not_walk_for_it_again() {
+        // The pack a switch captured holds the file a later save reused, so
+        // once the preserved state is consumed the pack is anchored by
+        // nothing yet reached by that save's checkpoint. It is walked for
+        // once, recorded as live in the ledger, and left out of every later
+        // thinning's candidates — which is what keeps the bounded walk
+        // bounded as history grows. It is never removed.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        fs::write(dir.path().join("b.txt"), b"first").unwrap();
+        repo.start_line("feat").unwrap();
+        repo.save("with b", None).unwrap();
+        fs::write(dir.path().join("b.txt"), b"second").unwrap();
+        repo.save("with b again", None).unwrap();
+        repo.switch_line("main").unwrap();
+        let packs_before = repo.store().pack_count().unwrap();
+
+        repo.thin().unwrap();
+        repo.thin().unwrap();
+
+        let ledger = fs::read_to_string(
+            dir.path()
+                .join(".lattice")
+                .join(THIN_DIR)
+                .join(THIN_LEDGER_FILE),
+        )
+        .unwrap();
+        let records: Vec<ThinRecord> = ledger
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert!(
+            !records[0].live.is_empty(),
+            "the captured pack is unanchored but reached, so the first thinning records it live"
+        );
+        assert!(
+            records[1].live.is_empty(),
+            "and the second does not walk for it again"
+        );
+        assert_eq!(
+            repo.store().pack_count().unwrap(),
+            packs_before,
+            "nothing was removed"
         );
         let report = repo.verify(true).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -7193,7 +7290,10 @@ mod tests {
         let out = repo.thin().unwrap();
 
         assert_eq!(out.collected, 1, "the early orphan is found");
-        assert!(!repo.store().contains(ChunkId::of(b"orphaned early")));
+        assert!(!repo
+            .store()
+            .contains(ChunkId::of(b"orphaned early"))
+            .unwrap());
         assert!(repo.verify(true).unwrap().errors.is_empty());
     }
 
@@ -7252,15 +7352,18 @@ mod tests {
         orphan.add(ChunkId::of(b"never referenced"), b"never referenced");
         orphan.add(ChunkId::of(b"nor this"), b"nor this");
         repo.store.write_pack(orphan).unwrap();
-        let packs_before = repo.store().pack_count();
+        let packs_before = repo.store().pack_count().unwrap();
 
         let out = repo.thin().unwrap();
 
         assert_eq!(out.collected, 2);
         assert_eq!(out.packs_removed, 1);
-        assert_eq!(repo.store().pack_count(), packs_before - 1);
+        assert_eq!(repo.store().pack_count().unwrap(), packs_before - 1);
         assert!(
-            !repo.store().contains(ChunkId::of(b"never referenced")),
+            !repo
+                .store()
+                .contains(ChunkId::of(b"never referenced"))
+                .unwrap(),
             "gone from the store, not just from a count"
         );
         assert!(repo.verify(true).unwrap().errors.is_empty());
@@ -7658,7 +7761,7 @@ mod tests {
             fs::write(dir.path().join(format!("f{i}.bin")), &content).unwrap();
         }
         repo.save("one", None).unwrap();
-        let after_first = repo.store().chunk_count();
+        let after_first = repo.store().chunk_count().unwrap();
 
         // Flip one byte in one file.
         let path = dir.path().join("f0.bin");
@@ -7666,7 +7769,7 @@ mod tests {
         content[100_000] ^= 0xFF;
         fs::write(&path, &content).unwrap();
         repo.save("two", None).unwrap();
-        let added = repo.store().chunk_count() - after_first;
+        let added = repo.store().chunk_count().unwrap() - after_first;
 
         // The second save must add only the changed file's affected chunks plus
         // the new tree and checkpoint blobs — not another copy of everything.
@@ -7896,7 +7999,7 @@ mod tests {
         let out = repo.save("later", None).unwrap();
 
         assert!(
-            repo.store().contains(ChunkId::of(b"urgent")),
+            repo.store().contains(ChunkId::of(b"urgent")).unwrap(),
             "work written after an interrupted switch must be captured before \
              the switch is completed over it"
         );
