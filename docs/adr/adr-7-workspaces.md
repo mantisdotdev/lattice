@@ -180,6 +180,15 @@ because ADR-6 made them take turns.
 > nothing migrates, and the bump is there so a build without the field
 > refuses the repository instead of re-hashing its entries and reporting a
 > broken chain.
+>
+> The same pilot on the fixed binary then failed nothing and ordered
+> everything, and exposed the one consequence of scoping: an `undo` that
+> finds nothing of its own to reverse exited 0 with no op-log position, twice
+> in 2,400 operations, and a success that cannot be placed in the history is
+> one the gate refuses. So an undo that finds nothing is recorded — an `Undo`
+> entry with no `undone_seq` — for the reason a dry-run sync already is: an
+> attempt is a fact, and the position is what a concurrent history is ordered
+> by. It is never itself a target, so undo-all still stops where it did.
 
 ### 4. Undo is repository-scoped, and that is a stated limit
 

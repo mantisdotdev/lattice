@@ -969,7 +969,16 @@ impl Repo {
     pub fn undo(&mut self) -> Result<UndoOutcome> {
         let rescued = self.complete_pending_switch()?;
         let Some(target) = self.next_undo_target()? else {
+            // Nothing to reverse is still an outcome that happened at a point
+            // in the history, and the point is what a concurrent history is
+            // ordered by: a success that cannot be placed is one G1.4 refuses.
+            // Recorded the way a dry-run sync is, and never itself a target —
+            // `is_undoable` says no to every `Undo`.
+            let entry = self
+                .oplog
+                .commit(Operation::Undo { undone_seq: None }, None)?;
             let mut out = UndoOutcome::nothing();
+            out.undo_seq = Some(entry.seq);
             out.rescued_working_state = rescued;
             return Ok(out);
         };
@@ -1003,7 +1012,9 @@ impl Repo {
         self.oplog.walk_newest_first(|entry| {
             match &entry.operation {
                 Operation::Undo { undone_seq } => {
-                    undone.insert(*undone_seq);
+                    if let Some(seq) = undone_seq {
+                        undone.insert(*seq);
+                    }
                     return Ok(true);
                 }
                 Operation::Save {
@@ -1340,7 +1351,7 @@ impl Repo {
 
         let undo_entry = self.oplog.commit(
             Operation::Undo {
-                undone_seq: entry.seq,
+                undone_seq: Some(entry.seq),
             },
             Some(lines.clone()),
         )?;
@@ -4477,7 +4488,7 @@ fn checkpointed_change(typed: &str, line: &str, oplog: &OpLog) -> Result<Option<
     let undone: std::collections::HashSet<u64> = entries
         .iter()
         .filter_map(|e| match &e.operation {
-            Operation::Undo { undone_seq } => Some(*undone_seq),
+            Operation::Undo { undone_seq } => *undone_seq,
             _ => None,
         })
         .collect();
@@ -5575,6 +5586,30 @@ mod tests {
         platform::lock_exclusive(&lock, std::time::Duration::from_millis(500)).expect(
             "closing the repository releases it — including on a kill, \
                      since the OS owns the release",
+        );
+    }
+
+    #[test]
+    fn an_undo_that_finds_nothing_is_still_recorded_at_a_position() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("seed.txt"), b"seed").unwrap();
+        let seed = repo.save("seed", None).unwrap();
+
+        let first = repo.undo().unwrap();
+        let second = repo.undo().unwrap();
+
+        assert!(
+            first.nothing_to_undo,
+            "premise: a root save has no parent to return to"
+        );
+        let first_seq = first
+            .undo_seq
+            .expect("an attempt that found nothing still has a position");
+        let second_seq = second.undo_seq.expect("and so does the next one");
+        assert!(first_seq > seed.checkpoint.oplog_seq && second_seq > first_seq);
+        assert!(
+            second.nothing_to_undo,
+            "the recorded attempt is not itself something to undo"
         );
     }
 
@@ -7674,16 +7709,18 @@ mod tests {
         repo.undo().unwrap();
         assert_eq!(ids(&repo), vec![a.id.clone()]);
 
-        // At the root there is nothing to undo, and no op is appended.
+        // At the root there is nothing to undo. The attempt is still
+        // recorded — exactly one entry, at a position the outcome names.
         let before = repo.oplog().len().unwrap();
         let u3 = repo.undo().unwrap();
         assert!(u3.nothing_to_undo);
         assert_eq!(u3.now_at, None);
         assert_eq!(
             repo.oplog().len().unwrap(),
-            before,
-            "nothing_to_undo must append no op"
+            before + 1,
+            "nothing_to_undo appends the attempt and nothing else"
         );
+        assert_eq!(u3.undo_seq, Some(before + 1));
         assert_eq!(
             repo.head_checkpoint().unwrap().unwrap().id,
             a.id,

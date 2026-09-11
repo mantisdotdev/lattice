@@ -31,5 +31,12 @@
         "count": 22
       }
     ]
+  },
+  "repilot_after_fix": {
+    "note": "the same 2,400-operation pilot on the binary with both fixes (commit 0eb5931); counts read from the harness's verdict",
+    "repilot_ops_total": 2400,
+    "repilot_failures": 0,
+    "repilot_linearizability_violations": 0,
+    "repilot_successful_undos_without_a_position": 2
   }
 }

@@ -80,8 +80,10 @@ const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 ///
 /// 7 records, on `Switch` and `StartLine`, the workspace that made them, so an
 /// undo can tell whose switch it is reversing (ADR-7, correction of
-/// 2026-09-12). Additive: the field is skipped when empty, so an entry written
-/// at 6 or earlier hashes exactly as it did and nothing migrates. The bump
+/// 2026-09-12), and records an `Undo` that found nothing to reverse with no
+/// `undone_seq`. Additive both times: a field skipped when empty or absent, so
+/// an entry written at 6 or earlier hashes exactly as it did and nothing
+/// migrates. The bump
 /// exists so a build that does not know the field refuses the repository
 /// rather than re-hashing an entry without it and reporting a broken chain.
 pub const FORMAT_VERSION: u64 = 7;
@@ -389,8 +391,14 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         workspace: String,
     },
+    /// An undo. `undone_seq` names the entry it reversed, and is absent when
+    /// the call found nothing to reverse — still an attempt, made at a point
+    /// in the history, and recorded for the reason a dry-run sync is: an
+    /// operation eight workspaces interleave has to have a position, and one
+    /// that leaves no trace cannot be shown to have happened.
     Undo {
-        undone_seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undone_seq: Option<u64>,
     },
     Adopt {
         source: String,
@@ -1412,7 +1420,10 @@ mod tests {
             "assign is a state-changing command, so §4.3 promises it reverses"
         );
         assert!(
-            !Operation::Undo { undone_seq: 1 }.is_undoable(),
+            !Operation::Undo {
+                undone_seq: Some(1)
+            }
+            .is_undoable(),
             "undo is monotonic toward the root; reversing it (redo) is a \
              separate deferred forward move, so undo is not itself undoable"
         );
