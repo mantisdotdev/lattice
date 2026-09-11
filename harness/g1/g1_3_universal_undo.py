@@ -2,7 +2,16 @@
 """
 G1.3 — Universal undo (HARD).
 
-Target: 100% of state-changing commands undoable. >= 100,000 property-generated
+Target: 100% of state-changing commands undoable, with the exclusions
+DISAGREEMENTS Challenge 12 enumerated and ADR-20 made this harness carry: the
+commands the binary publishes as `undoable: false` must REFUSE undo — no undo
+entry may ever name one — and what a redaction destroyed is not required to
+return, because it must not.
+
+Amended under ADR-20 (§0.3): reads `undoable` from the discovered surface;
+asserts refusal from the op-log; excludes redacted paths from the working-tree
+comparison; and reports an in-process run that exceeds its budget as a failed
+measurement rather than crashing or calling the subject not built. >= 100,000 property-generated
 command sequences in-process against `ltx-core`, plus >= 1,000 end-to-end through
 the CLI binary; undo-all restores initial state: 0 failures.
 
@@ -41,6 +50,9 @@ SEED = 20260903
 IN_PROCESS_SEQUENCES = 100_000
 CLI_SEQUENCES = 1_000
 MIN_EMISSIONS_PER_COMMAND = 100
+# The in-process half's wall-clock budget. It was inline; a timeout is now a
+# reported outcome, so the number has a name.
+IN_PROCESS_BUDGET_S = 7200
 
 # §6 names these explicitly; if the discovered surface lacks any of them the
 # coverage contract is not satisfied, regardless of the emission counts.
@@ -149,6 +161,11 @@ def run_cli_sequences(count: int, commands: list[dict], rng: random.Random) -> d
     failures: list[dict] = []
     emitted: dict[str, int] = {c["name"]: 0 for c in commands}
     completed = 0
+    # ADR-20: the non-undoable set is what the binary PUBLISHES, not a list
+    # kept here. A command that claims to be undoable and is not fails the
+    # comparison below; one that claims not to be and is reversed anyway fails
+    # the refusal check.
+    non_undoable = {c["name"] for c in commands if not c.get("undoable", True)}
 
     for i in range(count):
         work = Path(tempfile.mkdtemp(prefix="g1-3-cli-"))
@@ -162,14 +179,26 @@ def run_cli_sequences(count: int, commands: list[dict], rng: random.Random) -> d
 
             length = rng.randint(1, 12)
             applied = 0
+            # Op-log positions of the non-undoable operations this sequence
+            # performed, and the paths its redactions destroyed.
+            pinned: dict[int, str] = {}
+            redacted: set[str] = set()
             for _ in range(length):
                 cmd = rng.choice(commands)
                 argv = [str(LTX), *cmd["name"].split(), *cmd.get("sample_args", [])]
-                r = subprocess.run(argv, cwd=work, capture_output=True,
+                r = subprocess.run([*argv, "--json"], cwd=work, capture_output=True,
                                    text=True, errors="replace", timeout=300)
                 emitted[cmd["name"]] += 1
                 if r.returncode == 0:
                     applied += 1
+                    try:
+                        doc = json.loads(r.stdout)
+                    except json.JSONDecodeError:
+                        doc = {}
+                    if cmd["name"] in non_undoable and doc.get("oplog_seq") is not None:
+                        pinned[int(doc["oplog_seq"])] = cmd["name"]
+                    if cmd["name"].split()[0] == "redact" and doc.get("target"):
+                        redacted.add(os.path.normpath(str(doc["target"])))
 
             # Undo everything, then compare. Undo must also undo undo (redo),
             # so the loop runs until undo reports nothing left rather than a
@@ -186,7 +215,35 @@ def run_cli_sequences(count: int, commands: list[dict], rng: random.Random) -> d
                 except json.JSONDecodeError:
                     break
 
+            # ADR-20 (2): nothing published as non-undoable may have been
+            # reversed. The op-log is the authority on what undo did.
+            reversed_pins = []
+            if pinned:
+                r = subprocess.run([str(LTX), "internals", "oplog", "--json"], cwd=work,
+                                   capture_output=True, text=True, errors="replace",
+                                   timeout=300)
+                try:
+                    ops = json.loads(r.stdout).get("operations", []) if r.returncode == 0 else []
+                except json.JSONDecodeError:
+                    ops = []
+                for op in ops:
+                    kind = (op.get("operation") or {}).get("kind")
+                    target = (op.get("operation") or {}).get("undone_seq")
+                    if kind == "undo" and target in pinned:
+                        reversed_pins.append(f"{pinned[target]} at {target}")
+            if reversed_pins:
+                failures.append({"sequence": i,
+                                 "differing_domains": ["non-undoable operation reversed: "
+                                                       + ", ".join(reversed_pins)]})
+
             final = snapshot_user_visible_state(work)
+            # ADR-20 (3): what a redaction destroyed is not required to
+            # return. Dropped from BOTH sides, and only those paths.
+            for snap in (initial, final):
+                tree = snap.get("working_tree")
+                if isinstance(tree, dict):
+                    for path in redacted:
+                        tree.pop(path, None)
             if final != initial:
                 differing = sorted(
                     k for k in set(initial) | set(final)
@@ -218,11 +275,19 @@ def main() -> int:
     rng = random.Random(SEED)
     core_result = None
     if CORE_HARNESS.exists():
-        r = subprocess.run([str(CORE_HARNESS), "--sequences",
-                            str(IN_PROCESS_SEQUENCES), "--seed", str(SEED),
-                            "--json"], capture_output=True, text=True,
-                           errors="replace", timeout=7200)
-        if r.returncode == 0 and r.stdout.strip():
+        try:
+            r = subprocess.run([str(CORE_HARNESS), "--sequences",
+                                str(IN_PROCESS_SEQUENCES), "--seed", str(SEED),
+                                "--json"], capture_output=True, text=True,
+                               errors="replace", timeout=IN_PROCESS_BUDGET_S)
+        except subprocess.TimeoutExpired:
+            # ADR-20 addendum: a run that exceeds its budget is a measurement
+            # that failed coverage, not a subject that was never built. Zero
+            # sequences completed is what the coverage contract below sees.
+            r = None
+            core_result = {"sequences": 0, "failures": 0,
+                           "note": f"in-process harness exceeded {IN_PROCESS_BUDGET_S} s"}
+        if r is not None and r.returncode == 0 and r.stdout.strip():
             try:
                 core_result = json.loads(r.stdout.splitlines()[-1])
             except json.JSONDecodeError:
