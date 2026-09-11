@@ -194,6 +194,31 @@ from measured points that are growing *worse* than linearly, so it is a floor
 rather than an estimate, and the precise figure is not worth arguing about: no
 plausible correction brings it near a budget anyone would accept.
 
+### It is not only G1.4
+
+The same two scans sit under three performance gates, whose targets are in
+`harness/gates.toml` and whose reference repo `scripts/corpus/build_reference_repo.py`
+describes as "a ~100k-file, ~2 GB-history reference repo":
+
+| Gate | Target | Measured at 10,000 files — a tenth of that repo |
+|---|---|---|
+| G1.5 `ltx status` p95 | < 100 ms | 13,121 ms |
+| G1.6 `ltx save` p95 | < 250 ms | 4,184 ms |
+| G1.7 `ltx log` p95 | < 100 ms | shares `checkpoints()` with `status` |
+
+**These are inferences from measurement, not gate results.** None of the three
+has been run — they need the reference repo, which is not built in this
+checkout — and the figures above are from the scaling probe, not from their
+harnesses. What the comparison establishes is the order of magnitude: at a tenth
+of the reference repo's size, `status` is already about 130× its target. No
+amount of measurement noise closes that.
+
+So the work below is not a tax paid for G1.4 alone. **G1.4, G1.5, G1.6 and G1.7
+are all waiting on the same two indexes**, which is worth knowing before
+deciding what to build next.
+
+### What is owed
+
 **G1.4 cannot be claimed until this is addressed**, and addressing it is its own
 slice with its own ADR: a chunk index that makes `contains` a lookup rather than
 a scan, and a checkpoint index that makes `checkpoint` one too. Neither is a
