@@ -72,7 +72,12 @@ const SAVED: TableDefinition<&str, u64> = TableDefinition::new("saved");
 /// Entries are untouched — the ids they carry are unchanged, because the bytes
 /// hashed to produce them are the bytes now stored — so this break is again
 /// outside the chain, and is migrated rather than refused.
-pub const FORMAT_VERSION: u64 = 5;
+///
+/// 6 adds the `Compact`, `Sync`, `Lens` and `Split` operations. No entry is
+/// rewritten and nothing migrates; the bump exists so a build that predates the
+/// variants refuses the repository with a way forward instead of failing to
+/// parse an entry it never heard of.
+pub const FORMAT_VERSION: u64 = 6;
 
 /// The oldest format this build can read. Below this the per-entry tag does
 /// not exist, so an entry's original serialisation cannot be reproduced and
@@ -186,6 +191,23 @@ pub struct WorkspaceRecord {
     /// workspace left there, and two workspaces leave different ones.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub preserved: std::collections::BTreeMap<String, String>,
+    /// The lens this workspace looks through. Per workspace for the reason
+    /// `current` is: two working trees may legitimately want different views.
+    /// Defaults to the built-in lens that hides nothing, so a document written
+    /// before the field existed reads back meaning exactly what it meant.
+    #[serde(default = "default_lens", skip_serializing_if = "is_default_lens")]
+    pub lens: String,
+}
+
+/// The one lens every repository has: it hides nothing.
+pub const DEFAULT_LENS: &str = "clean";
+
+fn default_lens() -> String {
+    DEFAULT_LENS.to_string()
+}
+
+fn is_default_lens(lens: &str) -> bool {
+    lens == DEFAULT_LENS
 }
 
 /// Which lines exist and which one is current.
@@ -229,6 +251,7 @@ impl LineState {
                 root: None,
                 current: DEFAULT_LINE.to_string(),
                 preserved: std::collections::BTreeMap::new(),
+                lens: DEFAULT_LENS.to_string(),
             },
         );
         LineState { lines, workspaces }
@@ -367,6 +390,40 @@ pub enum Operation {
     Thin {
         collected: u64,
     },
+    /// An op-log segment was archived (ADR-13's first half). Not undoable:
+    /// an archive is a copy, and there is nothing to put back.
+    Compact {
+        from_seq: u64,
+        to_seq: u64,
+    },
+    /// A sync was attempted. `dry_run` never moves content, so its inverse is
+    /// nothing — but the attempt is still a fact history records, and the one
+    /// a concurrent history is ordered by.
+    Sync {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<String>,
+        dry_run: bool,
+    },
+    /// A workspace changed which lens it looks through.
+    Lens {
+        workspace: String,
+        from: String,
+        to: String,
+    },
+    /// A change was split: each moved path left `change` for the change named
+    /// beside it. The inverse moves them back and removes what was minted.
+    Split {
+        line: String,
+        /// The change that was split — the current change at the time, and
+        /// so also what the inverse restores as current. `None` when nothing
+        /// was current: the attempt is still a recorded fact, and moved
+        /// nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<String>,
+        /// (path, the change it went to). Every destination was minted by this
+        /// split, so the inverse deletes them all.
+        moved: Vec<(Vec<u8>, String)>,
+    },
 }
 
 impl Operation {
@@ -398,6 +455,7 @@ impl Operation {
                 | Operation::Adopt { .. }
                 | Operation::Redact { .. }
                 | Operation::Thin { .. }
+                | Operation::Compact { .. }
                 | Operation::Workspace { .. }
         )
     }
@@ -414,6 +472,10 @@ impl Operation {
             Operation::Adopt { .. } => "adopt",
             Operation::Redact { .. } => "redact",
             Operation::Thin { .. } => "thin",
+            Operation::Compact { .. } => "compact",
+            Operation::Sync { .. } => "sync",
+            Operation::Lens { .. } => "lens",
+            Operation::Split { .. } => "split",
         }
     }
 }
@@ -460,7 +522,7 @@ impl Entry {
             // stored, which is content. The tag is still inside the payload, so
             // entries written at different formats hash differently and each
             // verifies under its own rule.
-            3..=5 => serde_json::to_vec(&(seq, prev, at, op, format))?,
+            3..=6 => serde_json::to_vec(&(seq, prev, at, op, format))?,
             other => {
                 return Err(Error::UnsupportedFormat(format!(
                     "entry {seq} records on-disk format {other}, which this build cannot hash"
@@ -586,6 +648,20 @@ impl OpLog {
 
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
+    }
+
+    /// Entries from `from` onwards. A range read: `compact` archives only
+    /// what is new since the last archive, and loading the whole log to find
+    /// that would make every compaction cost the size of history.
+    pub fn entries_from(&self, from: u64) -> Result<Vec<Entry>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ENTRIES)?;
+        let mut out = Vec::new();
+        for item in table.range(from..)? {
+            let (_, value) = item?;
+            out.push(serde_json::from_slice(value.value())?);
+        }
+        Ok(out)
     }
 
     pub fn entries(&self) -> Result<Vec<Entry>> {

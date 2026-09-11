@@ -64,6 +64,14 @@ pub enum Error {
     #[error("{0}")]
     NoSuchLine(String),
 
+    /// Named a lens this repository does not have.
+    #[error("no lens named {0}")]
+    NoSuchLens(String),
+
+    /// Asked to sync, and there is no remote to sync with.
+    #[error("no remote is configured, so there is nowhere to sync with")]
+    NoRemote,
+
     /// A name that cannot be a line. Distinct from Invalid for the same reason.
     #[error("{0}")]
     InvalidLine(String),
@@ -138,7 +146,10 @@ impl Error {
             | Error::InvalidLine(_)
             | Error::UnsupportedFormat(_)
             | Error::FormatFromNewerBuild(_) => Category::Invalid,
-            Error::NoSuchLine(_) | Error::NoSuchChange(_) => Category::NotFound,
+            Error::NoSuchLine(_)
+            | Error::NoSuchChange(_)
+            | Error::NoSuchLens(_)
+            | Error::NoRemote => Category::NotFound,
             // Neither `Io` nor `Invalid`: nothing failed, and the command was
             // not wrong. The repository was in use, which is a state the model
             // allows — and the only one where retrying unchanged is right.
@@ -157,6 +168,8 @@ impl Error {
             Error::Corrupt(_) => Concept::Checkpoint,
             Error::Invalid(_) => Concept::WorkingState,
             Error::NoSuchLine(_) | Error::InvalidLine(_) => Concept::Line,
+            Error::NoSuchLens(_) => Concept::Lens,
+            Error::NoRemote => Concept::Remote,
             Error::NoSuchChange(_)
             | Error::InvalidChange(_)
             | Error::ChangeAlreadyCheckpointed(_)
@@ -186,6 +199,11 @@ impl Error {
                  with a valid argument"
             }
             Error::NoSuchLine(_) => "run `ltx line list` to see which lines exist",
+            Error::NoSuchLens(_) => "run `ltx lens list` to see which lenses exist",
+            Error::NoRemote => {
+                "no remote can be configured in this build; run `ltx sync --dry-run` to \
+                 see what a sync would do"
+            }
             Error::NoSuchChange(_) => "run `ltx change list` to see which changes are open",
             Error::InvalidChange(_) => {
                 "run `ltx change list` and name enough characters to pick out the \

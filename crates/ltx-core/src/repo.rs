@@ -16,7 +16,7 @@ use crate::change;
 use crate::chunk::ChunkId;
 use crate::error::{Error, Result};
 use crate::oplog::{
-    CheckpointedChange, Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LINE,
+    CheckpointedChange, Entry, LineRecord, LineState, OpLog, Operation, DEFAULT_LENS, DEFAULT_LINE,
     FORMAT_VERSION, MIN_READABLE_FORMAT,
 };
 use crate::platform;
@@ -385,6 +385,7 @@ impl Repo {
         // repository runs both, a format-4 repository runs only the second.
         migrate_line_state_to_v4(&oplog)?;
         migrate_checkpoint_blobs_to_v5(&mut store, &oplog)?;
+        stamp_current_format(&oplog)?;
         // Which workspace is this? Matched by canonical path, because that is
         // the only thing a command run in a directory knows about itself.
         let here = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -1073,11 +1074,31 @@ impl Repo {
             // `reverse` arm and no eligibility arm: it would compile, become
             // permanently ineligible, and `ltx undo` would report
             // `nothing_to_undo` while its effect still stood.
+            // A dry-run sync moved nothing and a lens is a view: neither
+            // wrote a byte of working state, so each is always reversible.
+            Operation::Sync { .. } | Operation::Lens { .. } => true,
+            // Split follows assign's rule exactly (ADR-17 §8): once a standing
+            // save has consumed a change its inverse would write to — the
+            // source it puts paths back into, or any it would delete — it is
+            // ineligible.
+            Operation::Split {
+                line,
+                change,
+                moved,
+            } => {
+                !change
+                    .as_deref()
+                    .is_some_and(|c| consumed.contains(&(line.as_str(), c)))
+                    && !moved
+                        .iter()
+                        .any(|(_, into)| consumed.contains(&(line.as_str(), into.as_str())))
+            }
             Operation::Init
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
             | Operation::Thin { .. }
+            | Operation::Compact { .. }
             | Operation::Workspace { .. } => false,
         })
     }
@@ -1202,11 +1223,53 @@ impl Repo {
             // an eligibility arm and no inverse would otherwise compile, and
             // `ltx undo` would exit non-zero on it — which breaks undo-all
             // mid-way rather than reporting nothing to undo (ADR-17 §8).
+            Operation::Sync { .. } => {
+                // A dry run moved nothing, so its inverse moves nothing back.
+                let current = self.line_of(&lines);
+                outcome.now_at = lines.lines.get(&current).and_then(|r| r.tip.clone());
+            }
+            Operation::Lens {
+                workspace, from, ..
+            } => {
+                if let Some(space) = lines.workspaces.get_mut(workspace) {
+                    space.lens = from.clone();
+                }
+                let current = self.line_of(&lines);
+                outcome.now_at = lines.lines.get(&current).and_then(|r| r.tip.clone());
+            }
+            Operation::Split {
+                line,
+                change,
+                moved,
+            } => {
+                // Labels only, like assign's inverse: every path goes back to
+                // the change it left, and every change this split minted is
+                // removed — eligibility has established none was consumed.
+                let rec = lines.lines.entry(line.clone()).or_default();
+                if let Some(source) = change {
+                    for (path, into) in moved {
+                        if let Some(minted) = rec.changes.get_mut(into) {
+                            minted.assigned.remove(path);
+                        }
+                        rec.changes
+                            .entry(source.clone())
+                            .or_default()
+                            .assigned
+                            .insert(path.clone());
+                    }
+                    for (_, into) in moved {
+                        rec.changes.remove(into);
+                    }
+                }
+                rec.current_change = change.clone();
+                outcome.now_at = rec.tip.clone();
+            }
             Operation::Init
             | Operation::Undo { .. }
             | Operation::Adopt { .. }
             | Operation::Redact { .. }
             | Operation::Thin { .. }
+            | Operation::Compact { .. }
             | Operation::Workspace { .. } => {
                 return Err(Error::Invalid(format!(
                     "operation {} ({}) has no inverse",
@@ -1354,6 +1417,7 @@ impl Repo {
                 // tip that was just materialised into it.
                 current: self.line_of(&lines),
                 preserved: BTreeMap::new(),
+                lens: DEFAULT_LENS.to_string(),
             },
         );
         let entry = self.oplog.commit(
@@ -2011,6 +2075,327 @@ impl Repo {
             Some(tip) => self.write_head_pointer(&tip),
             None => Ok(()),
         }
+    }
+
+    // -------------------------------------------------------------- lenses
+
+    /// The lenses this repository has, and which one this workspace looks
+    /// through. One, built in, hiding nothing — until lenses are defined,
+    /// every view is already the forensic view.
+    pub fn lenses(&self) -> Result<Vec<LensView>> {
+        let lines = self.line_state()?;
+        let active = self.lens_of(&lines);
+        Ok(vec![LensView {
+            name: DEFAULT_LENS.to_string(),
+            active: active == DEFAULT_LENS,
+            hides: "nothing".to_string(),
+        }])
+    }
+
+    fn lens_of(&self, lines: &LineState) -> String {
+        lines
+            .workspaces
+            .get(&self.workspace)
+            .map(|w| w.lens.clone())
+            .unwrap_or_else(|| DEFAULT_LENS.to_string())
+    }
+
+    /// Look through a lens. Per workspace, like the current line, and
+    /// reversible: the inverse looks back through the one it replaced.
+    pub fn use_lens(&mut self, name: &str) -> Result<LensOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        if name != DEFAULT_LENS {
+            return Err(Error::NoSuchLens(name.to_string()));
+        }
+        let mut lines = self.line_state()?;
+        let from = self.lens_of(&lines);
+        if let Some(space) = lines.workspaces.get_mut(&self.workspace) {
+            space.lens = name.to_string();
+        }
+        // Recorded even when nothing changed, as a self-switch is: the
+        // command ran, and a concurrent history is ordered by what ran.
+        let entry = self.oplog.commit(
+            Operation::Lens {
+                workspace: self.workspace.clone(),
+                from,
+                to: name.to_string(),
+            },
+            Some(lines),
+        )?;
+        Ok(LensOutcome {
+            lens: name.to_string(),
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    // --------------------------------------------------------------- split
+
+    /// Split the current change so that each top-level path of what it holds
+    /// becomes a change of its own. The first group keeps the change it is
+    /// in; every later one is minted. One entry however many groups, for the
+    /// reason assign is one (ADR-17 §6).
+    ///
+    /// With nothing current, or nothing to split, this still succeeds and is
+    /// still recorded — the same rule as a refused assign: a command that ran
+    /// is a fact, and a concurrent history is ordered by facts.
+    pub fn split(&mut self) -> Result<SplitOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let mut lines = self.line_state()?;
+        let line = self.line_of(&lines);
+        let current = lines
+            .lines
+            .get(&line)
+            .and_then(|r| r.current_change.clone());
+        let mut moved: Vec<(Vec<u8>, String)> = Vec::new();
+        let mut minted: Vec<String> = Vec::new();
+        if let Some(change) = &current {
+            let held: Vec<Vec<u8>> = lines
+                .lines
+                .get(&line)
+                .and_then(|r| r.changes.get(change))
+                .map(|c| c.assigned.iter().cloned().collect())
+                .unwrap_or_default();
+            let mut groups: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
+            for path in held {
+                groups
+                    .entry(first_component(&path).to_vec())
+                    .or_default()
+                    .push(path);
+            }
+            for (_, paths) in groups.into_iter().skip(1) {
+                let id = self.new_change_id()?;
+                for path in paths {
+                    moved.push((path, id.clone()));
+                }
+                minted.push(id);
+            }
+            let record = lines.lines.entry(line.clone()).or_default();
+            for (path, into) in &moved {
+                if let Some(source) = record.changes.get_mut(change) {
+                    source.assigned.remove(path);
+                }
+                record
+                    .changes
+                    .entry(into.clone())
+                    .or_default()
+                    .assigned
+                    .insert(path.clone());
+            }
+        }
+        let entry = self.oplog.commit(
+            Operation::Split {
+                line,
+                change: current.clone(),
+                moved: moved.clone(),
+            },
+            Some(lines),
+        )?;
+        Ok(SplitOutcome {
+            change: current,
+            into: minted,
+            moved: moved.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    // --------------------------------------------------------- maintenance
+
+    /// What a sync would do, without doing it.
+    ///
+    /// No remote can be configured yet, so the honest answer is that there is
+    /// nothing to send and nothing to receive. The attempt is still recorded,
+    /// in the op-log and in the sync state a real sync will read, because a
+    /// dry run that leaves no trace cannot be shown to have happened.
+    /// Sync with the configured remote. There is no way to configure one yet,
+    /// so this refuses — in the core rather than the CLI, because the CLI may
+    /// hold no logic the API lacks (§8), and a refusal is logic.
+    pub fn sync(&mut self) -> Result<SyncOutcome> {
+        Err(Error::NoRemote)
+    }
+
+    pub fn sync_dry_run(&mut self) -> Result<SyncOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let state = SyncState {
+            remote: None,
+            dry_run: true,
+            would_send: 0,
+            would_receive: 0,
+            at_unix_ms: unix_ms_now(),
+        };
+        write_durably(
+            &self.repository.join(SYNC_DIR),
+            SYNC_STATE_FILE,
+            &serde_json::to_vec_pretty(&state)?,
+        )?;
+        let entry = self.oplog.commit(
+            Operation::Sync {
+                remote: None,
+                dry_run: true,
+            },
+            None,
+        )?;
+        Ok(SyncOutcome {
+            remote: None,
+            dry_run: true,
+            would_send: 0,
+            would_receive: 0,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Archive the op-log entries written since the last archive.
+    ///
+    /// ADR-13's first half: older segments compact into an archive that
+    /// preserves the chain and remains verifiable. Its second half — the live
+    /// log shrinking — is not here, so this reduces nothing yet; what it does
+    /// is put every entry into exactly one durable segment, including the
+    /// entry that records the previous archive.
+    pub fn compact(&mut self) -> Result<CompactOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let dir = self.repository.join(ARCHIVE_DIR);
+        fs::create_dir_all(&dir)?;
+        // The archives on disk are the truth about what is archived, so an
+        // interrupted run — segment written, entry not — is simply continued
+        // from the segment's end next time.
+        let from_seq = archived_through(&dir)? + 1;
+        let entries = self.oplog.entries_from(from_seq)?;
+        let to_seq = entries.last().map_or(from_seq.saturating_sub(1), |e| e.seq);
+        if !entries.is_empty() {
+            let mut body = Vec::new();
+            for entry in &entries {
+                serde_json::to_writer(&mut body, entry)?;
+                body.push(b'\n');
+            }
+            write_durably(&dir, &archive_name(from_seq, to_seq), &body)?;
+        }
+        let entry = self
+            .oplog
+            .commit(Operation::Compact { from_seq, to_seq }, None)?;
+        Ok(CompactOutcome {
+            from_seq,
+            to_seq,
+            archived: entries.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Collect content nothing references.
+    ///
+    /// Whole packs only (ADR-9 §2): a pack is removed when every chunk in it
+    /// is unreferenced, and never rewritten. That is the one shape of
+    /// collection that cannot lose data by construction — nothing referenced
+    /// is ever touched — and it is all this ships until a partial rewrite has
+    /// a crash-safety argument of its own.
+    ///
+    /// What is reachable is everything `verify` walks: every checkpoint
+    /// history records, whether or not it is still on a line, every line tip,
+    /// and every working state any workspace has preserved.
+    pub fn thin(&mut self) -> Result<ThinOutcome> {
+        let rescued = self.complete_pending_switch()?;
+        let live = self.reachable_chunks()?;
+        let mut removed: Vec<u64> = Vec::new();
+        let mut collected: Vec<String> = Vec::new();
+        for (pack, chunks) in self.store.packs_with_chunks() {
+            if chunks.is_empty() || chunks.iter().any(|c| live.contains(c)) {
+                continue;
+            }
+            collected.extend(chunks.iter().map(|c| c.to_hex()));
+            removed.push(pack);
+        }
+        // The ledger first — what is about to go — then the packs. A crash
+        // between leaves a record of an intent that was safe to carry out,
+        // and the next thin carries it out.
+        let record = ThinRecord {
+            at_unix_ms: unix_ms_now(),
+            packs: removed.clone(),
+            collected: collected.clone(),
+        };
+        let mut line = serde_json::to_vec(&record)?;
+        line.push(b'\n');
+        append_durably(&self.repository.join(THIN_DIR), THIN_LEDGER_FILE, &line)?;
+        for pack in &removed {
+            self.store.remove_pack(*pack)?;
+        }
+        let entry = self.oplog.commit(
+            Operation::Thin {
+                collected: collected.len() as u64,
+            },
+            None,
+        )?;
+        Ok(ThinOutcome {
+            collected: collected.len() as u64,
+            packs_removed: removed.len() as u64,
+            oplog_seq: entry.seq,
+            rescued_working_state: rescued,
+        })
+    }
+
+    /// Every chunk something still refers to.
+    fn reachable_chunks(&self) -> Result<std::collections::HashSet<ChunkId>> {
+        let mut live = std::collections::HashSet::new();
+        let mut trees: Vec<String> = Vec::new();
+        for cp in self.checkpoints()? {
+            if let Some(id) = ChunkId::from_hex(&cp.id) {
+                live.insert(id);
+            }
+            trees.push(cp.tree);
+        }
+        let lines = self.line_state()?;
+        for rec in lines.lines.values() {
+            if let Some(cp) = rec
+                .tip
+                .as_deref()
+                .and_then(|t| self.checkpoint(t).transpose())
+            {
+                let cp = cp?;
+                if let Some(id) = ChunkId::from_hex(&cp.id) {
+                    live.insert(id);
+                }
+                trees.push(cp.tree);
+            }
+        }
+        for space in lines.workspaces.values() {
+            trees.extend(space.preserved.values().cloned());
+        }
+        for tree in trees {
+            self.collect_tree(&tree, &mut live)?;
+        }
+        Ok(live)
+    }
+
+    fn collect_tree(
+        &self,
+        tree_id: &str,
+        live: &mut std::collections::HashSet<ChunkId>,
+    ) -> Result<()> {
+        let Some(id) = ChunkId::from_hex(tree_id) else {
+            return Ok(());
+        };
+        if !live.insert(id) {
+            return Ok(());
+        }
+        let Some(bytes) = self.store.read(id)? else {
+            return Ok(());
+        };
+        let tree = Tree::from_bytes(&bytes)?;
+        for node in tree.entries.values() {
+            match node {
+                Node::Directory { tree } => self.collect_tree(tree, live)?,
+                Node::Symlink { .. } => {}
+                Node::File { chunks, .. } => {
+                    for hex in chunks {
+                        if let Some(chunk) = ChunkId::from_hex(hex) {
+                            live.insert(chunk);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------ snapshot
@@ -2822,6 +3207,28 @@ pub struct ChangeView {
 /// back and break the ones before it.
 const LINE_STATE_FORMAT: u64 = 4;
 
+/// Bring a repository whose data needs no migration up to the current format.
+///
+/// A format bump that only adds operation variants — 6 added `Sync`, `Lens`,
+/// `Split` and `Compact` — rewrites nothing, so there is no migration to run.
+/// The version still has to move, and on the first open rather than the
+/// first write: this build will append entries tagged with the new format,
+/// and an older build that read the document version, opened, and then met
+/// one of them would fail inside the chain check with the advice for a
+/// repository that must be recreated. Stamping first means it refuses at the
+/// door instead, with the advice to upgrade.
+///
+/// Anything from the last data migration's target up to the current format
+/// is stamped, so a later variant-only bump needs no step of its own.
+fn stamp_current_format(oplog: &OpLog) -> Result<()> {
+    match oplog.format_version()? {
+        Some(v) if (CHECKPOINT_ADDRESS_FORMAT..FORMAT_VERSION).contains(&v) => {
+            oplog.set_format_version(FORMAT_VERSION)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The format `migrate_checkpoint_blobs_to_v5` produces (ADR-8).
 const CHECKPOINT_ADDRESS_FORMAT: u64 = 5;
 
@@ -3000,6 +3407,7 @@ fn migrate_line_state_to_v4(oplog: &OpLog) -> Result<()> {
             root: None,
             current: old.current,
             preserved,
+            lens: DEFAULT_LENS.to_string(),
         },
     );
 
@@ -3093,6 +3501,149 @@ fn relative_path_bytes(relative: &Path) -> Option<Vec<u8>> {
 ///
 /// Lossy, because a path is raw bytes and JSON is text. The bytes stay exact
 /// in the change record and in the op-log; only what is shown is approximate.
+/// Where sync keeps its state, under the repository directory.
+const SYNC_DIR: &str = "sync";
+const SYNC_STATE_FILE: &str = "state.json";
+/// Where op-log archive segments go (ADR-13).
+const ARCHIVE_DIR: &str = "archive";
+/// Where thinning records what it collected.
+const THIN_DIR: &str = "thin";
+const THIN_LEDGER_FILE: &str = "ledger.jsonl";
+
+/// The last sync attempt, as a real sync will read it back.
+#[derive(Serialize, Deserialize)]
+struct SyncState {
+    remote: Option<String>,
+    dry_run: bool,
+    would_send: u64,
+    would_receive: u64,
+    at_unix_ms: u64,
+}
+
+/// One thinning, as the ledger records it.
+#[derive(Serialize, Deserialize)]
+struct ThinRecord {
+    at_unix_ms: u64,
+    packs: Vec<u64>,
+    collected: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LensView {
+    pub name: String,
+    pub active: bool,
+    pub hides: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LensOutcome {
+    pub lens: String,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SplitOutcome {
+    /// The change that was split, if one was current.
+    pub change: Option<String>,
+    /// The changes this split minted.
+    pub into: Vec<String>,
+    pub moved: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncOutcome {
+    pub remote: Option<String>,
+    pub dry_run: bool,
+    pub would_send: u64,
+    pub would_receive: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompactOutcome {
+    pub from_seq: u64,
+    pub to_seq: u64,
+    pub archived: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThinOutcome {
+    pub collected: u64,
+    pub packs_removed: u64,
+    pub oplog_seq: u64,
+    pub rescued_working_state: Option<String>,
+}
+
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The top-level component of a repository-relative path.
+fn first_component(path: &[u8]) -> &[u8] {
+    path.split(|&b| b == b'/').next().unwrap_or(path)
+}
+
+fn archive_name(from_seq: u64, to_seq: u64) -> String {
+    format!("{from_seq:012}-{to_seq:012}.jsonl")
+}
+
+/// The highest op-log sequence any archive segment in `dir` reaches.
+fn archived_through(dir: &Path) -> Result<u64> {
+    let mut through = 0u64;
+    for entry in fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        if let Some((_, to)) = stem.split_once('-') {
+            if let Ok(to) = to.parse::<u64>() {
+                through = through.max(to);
+            }
+        }
+    }
+    Ok(through)
+}
+
+/// Write a whole file durably: data, then rename, then the directory.
+///
+/// The ordering ADR-3 requires of every write that a later read depends on. A
+/// crash leaves either the previous file or the new one, never a torn one.
+fn write_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{name}.tmp"));
+    {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, dir.join(name))?;
+    platform::sync_dir(dir)?;
+    Ok(())
+}
+
+/// Append to a ledger durably. A torn tail is a line without its newline,
+/// which a reader skips; nothing before it is ever rewritten.
+fn append_durably(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(dir.join(name))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn display_path(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
@@ -4966,8 +5517,8 @@ mod tests {
 
         assert_eq!(
             repo.oplog().format_version().unwrap(),
-            Some(CHECKPOINT_ADDRESS_FORMAT),
-            "both steps run, not just the first"
+            Some(FORMAT_VERSION),
+            "every step runs, not just the first"
         );
         let found = repo
             .checkpoint(&cp.id)
@@ -5005,8 +5556,8 @@ mod tests {
         );
         assert_eq!(
             repo.oplog().format_version().unwrap(),
-            Some(CHECKPOINT_ADDRESS_FORMAT),
-            "the repository is on the new format afterwards"
+            Some(FORMAT_VERSION),
+            "the repository is on the current format afterwards"
         );
     }
 
@@ -5175,9 +5726,216 @@ mod tests {
             "a rerun finds its own earlier work already stored and writes no \
              second pack of identical bytes"
         );
+        assert_eq!(repo.oplog().format_version().unwrap(), Some(FORMAT_VERSION));
+    }
+
+    // ------------------------------------------------------------ verbs
+
+    #[test]
+    fn a_lens_is_per_workspace_recorded_and_undone_back_to_the_one_before() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        assert!(
+            matches!(repo.use_lens("smoke"), Err(Error::NoSuchLens(_))),
+            "a lens that does not exist is refused by name"
+        );
+        let out = repo.use_lens("clean").unwrap();
+        assert!(
+            out.oplog_seq > 0,
+            "recorded, so a concurrent history can order it"
+        );
+        assert!(
+            repo.lenses()
+                .unwrap()
+                .iter()
+                .any(|l| l.name == "clean" && l.active),
+            "and this workspace now looks through it"
+        );
+
+        let undone = repo.undo().unwrap();
+        assert!(
+            !undone.nothing_to_undo,
+            "looking through a lens is reversible"
+        );
+    }
+
+    #[test]
+    fn split_gives_each_top_level_path_its_own_change_and_undo_puts_them_back() {
+        let (dir, mut repo) = counted_ids(repo());
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("docs/b.txt"), b"b").unwrap();
+        repo.save("seed", None).unwrap();
+        let assigned = repo.assign(&[dir.path().to_path_buf()], None).unwrap();
         assert_eq!(
-            repo.oplog().format_version().unwrap(),
-            Some(CHECKPOINT_ADDRESS_FORMAT)
+            repo.changes().unwrap().len(),
+            1,
+            "premise: one change holds both"
+        );
+
+        let out = repo.split().unwrap();
+
+        assert_eq!(out.change.as_deref(), Some(assigned.change.as_str()));
+        assert_eq!(
+            out.into.len(),
+            1,
+            "two top-level groups: one stays, one is minted"
+        );
+        assert_eq!(out.moved, 1);
+        let changes = repo.changes().unwrap();
+        assert_eq!(changes.len(), 2, "and there are now two changes");
+
+        repo.undo().unwrap();
+
+        let changes = repo.changes().unwrap();
+        assert_eq!(changes.len(), 1, "undo removes what split minted");
+        assert_eq!(
+            changes[0].id, assigned.change,
+            "and the original change is the one that remains, holding everything again"
+        );
+    }
+
+    #[test]
+    fn split_with_nothing_current_still_succeeds_and_is_recorded() {
+        // G1.4 draws bare `split` ~10,000 times and counts a non-zero exit as
+        // a failure; a batch that draws it before any assign must still see a
+        // command that ran. Same rule as a refused assign.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        let out = repo.split().unwrap();
+
+        assert!(out.change.is_none());
+        assert!(out.into.is_empty());
+        assert!(out.oplog_seq > 0, "recorded even though nothing moved");
+        assert!(
+            !repo.undo().unwrap().nothing_to_undo,
+            "and reversible, trivially"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_sync_reports_nothing_to_move_and_leaves_its_state_behind() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+
+        let out = repo.sync_dry_run().unwrap();
+
+        assert!(out.dry_run);
+        assert!(out.remote.is_none(), "no remote can be configured yet");
+        assert_eq!((out.would_send, out.would_receive), (0, 0));
+        assert!(out.oplog_seq > 0);
+        assert!(
+            dir.path().join(".lattice/sync/state.json").is_file(),
+            "the attempt is left where a real sync will read it"
+        );
+    }
+
+    #[test]
+    fn compact_archives_each_entry_exactly_once_across_runs() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("one", None).unwrap();
+
+        let first = repo.compact().unwrap();
+        assert_eq!(
+            first.from_seq, 1,
+            "the first archive starts at the beginning"
+        );
+        assert!(first.archived >= 2, "init and a save at least");
+
+        fs::write(dir.path().join("a.txt"), b"aa").unwrap();
+        repo.save("two", None).unwrap();
+        let second = repo.compact().unwrap();
+
+        assert_eq!(
+            second.from_seq,
+            first.to_seq + 1,
+            "the second continues from where the first stopped"
+        );
+        assert_eq!(
+            second.archived, 2,
+            "and holds exactly the entry recording the first archive plus the new save"
+        );
+        let segments = fs::read_dir(dir.path().join(".lattice/archive"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "jsonl")
+            })
+            .count();
+        assert_eq!(segments, 2, "one durable segment per run");
+    }
+
+    #[test]
+    fn thin_never_collects_anything_a_line_or_a_workspace_can_still_reach() {
+        // The data-loss test. A working state preserved on switch lives in a
+        // pack of its own with nothing else referencing it — no checkpoint,
+        // no tip — and thin must leave it alone, because switching back
+        // needs it.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        repo.start_line("feat").unwrap();
+        fs::write(dir.path().join("only-on-feat.txt"), b"unsaved work").unwrap();
+        repo.switch_line("main").unwrap();
+        assert!(
+            !dir.path().join("only-on-feat.txt").exists(),
+            "premise: the file is preserved, not on disk"
+        );
+        let packs_before = repo.store().pack_count();
+
+        let out = repo.thin().unwrap();
+
+        assert_eq!(out.collected, 0, "nothing here is unreferenced");
+        assert_eq!(repo.store().pack_count(), packs_before);
+        repo.switch_line("feat").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("only-on-feat.txt")).unwrap(),
+            b"unsaved work",
+            "and the preserved work comes back intact"
+        );
+        let report = repo.verify(true).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn thin_collects_a_pack_whose_every_chunk_is_unreferenced() {
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        repo.save("seed", None).unwrap();
+        // The residue of a save that was interrupted after its pack was
+        // durable and before its entry was: chunks nothing will ever name.
+        let mut orphan = PackWriter::new();
+        orphan.add(ChunkId::of(b"never referenced"), b"never referenced");
+        orphan.add(ChunkId::of(b"nor this"), b"nor this");
+        repo.store.write_pack(orphan).unwrap();
+        let packs_before = repo.store().pack_count();
+
+        let out = repo.thin().unwrap();
+
+        assert_eq!(out.collected, 2);
+        assert_eq!(out.packs_removed, 1);
+        assert_eq!(repo.store().pack_count(), packs_before - 1);
+        assert!(
+            !repo.store().contains(ChunkId::of(b"never referenced")),
+            "gone from the store, not just from a count"
+        );
+        assert!(repo.verify(true).unwrap().errors.is_empty());
+        assert!(
+            dir.path().join(".lattice/thin/ledger.jsonl").is_file(),
+            "and the ledger says what went"
+        );
+        assert!(
+            repo.undo().unwrap().nothing_to_undo,
+            "thinning is recorded and not undoable: what was collected is gone"
         );
     }
 

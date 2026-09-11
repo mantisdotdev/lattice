@@ -548,6 +548,33 @@ impl Store {
         self.packs.len()
     }
 
+    /// Every pack, with the chunks it holds. The unit `thin` reasons about:
+    /// a pack is removed whole or not at all.
+    pub fn packs_with_chunks(&self) -> Vec<(u64, Vec<ChunkId>)> {
+        self.packs
+            .iter()
+            .map(|(id, pack)| (*id, pack.chunk_ids()))
+            .collect()
+    }
+
+    /// Remove one pack and its index, durably.
+    ///
+    /// The index goes first. A crash between the two leaves a pack with no
+    /// index, which `open` already treats as the residue of an interrupted
+    /// write and skips — so the store never opens onto a half-removed pack
+    /// that reads as intact. The reverse order would leave an index pointing
+    /// at bytes that are gone.
+    pub fn remove_pack(&mut self, id: u64) -> Result<()> {
+        let Some(position) = self.packs.iter().position(|(pid, _)| *pid == id) else {
+            return Err(Error::NotFound(format!("pack {id} is not in this store")));
+        };
+        self.packs.remove(position);
+        fs::remove_file(self.dir.join(format!("{id:012}.idx")))?;
+        fs::remove_file(self.dir.join(format!("{id:012}.pack")))?;
+        crate::platform::sync_dir(&self.dir)?;
+        Ok(())
+    }
+
     pub fn all_chunk_ids(&self) -> Vec<ChunkId> {
         let mut out: Vec<ChunkId> = self.packs.iter().flat_map(|(_, p)| p.chunk_ids()).collect();
         out.sort_unstable();
