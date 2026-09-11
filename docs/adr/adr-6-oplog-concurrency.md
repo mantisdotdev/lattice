@@ -167,18 +167,32 @@ tree is a fraction of a second, the **next** save — changing one file — is a
 order of magnitude more for a fraction of the work, and `status`, which saves
 nothing at all, is slower still.
 
-So the cost is not the tree walk, and it is not the repository lock either. Two
-things scale with what a repository has accumulated rather than with what it was
-asked to do:
+So the cost is not the tree walk, and it is not the repository lock either.
 
-- **`PackWriter::retain_unknown` asks `Store::contains` for every chunk it
-  holds, and `contains` scans every pack.** One pack is written per save, so a
-  save is O(chunks in the tree × packs in the store): it gets slower with every
-  save that came before it. That is why the first save is fast and the second
-  is not.
-- **`Repo::checkpoint` has no index.** It reads and deserialises every chunk in
-  the store looking for one blob, and `status` does that twice — once through
-  `head_checkpoint`, once through `checkpoints`.
+**A checkpoint's identity is not its storage address.** `Checkpoint::body_id`
+hashes `(tree, message, parent, at_unix_ms)`; the blob is stored under the hash
+of the whole serialised struct. Nothing maps one to the other, so finding a
+checkpoint means reading and deserialising every chunk in the store until one
+matches. The source says so where it happens — "a checkpoint is
+content-addressed like everything else, but its own address is over its body
+rather than its serialised form, so the lookup is by scanning the addresses we
+know ... a checkpoint index is a later refinement."
+
+Timing each command separately at 10,000 files puts it beyond doubt: what is
+indexed is fast, and what is scanned is not.
+
+| Command | Median | |
+|---|---|---|
+| `internals oplog` | 0.032 s | the op-log, indexed in redb |
+| `line list` | 0.032 s | the line state, indexed in redb |
+| `log --forensic` | 6.737 s | `checkpoints()` — reads every blob |
+| `status` | 10.435 s | `head_checkpoint` + `checkpoints()` |
+
+`save` pays it too, through `head_checkpoint`. A second, smaller scan of the
+same kind sits in `PackWriter::retain_unknown`, which asks `Store::contains` per
+chunk while `contains` scans every pack — worth fixing, but not what dominates.
+
+<!-- evidence: medians of three runs of each command against one 10,000-file repository built by the same method as scripts/probe_scaling.py; the two rows the probe records are in bench/results/raw/adr6-scaling.json -->
 
 Both predate this ADR and both are acknowledged where they are written ("small
 and adequate for the current history sizes; a checkpoint index is a later
@@ -220,9 +234,12 @@ deciding what to build next.
 ### What is owed
 
 **G1.4 cannot be claimed until this is addressed**, and addressing it is its own
-slice with its own ADR: a chunk index that makes `contains` a lookup rather than
-a scan, and a checkpoint index that makes `checkpoint` one too. Neither is a
-concurrency question, which is why neither is decided here.
+slice with its own ADR. The shape is not open: the op-log already indexes
+checkpoint id → op-log sequence in its `SAVED` table, written in the same
+transaction as the `Save` that records it. One more column there — checkpoint id
+→ the chunk address its blob is stored at — turns every one of these scans into
+a lookup, at the cost of one key per checkpoint. That it is not decided here is
+deliberate; it is not a concurrency question.
 - **Readers are excluded too, and need not be.** `ltx log`, `status` and
   `change list` mutate nothing, and could hold a shared lock — but redb takes an
   exclusive lock on its own file regardless, so a shared lock here would buy

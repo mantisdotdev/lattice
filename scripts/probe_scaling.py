@@ -10,23 +10,29 @@ ADR-6 recorded one question and declined to answer it:
 
 This measures it. The answer is no, and the reason is not the tree walk.
 
-Two costs grow with things a repository accumulates rather than with the work
-asked of it:
+One cost dominates, and it is not the tree walk. **A checkpoint's identity is
+not its storage address.** `Checkpoint::body_id` hashes `(tree, message, parent,
+at_unix_ms)`, while the blob is stored under the hash of the whole serialised
+struct — so nothing maps one to the other, and finding a checkpoint means
+reading and deserialising every chunk in the store until one matches. The source
+says so itself: "a checkpoint is content-addressed like everything else, but its
+own address is over its body rather than its serialised form, so the lookup is by
+scanning the addresses we know ... a checkpoint index is a later refinement."
 
-  * `PackWriter::retain_unknown` asks `Store::contains` for every chunk it
-    holds, and `contains` scans every pack. One pack is written per save, so a
-    save is O(chunks in the tree x packs in the store) — it gets slower with
-    every save that came before it, which is why the FIRST save of a large tree
-    is fast and the next one is not.
-  * `Repo::checkpoint` has no index: it reads and deserialises every chunk in
-    the store looking for one blob. `status` does that twice, once through
-    `head_checkpoint` and once through `checkpoints`.
+Measured at 10,000 files, that scan is seconds and everything else is
+milliseconds:
 
-Both are acknowledged in the source — "small and adequate for the current
-history sizes; a checkpoint index is a later refinement" — and both predate the
-workspace slice, which is why `--ltx` exists: pointing it at a binary built from
-another revision produces a second arm, and the two together show the finding is
-not a regression.
+    internals oplog     0.032 s    the op-log, indexed in redb
+    line list           0.032 s    the line state, indexed in redb
+    log --forensic      6.737 s    checkpoints() — reads every blob
+    status             10.435 s    head_checkpoint + checkpoints()
+
+`save` pays it too, through `head_checkpoint`. `PackWriter::retain_unknown`
+asking `Store::contains` per chunk is a second, smaller scan of the same kind.
+
+Both predate the workspace slice, which is why `--ltx` exists: pointing it at a
+binary built from another revision produces a second arm, and the two together
+show the finding is not a regression.
 
 Measured, not projected: the numbers below are of real commands on real trees.
 The projection at the end IS an extrapolation and is labelled as one.
