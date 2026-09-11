@@ -2800,160 +2800,176 @@ impl Repo {
         // from "an unrelated file was already here" — the filesystem, not a
         // guess about which names fold, is the authority.
         let mut written_ids: Vec<(Vec<u8>, (u64, u64))> = Vec::new();
-
         for (name, node) in &tree.entries {
-            // A tree entry name is a single path component by construction.
-            // A "..", a separator, or a NUL can only reach here from a corrupt
-            // or hostile repository, and joining it would let a checkout write
-            // OUTSIDE the destination — arbitrary file write. Refuse it.
-            if !is_safe_component(name) {
-                report.collisions.push(Collision {
-                    path: String::from_utf8_lossy(name).into_owned(),
-                    collided_with: String::new(),
-                    reason: "refused: not a single path component (a corrupt or \
-                             hostile repository cannot escape the destination)"
-                        .to_string(),
-                });
-                continue;
+            self.write_entry(name, node, dest, &mut written_ids, report)?;
+        }
+        Ok(())
+    }
+
+    /// Write one tree entry into `dest`, with every check `restore_tree`
+    /// makes: a safe single component, a representable name, a fold
+    /// collision against what this pass already wrote here, never through a
+    /// symlink. `written_ids` is the directory's memory of what it has
+    /// created and what it folds onto.
+    fn write_entry(
+        &self,
+        name: &[u8],
+        node: &Node,
+        dest: &Path,
+        written_ids: &mut Vec<(Vec<u8>, (u64, u64))>,
+        report: &mut CheckoutReport,
+    ) -> Result<()> {
+        // A tree entry name is a single path component by construction.
+        // A "..", a separator, or a NUL can only reach here from a corrupt
+        // or hostile repository, and joining it would let a checkout write
+        // OUTSIDE the destination — arbitrary file write. Refuse it.
+        if !is_safe_component(name) {
+            report.collisions.push(Collision {
+                path: String::from_utf8_lossy(name).into_owned(),
+                collided_with: String::new(),
+                reason: "refused: not a single path component (a corrupt or \
+                         hostile repository cannot escape the destination)"
+                    .to_string(),
+            });
+            return Ok(());
+        }
+
+        // Windows names are UTF-16, so a byte sequence that is not valid
+        // UTF-8 has no faithful representation there. Reported rather than
+        // approximated: a silently renamed file is a lost file.
+        let Some(name_os) = platform::os_string_from_bytes(name) else {
+            report.collisions.push(Collision {
+                path: String::from_utf8_lossy(name).into_owned(),
+                collided_with: String::new(),
+                reason: format!(
+                    "this platform ({}) cannot represent these name bytes",
+                    platform::platform_name()
+                ),
+            });
+            return Ok(());
+        };
+        let path = dest.join(&name_os);
+
+        // A fold collision is specifically: the path already exists AND it
+        // is the SAME filesystem object as a name we already wrote in this
+        // directory — the filesystem folded two distinct names into one.
+        // An unrelated pre-existing file is not that; checkout overwrites
+        // it, which is the point of writing a checkpoint into a directory.
+        // The authority is the inode, not a guess about which names fold:
+        // an earlier approximation missed real NFC/NFD and non-ASCII case
+        // folds and silently overwrote the sibling.
+        if let Ok(existing) = fs::symlink_metadata(&path) {
+            if let Some(id) = platform::file_identity(&existing) {
+                if let Some((sibling, _)) = written_ids.iter().find(|(_, wid)| *wid == id) {
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::from_utf8_lossy(sibling).into_owned(),
+                        reason: "this filesystem does not distinguish these names \
+                                 (case folding or Unicode normalisation)"
+                            .to_string(),
+                    });
+                    return Ok(());
+                }
             }
+            // Otherwise a pre-existing unrelated file (or, where identity is
+            // unavailable, a fold this platform cannot detect): overwrite.
+        }
 
-            // Windows names are UTF-16, so a byte sequence that is not valid
-            // UTF-8 has no faithful representation there. Reported rather than
-            // approximated: a silently renamed file is a lost file.
-            let Some(name_os) = platform::os_string_from_bytes(name) else {
-                report.collisions.push(Collision {
-                    path: String::from_utf8_lossy(name).into_owned(),
-                    collided_with: String::new(),
-                    reason: format!(
-                        "this platform ({}) cannot represent these name bytes",
-                        platform::platform_name()
-                    ),
-                });
-                continue;
-            };
-            let path = dest.join(&name_os);
+        // Never write THROUGH a pre-existing symlink at this path:
+        // create_dir_all and fs::write both follow a final symlink, so a
+        // link left in the destination (by an earlier checkout, or a
+        // hostile actor) could redirect the write outside dest — a
+        // path-traversal / link-following hole (CWE-59). Remove it first;
+        // checkout replaces whatever is here. A folded sibling we wrote was
+        // already caught above, so this only clears an unrelated link.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                fs::remove_file(&path)?;
+            }
+        }
 
-            // A fold collision is specifically: the path already exists AND it
-            // is the SAME filesystem object as a name we already wrote in this
-            // directory — the filesystem folded two distinct names into one.
-            // An unrelated pre-existing file is not that; checkout overwrites
-            // it, which is the point of writing a checkpoint into a directory.
-            // The authority is the inode, not a guess about which names fold:
-            // an earlier approximation missed real NFC/NFD and non-ASCII case
-            // folds and silently overwrote the sibling.
-            if let Ok(existing) = fs::symlink_metadata(&path) {
-                if let Some(id) = platform::file_identity(&existing) {
-                    if let Some((sibling, _)) = written_ids.iter().find(|(_, wid)| *wid == id) {
-                        report.collisions.push(Collision {
-                            path: String::from_utf8_lossy(name).into_owned(),
-                            collided_with: String::from_utf8_lossy(sibling).into_owned(),
-                            reason: "this filesystem does not distinguish these names \
-                                     (case folding or Unicode normalisation)"
-                                .to_string(),
-                        });
-                        continue;
+        match node {
+            Node::Directory { tree } => {
+                fs::create_dir_all(&path)?;
+                // The directory itself is an entry checkout created, so it
+                // counts — otherwise the reported total understates a
+                // checkpoint that contains directories.
+                report.entries_written += 1;
+                self.restore_tree(tree, &path, report)?;
+            }
+            Node::Symlink { target } => {
+                // Replace anything already at this path. A real removal
+                // failure (a directory in the way, a permission error) is
+                // propagated, not swallowed; only a benign "already gone"
+                // is tolerated.
+                if let Err(e) = fs::remove_file(&path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(e.into());
                     }
                 }
-                // Otherwise a pre-existing unrelated file (or, where identity is
-                // unavailable, a fold this platform cannot detect): overwrite.
+                let Some(target_os) = platform::os_string_from_bytes(target) else {
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::new(),
+                        reason: format!(
+                            "this platform ({}) cannot represent the link \
+                             target's bytes",
+                            platform::platform_name()
+                        ),
+                    });
+                    return Ok(());
+                };
+                platform::symlink(Path::new(&target_os), &path)?;
+                report.entries_written += 1;
             }
-
-            // Never write THROUGH a pre-existing symlink at this path:
-            // create_dir_all and fs::write both follow a final symlink, so a
-            // link left in the destination (by an earlier checkout, or a
-            // hostile actor) could redirect the write outside dest — a
-            // path-traversal / link-following hole (CWE-59). Remove it first;
-            // checkout replaces whatever is here. A folded sibling we wrote was
-            // already caught above, so this only clears an unrelated link.
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if meta.file_type().is_symlink() {
-                    fs::remove_file(&path)?;
-                }
-            }
-
-            match node {
-                Node::Directory { tree } => {
-                    fs::create_dir_all(&path)?;
-                    // The directory itself is an entry checkout created, so it
-                    // counts — otherwise the reported total understates a
-                    // checkpoint that contains directories.
-                    report.entries_written += 1;
-                    self.restore_tree(tree, &path, report)?;
-                }
-                Node::Symlink { target } => {
-                    // Replace anything already at this path. A real removal
-                    // failure (a directory in the way, a permission error) is
-                    // propagated, not swallowed; only a benign "already gone"
-                    // is tolerated.
-                    if let Err(e) = fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            return Err(e.into());
-                        }
-                    }
-                    let Some(target_os) = platform::os_string_from_bytes(target) else {
-                        report.collisions.push(Collision {
-                            path: String::from_utf8_lossy(name).into_owned(),
-                            collided_with: String::new(),
-                            reason: format!(
-                                "this platform ({}) cannot represent the link \
-                                 target's bytes",
-                                platform::platform_name()
-                            ),
-                        });
-                        continue;
+            Node::File { chunks, size, mode } => {
+                let mut content = Vec::with_capacity(*size as usize);
+                for hex in chunks {
+                    let Some(cid) = ChunkId::from_hex(hex) else {
+                        return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
                     };
-                    platform::symlink(Path::new(&target_os), &path)?;
-                    report.entries_written += 1;
-                }
-                Node::File { chunks, size, mode } => {
-                    let mut content = Vec::with_capacity(*size as usize);
-                    for hex in chunks {
-                        let Some(cid) = ChunkId::from_hex(hex) else {
-                            return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
-                        };
-                        let Some(part) = self.store.read(cid)? else {
-                            return Err(Error::NotFound(format!(
-                                "chunk {hex} is not present locally"
-                            )));
-                        };
-                        content.extend_from_slice(&part);
-                    }
-                    if content.len() as u64 != *size {
-                        return Err(Error::Corrupt(format!(
-                            "{} reassembles to {} bytes, expected {size}",
-                            path.display(),
-                            content.len()
+                    let Some(part) = self.store.read(cid)? else {
+                        return Err(Error::NotFound(format!(
+                            "chunk {hex} is not present locally"
                         )));
-                    }
-                    fs::write(&path, &content)?;
-                    platform::set_file_mode(&path, *mode)?;
-                    if platform::mode_is_lossy_here(*mode) {
-                        // Named, not silent. The lost bits vary — the executable
-                        // bit, or the group/other distinctions of a mode like
-                        // 0o640 — so the report states the mode that could not
-                        // be recorded rather than naming one specific bit.
-                        report.collisions.push(Collision {
-                            path: String::from_utf8_lossy(name).into_owned(),
-                            collided_with: String::new(),
-                            reason: format!(
-                                "written, but this platform ({}) cannot record \
-                                 the permission mode {:04o}",
-                                platform::platform_name(),
-                                mode & 0o777
-                            ),
-                        });
-                    }
-                    report.entries_written += 1;
+                    };
+                    content.extend_from_slice(&part);
                 }
+                if content.len() as u64 != *size {
+                    return Err(Error::Corrupt(format!(
+                        "{} reassembles to {} bytes, expected {size}",
+                        path.display(),
+                        content.len()
+                    )));
+                }
+                fs::write(&path, &content)?;
+                platform::set_file_mode(&path, *mode)?;
+                if platform::mode_is_lossy_here(*mode) {
+                    // Named, not silent. The lost bits vary — the executable
+                    // bit, or the group/other distinctions of a mode like
+                    // 0o640 — so the report states the mode that could not
+                    // be recorded rather than naming one specific bit.
+                    report.collisions.push(Collision {
+                        path: String::from_utf8_lossy(name).into_owned(),
+                        collided_with: String::new(),
+                        reason: format!(
+                            "written, but this platform ({}) cannot record \
+                             the permission mode {:04o}",
+                            platform::platform_name(),
+                            mode & 0o777
+                        ),
+                    });
+                }
+                report.entries_written += 1;
             }
-            // Record the identity of what we just wrote so a later name the
-            // filesystem folds onto it is detected as a collision, not
-            // silently overwritten. Reached only on a successful write — the
-            // unrepresentable-target arm above `continue`s before here.
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if let Some(id) = platform::file_identity(&meta) {
-                    written_ids.push((name.clone(), id));
-                }
+        }
+        // Record the identity of what we just wrote so a later name the
+        // filesystem folds onto it is detected as a collision, not
+        // silently overwritten. Reached only on a successful write — the
+        // unrepresentable-target arm above `continue`s before here.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if let Some(id) = platform::file_identity(&meta) {
+                written_ids.push((name.to_vec(), id));
             }
         }
         Ok(())
