@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import statistics
 import subprocess
@@ -64,10 +65,28 @@ DEFAULT_LTX = REPO / "target" / "release" / "ltx"
 TIMEOUT_S = 1800
 
 
+class ProbeError(Exception):
+    """Anything that makes a run meaningless, carried to the one place that
+    prints the structured error other failure paths already print.
+
+    Without this the file had two ways to fail: a JSON document for the
+    conditions it thought of, and a traceback for a bad `--sizes`, an `--ltx`
+    that is a directory, or a command that hangs. A caller parsing the output
+    cannot tell the second kind from a crash in the probe itself.
+    """
+
+
 def run(ltx: Path, args: list[str], cwd: Path) -> tuple[int, float]:
     started = time.monotonic()
-    proc = subprocess.run([str(ltx), *args], cwd=cwd, capture_output=True,
-                          text=True, errors="replace", timeout=TIMEOUT_S)
+    try:
+        proc = subprocess.run([str(ltx), *args], cwd=cwd, capture_output=True,
+                              text=True, errors="replace", timeout=TIMEOUT_S,
+                              check=False)
+    except subprocess.TimeoutExpired:
+        raise ProbeError(f"`ltx {' '.join(args)}` did not finish within "
+                         f"{TIMEOUT_S}s") from None
+    except OSError as exc:
+        raise ProbeError(f"could not run {ltx}: {exc}") from None
     return proc.returncode, time.monotonic() - started
 
 
@@ -109,6 +128,12 @@ def measure(ltx: Path, files: int, samples: int) -> dict | None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def fail(why: str) -> int:
+    """One shape for every failure, so a caller never has to parse a traceback."""
+    print(json.dumps({"probe": "scaling", "error": why}))
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", default="1000,5000,10000",
@@ -118,24 +143,27 @@ def main() -> int:
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
-    sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    try:
+        sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    except ValueError as exc:
+        return fail(f"--sizes must be whole numbers: {exc}")
     # A run of nothing satisfies every check below without measuring anything.
     if args.samples < 1 or not sizes or any(n < 1 for n in sizes):
-        print(json.dumps({"probe": "scaling",
-                          "error": "--sizes must be positive and --samples at least 1"}))
-        return 1
-    if not args.ltx.exists():
-        print(json.dumps({"probe": "scaling", "error": f"{args.ltx} is not built"}))
-        return 1
+        return fail("--sizes must be positive and --samples at least 1")
+    # `exists` is not enough: a directory or a file without the execute bit
+    # gets past it and fails later, inside a measurement, as an OSError.
+    if not args.ltx.is_file() or not os.access(args.ltx, os.X_OK):
+        return fail(f"{args.ltx} is not a runnable binary")
 
     rows = []
-    for n in sizes:
-        row = measure(args.ltx, n, args.samples)
-        if row is None:
-            print(json.dumps({"probe": "scaling",
-                              "error": f"a command failed at {n} files"}))
-            return 1
-        rows.append(row)
+    try:
+        for n in sizes:
+            row = measure(args.ltx, n, args.samples)
+            if row is None:
+                return fail(f"a command failed at {n} files")
+            rows.append(row)
+    except ProbeError as exc:
+        return fail(str(exc))
 
     out = {"probe": "scaling", "samples": args.samples, "sizes": rows}
 
