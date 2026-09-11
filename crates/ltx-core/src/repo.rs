@@ -2897,9 +2897,37 @@ impl Repo {
     /// is an error. The default-to-current policy lives here rather than in the
     /// CLI, which §8 (G5.5) requires: the CLI must hold no decision the API
     /// lacks.
+    /// Resolve a checkpoint reference a user typed: a full address, or the
+    /// shortest-unique prefix `log` prints — the same doctrine changes follow
+    /// (ADR-17 §3), so what the product shows is what the product accepts.
+    pub fn resolve_checkpoint(&self, typed: &str) -> Result<String> {
+        if ChunkId::from_hex(typed).is_some() {
+            return Ok(typed.to_string());
+        }
+        let saved = self.oplog.saved_checkpoints()?;
+        let live: Vec<&str> = saved.iter().map(String::as_str).collect();
+        match change::resolve(typed, &live) {
+            change::Resolution::One(id) => Ok(id),
+            change::Resolution::Ambiguous(matched) => {
+                let shown: Vec<String> = matched
+                    .iter()
+                    .map(|id| change::abbreviate(id, &live))
+                    .collect();
+                Err(Error::Invalid(format!(
+                    "{typed} names {} checkpoints ({}); type more of it",
+                    matched.len(),
+                    shown.join(", ")
+                )))
+            }
+            change::Resolution::Unknown => Err(Error::NotFound(format!(
+                "no checkpoint begins with {typed}"
+            ))),
+        }
+    }
+
     pub fn checkout_into(&self, checkpoint: Option<&str>, dest: &Path) -> Result<CheckoutReport> {
         let id = match checkpoint {
-            Some(id) => id.to_string(),
+            Some(typed) => self.resolve_checkpoint(typed)?,
             None => {
                 self.head_checkpoint()?
                     .ok_or_else(|| {
@@ -6264,6 +6292,69 @@ mod tests {
             b"new\n"
         );
         assert!(repo.verify(true).unwrap().errors.is_empty());
+    }
+
+    #[test]
+    fn a_checkpoint_id_as_log_prints_it_is_one_checkout_accepts() {
+        // `log` prints twelve characters; `checkout --checkpoint` took only
+        // the full sixty-four, so a person reading the log could not use what
+        // they saw. Same doctrine as changes: what the product shows, it takes.
+        let (dir, mut repo) = repo();
+        fs::write(dir.path().join("a.txt"), b"one").unwrap();
+        let first = repo.save("first", None).unwrap().checkpoint;
+        fs::write(dir.path().join("a.txt"), b"two").unwrap();
+        repo.save("second", None).unwrap();
+
+        let shown = crate::short_id(&first.id).to_string();
+        assert_eq!(repo.resolve_checkpoint(&shown).unwrap(), first.id);
+        assert_eq!(
+            repo.resolve_checkpoint(&first.id).unwrap(),
+            first.id,
+            "the full address still works"
+        );
+
+        let out = tempfile::tempdir().unwrap();
+        let report = repo
+            .checkout_into(Some(&shown), &out.path().join("first"))
+            .expect("the id log prints is accepted");
+        assert_eq!(report.checkpoint, first.id);
+        assert_eq!(fs::read(out.path().join("first/a.txt")).unwrap(), b"one");
+
+        assert!(
+            matches!(repo.resolve_checkpoint("zzzz"), Err(Error::NotFound(_))),
+            "a prefix nothing begins with is not found"
+        );
+        assert!(
+            matches!(repo.resolve_checkpoint("ab"), Err(Error::NotFound(_))),
+            "below the display floor nothing resolves, or the empty string would name everything"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_checkpoint_prefix_names_what_it_could_mean() {
+        let (dir, mut repo) = repo();
+        let mut ids = Vec::new();
+        // Enough checkpoints that two share a four-character prefix is a
+        // matter of chance, so the ambiguity is asked for by name: the common
+        // prefix of the first two, extended until it is unique, minus a step.
+        for i in 0..2 {
+            fs::write(dir.path().join("a.txt"), format!("{i}")).unwrap();
+            ids.push(repo.save("x", None).unwrap().checkpoint.id);
+        }
+        let common: String = ids[0]
+            .chars()
+            .zip(ids[1].chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect();
+        if common.chars().count() < 4 {
+            // These two happen to diverge before the floor; nothing to test
+            // here, and forcing it would mean minting ids by hand.
+            return;
+        }
+        let err = repo.resolve_checkpoint(&common).unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err}");
+        assert!(err.to_string().contains("2 checkpoints"), "{err}");
     }
 
     #[test]
