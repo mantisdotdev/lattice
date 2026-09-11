@@ -160,12 +160,14 @@ not a hypothetical.
 ```
 
 **The ratio carries the argument, not the absolute.** These are wall-clock
-timings on one shared machine and they move between runs — an earlier run of the
-identical command recorded 1.45 s for the incremental save. What is stable is
-the shape, across every run and both arms: the first save of a ten-thousand-file
-tree is a fraction of a second, the **next** save — changing one file — is an
-order of magnitude more for a fraction of the work, and `status`, which saves
-nothing at all, is slower still.
+timings on one shared machine and they move between runs: the attribution below
+records 11.524 s for the same `status` this run puts at 13.121 s, on the same
+machine and the same tree size. Both are committed, and the gap between them is
+the reason no absolute here is worth arguing about. What is stable is the shape,
+across every run and both arms: the first save of a ten-thousand-file tree is a
+fraction of a second, the **next** save — changing one file — is an order of
+magnitude more for a fraction of the work, and `status`, which saves nothing at
+all, is slower still.
 
 So the cost is not the tree walk, and it is not the repository lock either.
 
@@ -178,15 +180,27 @@ content-addressed like everything else, but its own address is over its body
 rather than its serialised form, so the lookup is by scanning the addresses we
 know ... a checkpoint index is a later refinement."
 
-Timing each command separately at 10,000 files puts it beyond doubt: what is
-indexed is fast, and what is scanned is not.
+Timing each command separately puts it beyond doubt. `probe_scaling.py
+--attribute` does exactly that, and `bench/results/raw/adr6-attribution.json` is
+the run:
 
-| Command | Median | |
-|---|---|---|
-| `internals oplog` | 0.032 s | the op-log, indexed in redb |
-| `line list` | 0.032 s | the line state, indexed in redb |
-| `log --forensic` | 6.737 s | `checkpoints()` — reads every blob |
-| `status` | 10.435 s | `head_checkpoint` + `checkpoints()` |
+```json
+{
+  "files": 10000,
+  "samples": 3,
+  "internals_oplog_s": 0.035,
+  "line_list_s": 0.036,
+  "log_forensic_s": 7.782,
+  "status_s": 11.524
+}
+```
+
+What is indexed is fast and what is scanned is not, with nothing in between.
+`internals oplog` and `line list` answer from redb and cost tens of milliseconds
+whatever the repository holds. `log --forensic` goes through `checkpoints()`,
+which reads every blob, and costs two hundred times as much. `status` calls
+`head_checkpoint` and `checkpoints()`, so it pays twice and is the slowest
+command in the product — while writing nothing and walking no tree.
 
 `save` pays it too, through `head_checkpoint`. A second cost, of a different
 shape, sits in `PackWriter::retain_unknown`: it asks `Store::contains` once per
@@ -197,7 +211,7 @@ the number of packs — and a save writes a pack. At G1.4's 80,000 operations
 that is 80,000 index searches per chunk offered, which is why it is worth
 fixing even though it is not what dominates here.
 
-<!-- evidence: medians of three runs of each command against one 10,000-file repository built by the same method as scripts/probe_scaling.py; the two rows the probe records are in bench/results/raw/adr6-scaling.json -->
+<!-- evidence: the `retain_unknown` paragraph is read from the source of Store::contains and PackWriter::retain_unknown, not measured; every number above it is quoted from bench/results/raw/adr6-attribution.json or bench/results/raw/adr6-scaling.json -->
 
 Both predate this ADR and both are acknowledged where they are written ("small
 and adequate for the current history sizes; a checkpoint index is a later
