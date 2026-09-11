@@ -152,18 +152,25 @@ The first save is unchanged, which is the control: it always wrote its content
 and never looked a checkpoint up, so nothing about it should have moved, and
 nothing did.
 
-`status` is the clean result. It went from 8.361 s to 0.038 s, and — the part
-that matters more than the ratio — it stopped growing: 0.035, 0.035, 0.038 at
-1,000, 5,000 and 10,000 files. A command that reads no content now costs the
-same whatever the repository holds, which is what "it is a lookup, not a scan"
-means when measured rather than asserted.
+`status` went from 8.361 s to 0.038 s and stopped growing: 0.035, 0.035, 0.038
+at 1,000, 5,000 and 10,000 files.
 
-An incremental save went from 3.445 s to 0.236 s and still grows with the tree —
-0.073, 0.134, 0.236 across the same three sizes. That residue is the tree walk,
-and it is not a defect of the same kind: a save that must notice which of 10,000
-files changed has to look at 10,000 files. Making it proportional to the *change*
-instead needs a working-tree index, which is a separate slice and is not
-attempted here.
+**Read that number for what it is.** `Repo::status` reports the head
+checkpoint, the checkpoint and operation counts, and the chunk and pack counts.
+It does not compare the working tree against the tip, so a file edited after a
+save changes nothing it prints. Its whole cost was the scan, which is why
+removing the scan leaves a flat line — and why the flatness is evidence about
+the read path rather than about a working-tree comparison nobody has written
+yet.
+
+The incremental save is the number to weigh, because a save does walk the tree:
+0.236 s where it was 3.445 s, still growing, and growing for a reason.
+
+Across the same three sizes an incremental save costs 0.073, 0.134 and 0.236 s.
+That residue is the tree walk, and it is not a defect of the same kind: a save
+that must notice which of 10,000 files changed has to look at 10,000 files.
+Making it proportional to the *change* instead needs a working-tree index, which
+is a separate slice and is not attempted here.
 
 **G1.4 is closer and still does not fit.** The probe's own extrapolation falls
 from 306 hours to 21, and 21 hours is not a budget anyone accepts either. What
@@ -183,8 +190,8 @@ G1.4's obstacle is now a different one.
   ADR-6 named all four as sharing this scan, and the section above shows it
   gone. That is not a gate result: each of those gates measures a reference
   repository this checkout does not contain, and none of them has been run.
-  `status` at 0.038 s against G1.5's 100 ms budget is encouraging at a tenth of
-  the reference size and is not a pass.
+  `status` at 0.038 s against G1.5's 100 ms budget is not a pass, and is worth
+  less than it looks for the reason given above.
 - **The pack-count cost is untouched.** ADR-6 also names `retain_unknown`, whose
   cost grows with the number of packs rather than the number of blobs. It is a
   different fix and it is not in this slice.
@@ -196,7 +203,17 @@ G1.4's obstacle is now a different one.
 1. **Unreferenced pre-migration blobs accumulate.** A repository that migrates
    keeps one dead blob per checkpoint forever. Collection is a verb nothing
    implements, and ADR-10's ephemeral tier is the natural home for it.
-2. **The migration's cost is the scan it abolishes.** One pass, once, at the
+2. **G1.5 times a command whose output nothing checks.** The harness runs
+   `ltx status` on the reference repo and reports p95; it does not assert that
+   the command says anything. Since `status` does not look at the working tree,
+   the gate as frozen would be satisfied by a command that printed a constant.
+   That is not an accusation against the harness — it measures the latency it
+   was written to measure — but a latency budget on a command that has not yet
+   been built to do the expensive thing is a budget met in advance, and it
+   should be met again once it has. Making `status` a working-tree status is
+   its own slice; §0.3 then governs whether G1.5's measurement has become
+   stricter.
+3. **The migration's cost is the scan it abolishes.** One pass, once, at the
    first open after upgrade — seconds on the ten-thousand-file repository
    measured above. That is a one-time cost paid at an unpredictable moment
    rather than at an announced one, and no progress is reported while it runs.

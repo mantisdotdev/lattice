@@ -26,6 +26,12 @@ by two orders of magnitude in one artifact. The numbers are not repeated here â€
 `bench/results/raw/adr6-attribution.json` holds the pre-ADR-8 run, and a figure
 copied into a comment is a figure that drifts from its measurement.
 
+Weigh the two differently. `ltx status` reports the head checkpoint and some
+counts and does NOT compare the working tree against the tip, so its whole cost
+was the scan and a flat line afterwards is the expected shape rather than a
+surprising one. The incremental save is the number that reflects work: a save
+walks the tree, and it is still the command this probe exists to worry about.
+
 `PackWriter::retain_unknown` asking `Store::contains` per chunk remains, and is
 NOT a scan of the same kind: `contains` binary-searches each pack's index and
 reads no payload. It grows with the pack count rather than the blob count, so it
