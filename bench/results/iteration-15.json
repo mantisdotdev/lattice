@@ -1,0 +1,82 @@
+{
+  "iteration": 15,
+  "timestamp": "2026-09-12T13:33:07Z",
+  "stages_measured": [
+    "G1"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "8 gate(s) in G0 were not measured in this run",
+    "12 gate(s) in G1 were not measured in this run",
+    "8 gate(s) in G2 were not measured in this run",
+    "6 gate(s) in G3 were not measured in this run",
+    "7 gate(s) in G4 were not measured in this run",
+    "8 gate(s) in G5 were not measured in this run",
+    "5 gate(s) in G6 were not measured in this run"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G1": "BLOCKED"
+  },
+  "results": [
+    {
+      "gate": "G1.3",
+      "stage": "G1",
+      "title": "Universal undo",
+      "metric": "failures over \u2265100k in-process + \u22651000 CLI property-generated command sequences; coverage-gated",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 0.0,
+      "cmp": "==",
+      "unit": "failures",
+      "value": 0.0,
+      "status": "FAIL",
+      "note": "coverage contract not satisfied: only 0 in-process sequences, 100,000 required",
+      "evidence": [
+        "harness/g1/g1_3_universal_undo.py"
+      ],
+      "detail": {
+        "surface_source": "command-surface",
+        "state_changing_commands": [
+          "assign",
+          "internals",
+          "lens",
+          "merge",
+          "redact",
+          "save",
+          "split",
+          "start",
+          "switch",
+          "sync",
+          "thin",
+          "undo",
+          "workspace"
+        ],
+        "emissions_per_command": {
+          "save": 500,
+          "undo": 518,
+          "start": 484,
+          "switch": 510,
+          "assign": 475,
+          "workspace new": 479,
+          "split": 535,
+          "merge": 463,
+          "redact": 516,
+          "lens use": 521,
+          "sync": 490,
+          "thin": 492,
+          "internals compact": 496
+        },
+        "in_process": {
+          "sequences": 0,
+          "failures": 0,
+          "seed": null
+        },
+        "cli_failures": []
+      },
+      "duration_s": 8236.462
+    }
+  ]
+}

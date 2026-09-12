@@ -226,3 +226,23 @@ Delivery state (§0.6): **NOT DELIVERABLE**
 | G6.4 | Spec-compliance audit | HARD [A] | `== 0 deviations` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |
 | G6.5 | Cold-start UX walkthrough | HARD [A] | `>= 1 completion` | — | N/A-yet<br><sub>harness not implemented yet</sub> | — |
 
+
+### Iteration 14 — 2026-09-12T11:15:50Z
+
+Stages measured: **G1** BLOCKED  
+Delivery state (§0.6): **NOT DELIVERABLE**
+
+| Gate | Title | Type | Metric target | Measured | Status | Δ |
+|---|---|---|---|---|---|---|
+| G1.4 | Concurrency safety | HARD [A] | `== 0 failures` | 7 failures | FAIL<br><sub>7 op failures, 0 deadlocks, 0 linearizability violations, 0 successful ops with no op-log position, verify clean</sub> | new |
+
+
+### Iteration 15 — 2026-09-12T13:33:07Z
+
+Stages measured: **G1** BLOCKED  
+Delivery state (§0.6): **NOT DELIVERABLE**
+
+| Gate | Title | Type | Metric target | Measured | Status | Δ |
+|---|---|---|---|---|---|---|
+| G1.3 | Universal undo | HARD [A] | `== 0 failures` | 0 failures | FAIL<br><sub>coverage contract not satisfied: only 0 in-process sequences, 100,000 required</sub> | new |
+
