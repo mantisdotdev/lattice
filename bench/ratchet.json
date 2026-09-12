@@ -82,5 +82,12 @@
     "unit": "failures",
     "value": 0.0,
     "waived": false
+  },
+  "G1.4": {
+    "recorded_at": "2026-09-12T17:37:43Z",
+    "status": "PASS",
+    "unit": "failures",
+    "value": 0.0,
+    "waived": false
   }
 }

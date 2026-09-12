@@ -256,3 +256,13 @@ Delivery state (§0.6): **NOT DELIVERABLE**
 |---|---|---|---|---|---|---|
 | G1.3 | Universal undo | HARD [A] | `== 0 failures` | 0 failures | PASS<br><sub>0 failures over 100,000 in-process + 1,000 CLI sequences</sub> | = |
 
+
+### Iteration 17 — 2026-09-12T17:37:43Z
+
+Stages measured: **G1** IN PROGRESS  
+Delivery state (§0.6): **NOT DELIVERABLE**
+
+| Gate | Title | Type | Metric target | Measured | Status | Δ |
+|---|---|---|---|---|---|---|
+| G1.4 | Concurrency safety | HARD [A] | `== 0 failures` | 0 failures | PASS<br><sub>0 op failures, 0 deadlocks, 0 linearizability violations, 0 successful ops with no op-log position, verify clean</sub> | new |
+
