@@ -170,10 +170,16 @@ about performance:
    > single file, a tombstone when a pack is removed, a torn tail read up to
    > the tear and rewritten whole by the next write — and a pack id is never
    > reused while the cache remembers it, which is the one way a cached index
-   > could describe a pack it was not written for. Derived and disposable:
-   > the directory listing still says which packs exist.
-   > `bench/results/raw/adr9-g1-4-index-cache.json`, binaries alternated on
-   > the same clone:
+   > could describe a pack it was not written for. Each record also carries
+   > the pack's byte length, checked against the file when the packs open, so
+   > a torn pack is skipped exactly as an unindexed one is and never vouched
+   > for; both cache writes are fsynced. Derived and disposable: the directory
+   > listing still says which packs exist.
+   > `bench/results/raw/adr9-g1-4-index-cache.json`, the two binaries run
+   > alternately on the same clone by
+   > `python3 scripts/probe_ab_commands.py OLD NEW CLONE/repo --runs 3`, which
+   > creates a fresh workspace, writes a new file before every run, and prints
+   > the medians it quotes:
    >
    > ```json
    > {

@@ -275,6 +275,9 @@ const INDEX_CACHE_FILE: &str = "index.cache";
 const INDEX_CACHE_MAGIC: &[u8; 8] = b"LTXIDXC1";
 const CACHE_RECORD_INDEX: u8 = 1;
 const CACHE_RECORD_REMOVED: u8 = 2;
+/// Names the highest pack id ever used without describing a pack: what a
+/// rewrite writes so the mark survives when the highest pack is a removed one.
+const CACHE_RECORD_HIGH_WATER: u8 = 3;
 const CACHE_RECORD_HEADER_BYTES: usize = 8 + 1 + 4;
 
 /// What the cache file says: the newest record per pack, the highest id it
@@ -282,7 +285,12 @@ const CACHE_RECORD_HEADER_BYTES: usize = 8 + 1 + 4;
 /// write rewrites it whole).
 #[derive(Default)]
 struct IndexCache {
-    indexes: std::collections::HashMap<u64, Vec<u8>>,
+    /// Pack id -> (the pack file's byte length when it was written, its
+    /// index bytes). The length is checked against the file when the packs
+    /// open: a pack that shrank is torn and is skipped, so the cache never
+    /// vouches for a copy a save would deduplicate against and then fail to
+    /// read.
+    indexes: std::collections::HashMap<u64, (u64, Vec<u8>)>,
     highest_id: Option<u64>,
     torn: bool,
 }
@@ -312,11 +320,19 @@ fn read_index_cache(dir: &Path) -> Result<IndexCache> {
         }
         match kind {
             CACHE_RECORD_INDEX => {
-                cache.indexes.insert(id, bytes[at..at + len].to_vec());
+                if len < 8 {
+                    cache.torn = true;
+                    break;
+                }
+                let pack_len = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+                cache
+                    .indexes
+                    .insert(id, (pack_len, bytes[at + 8..at + len].to_vec()));
             }
             CACHE_RECORD_REMOVED => {
                 cache.indexes.remove(&id);
             }
+            CACHE_RECORD_HIGH_WATER => {}
             _ => {
                 cache.torn = true;
                 break;
@@ -329,6 +345,12 @@ fn read_index_cache(dir: &Path) -> Result<IndexCache> {
         cache.torn = true;
     }
     Ok(cache)
+}
+
+fn index_record(id: u64, pack_len: u64, index: &[u8]) -> Vec<u8> {
+    let mut payload = pack_len.to_le_bytes().to_vec();
+    payload.extend_from_slice(index);
+    cache_record(id, CACHE_RECORD_INDEX, &payload)
 }
 
 fn cache_record(id: u64, kind: u8, payload: &[u8]) -> Vec<u8> {
@@ -345,29 +367,47 @@ fn append_index_cache(dir: &Path, record: &[u8]) -> Result<()> {
         .create(true)
         .append(true)
         .open(dir.join(INDEX_CACHE_FILE))?;
-    if file.metadata()?.len() == 0 {
+    let created = file.metadata()?.len() == 0;
+    if created {
         file.write_all(INDEX_CACHE_MAGIC)?;
     }
     file.write_all(record)?;
+    // Durable like every other store write: the cache carries the retired
+    // ids that keep a pack id from being reused, so a record it acknowledged
+    // must survive a power loss.
+    file.sync_data()?;
+    if created {
+        sync_dir(dir)?;
+    }
     Ok(())
 }
 
 /// Replace the cache with one record per pack given, via a temporary file
 /// and a rename: a crash leaves the old cache or the new one, never a torn
 /// middle.
-fn rewrite_index_cache(dir: &Path, packs: &[(u64, Pack)]) -> Result<()> {
+fn rewrite_index_cache(dir: &Path, packs: &[(u64, Pack)], high_water: Option<u64>) -> Result<()> {
     let mut bytes = INDEX_CACHE_MAGIC.to_vec();
     for (id, pack) in packs {
-        bytes.extend_from_slice(&cache_record(*id, CACHE_RECORD_INDEX, &pack.index));
+        bytes.extend_from_slice(&index_record(*id, pack.bytes, &pack.index));
+    }
+    // The highest id ever used may belong to a removed pack, which the
+    // records above no longer name; without this it would be reused.
+    if let Some(high_water) = high_water {
+        bytes.extend_from_slice(&cache_record(high_water, CACHE_RECORD_HIGH_WATER, &[]));
     }
     let temporary = dir.join(format!("{INDEX_CACHE_FILE}.rewrite"));
-    fs::write(&temporary, &bytes)?;
+    let mut file = File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     fs::rename(&temporary, dir.join(INDEX_CACHE_FILE))?;
+    sync_dir(dir)?;
     Ok(())
 }
 
 pub struct Pack {
     pack_path: PathBuf,
+    /// The pack file's byte length when it was written.
+    bytes: u64,
     index: Vec<u8>,
     entries: usize,
     /// The segment table from the pack's tail, read the first time a chunk
@@ -378,16 +418,35 @@ pub struct Pack {
 }
 
 impl Pack {
+    /// Open a pack from its own files. The segment table at the pack's tail
+    /// is read here, so a torn pack file is found now and skipped, rather
+    /// than trusted by `contains` and failed by `read`.
     pub fn open(dir: &Path, pack_id: u64) -> Result<Self> {
         let index_path = dir.join(format!("{pack_id:012}.idx"));
         let mut index = Vec::new();
         File::open(&index_path)?.read_to_end(&mut index)?;
-        Self::from_index(dir, pack_id, index)
+        let bytes = fs::metadata(dir.join(format!("{pack_id:012}.pack")))?.len();
+        let pack = Self::from_index(dir, pack_id, index, bytes)?;
+        pack.segments()?;
+        Ok(pack)
     }
 
-    /// A pack from index bytes already in hand: the file's, or the cache's
-    /// copy of the file's. Validated the same way either way.
-    pub fn from_index(dir: &Path, pack_id: u64, index: Vec<u8>) -> Result<Self> {
+    /// A pack from the cache's copy of its index. The file is not opened;
+    /// its length is checked against what the cache recorded, which is what
+    /// tells a torn pack from a whole one without reading it.
+    fn from_cache(dir: &Path, pack_id: u64, index: Vec<u8>, bytes: u64) -> Result<Self> {
+        let actual = fs::metadata(dir.join(format!("{pack_id:012}.pack")))?.len();
+        if actual != bytes {
+            return Err(Error::Corrupt(format!(
+                "pack {pack_id} is {actual} bytes but {bytes} were written"
+            )));
+        }
+        Self::from_index(dir, pack_id, index, bytes)
+    }
+
+    /// A pack from index bytes already in hand, validated the same way
+    /// whichever way they arrived.
+    pub fn from_index(dir: &Path, pack_id: u64, index: Vec<u8>, bytes: u64) -> Result<Self> {
         let pack_path = dir.join(format!("{pack_id:012}.pack"));
         let index_path = dir.join(format!("{pack_id:012}.idx"));
         if index.len() < 16 || &index[..8] != INDEX_MAGIC {
@@ -419,6 +478,7 @@ impl Pack {
 
         Ok(Pack {
             pack_path,
+            bytes,
             index,
             entries,
             segments: std::sync::OnceLock::new(),
@@ -692,7 +752,7 @@ impl Store {
         let mut packs = Vec::with_capacity(self.ids.len());
         for &id in &self.ids {
             let opened = match cache.indexes.get(&id) {
-                Some(index) => Pack::from_index(&self.dir, id, index.clone())
+                Some((bytes, index)) => Pack::from_cache(&self.dir, id, index.clone(), *bytes)
                     .or_else(|_| Pack::open(&self.dir, id)),
                 None => {
                     incomplete = true;
@@ -730,7 +790,12 @@ impl Store {
     pub fn next_pack_id(&self) -> Result<u64> {
         let on_disk = self.ids.last().copied();
         let remembered = self.cache()?.highest_id;
-        Ok(on_disk.max(remembered).map(|id| id + 1).unwrap_or(0))
+        match on_disk.max(remembered) {
+            Some(id) => id
+                .checked_add(1)
+                .ok_or_else(|| Error::Corrupt("the pack id space is exhausted".to_string())),
+            None => Ok(0),
+        }
     }
 
     pub fn read(&self, id: ChunkId) -> Result<Option<Vec<u8>>> {
@@ -780,11 +845,12 @@ impl Store {
         writer.finish(&self.dir, id)?;
         self.ids.push(id);
         let index = fs::read(self.dir.join(format!("{id:012}.idx")))?;
+        let bytes = fs::metadata(self.dir.join(format!("{id:012}.pack")))?.len();
         // Joins the opened packs only if they are open: writing one is not a
         // reason to read every other. The map, likewise, learns the new
         // chunks only if it exists — it is the newest pack, so it wins.
         if let Some(packs) = self.packs.get_mut() {
-            let pack = Pack::from_index(&self.dir, id, index.clone())?;
+            let pack = Pack::from_index(&self.dir, id, index.clone(), bytes)?;
             if let Some(located) = self.located.get_mut() {
                 for chunk in pack.chunk_ids() {
                     located.insert(chunk, id);
@@ -792,43 +858,53 @@ impl Store {
             }
             packs.push((id, pack));
         }
-        self.remember(id, CACHE_RECORD_INDEX, &index)?;
+        self.remember(id, Some((bytes, &index)))?;
         Ok(count)
     }
 
     /// Put one record in the cache — appended, or, when the packs were
     /// opened with the cache incomplete, by rewriting the cache whole from
     /// the packs now open. Either way the in-memory copy is kept in step.
-    fn remember(&mut self, id: u64, kind: u8, index: &[u8]) -> Result<()> {
+    fn remember(&mut self, id: u64, entry: Option<(u64, &[u8])>) -> Result<()> {
         let incomplete = self
             .cache_incomplete
             .swap(false, std::sync::atomic::Ordering::Relaxed);
+        // Never below anything the cache or the directory has named, nor the
+        // id being recorded — which, for a removal, is no longer on disk.
+        let high_water = self
+            .cache()?
+            .highest_id
+            .max(self.ids.last().copied())
+            .max(Some(id));
         if incomplete && self.packs.get().is_some() {
             let packs = self.packs.get().expect("checked");
-            rewrite_index_cache(&self.dir, packs)?;
+            rewrite_index_cache(&self.dir, packs, high_water)?;
             let mut rebuilt = IndexCache::default();
             for (pid, pack) in packs {
-                rebuilt.indexes.insert(*pid, pack.index.clone());
+                rebuilt
+                    .indexes
+                    .insert(*pid, (pack.bytes, pack.index.clone()));
             }
-            rebuilt.highest_id = self
-                .cache()?
-                .highest_id
-                .max(packs.last().map(|(pid, _)| *pid));
+            rebuilt.highest_id = high_water;
             self.cache.take();
             let _ = self.cache.set(rebuilt);
             return Ok(());
         }
-        append_index_cache(&self.dir, &cache_record(id, kind, index))?;
+        let record = match entry {
+            Some((bytes, index)) => index_record(id, bytes, index),
+            None => cache_record(id, CACHE_RECORD_REMOVED, &[]),
+        };
+        append_index_cache(&self.dir, &record)?;
         let mut cache = self.cache.take().unwrap_or_default();
-        match kind {
-            CACHE_RECORD_INDEX => {
-                cache.indexes.insert(id, index.to_vec());
+        match entry {
+            Some((bytes, index)) => {
+                cache.indexes.insert(id, (bytes, index.to_vec()));
             }
-            _ => {
+            None => {
                 cache.indexes.remove(&id);
             }
         }
-        cache.highest_id = Some(cache.highest_id.map_or(id, |h| h.max(id)));
+        cache.highest_id = high_water;
         let _ = self.cache.set(cache);
         Ok(())
     }
@@ -870,7 +946,7 @@ impl Store {
         // map cannot know which without a rebuild, so it is dropped here and
         // rebuilt on the next lookup.
         self.located.take();
-        self.remember(id, CACHE_RECORD_REMOVED, &[])?;
+        self.remember(id, None)?;
         fs::remove_file(self.dir.join(format!("{id:012}.idx")))?;
         fs::remove_file(self.dir.join(format!("{id:012}.pack")))?;
         crate::platform::sync_dir(&self.dir)?;
@@ -1160,6 +1236,68 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_file_shorter_than_the_cache_recorded_is_skipped_and_its_chunk_is_stored_again() {
+        // A torn pack must not be vouched for: `contains` would let a save
+        // deduplicate against a copy that cannot be read.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let bytes = payload(5, 9000);
+        let id = ChunkId::of(&bytes);
+        let mut w = PackWriter::new();
+        w.add(id, &bytes);
+        store.write_pack(w).unwrap();
+        let pack = dir.path().join("000000000000.pack");
+        let raw = fs::read(&pack).unwrap();
+        fs::write(&pack, &raw[..raw.len() - 10]).unwrap();
+
+        let store = Store::open(dir.path()).unwrap();
+        assert!(!store.contains(id).unwrap());
+        assert_eq!(store.read(id).unwrap(), None);
+        assert_eq!(store.pack_count().unwrap(), 0);
+        let mut again = PackWriter::new();
+        again.add(id, &bytes);
+        again.retain_unknown(&store).unwrap();
+        assert_eq!(again.chunk_count(), 1, "a save stores the chunk again");
+
+        // Without the cache the pack's own files say the same.
+        fs::remove_file(dir.path().join(INDEX_CACHE_FILE)).unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert!(!store.contains(id).unwrap());
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_high_water_mark_of_a_removed_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        for word in [b"a".as_slice(), b"b".as_slice()] {
+            let mut w = PackWriter::new();
+            w.add(ChunkId::of(word), word);
+            store.write_pack(w).unwrap();
+        }
+        let cache = dir.path().join(INDEX_CACHE_FILE);
+        let mut raw = fs::read(&cache).unwrap();
+        raw.extend_from_slice(&[9u8; 5]);
+        fs::write(&cache, &raw).unwrap();
+
+        // Opened with the cache torn, the removal rewrites it; the highest
+        // id is the pack being removed and must survive the rewrite.
+        let mut store = Store::open(dir.path()).unwrap();
+        assert!(store.contains(ChunkId::of(b"b")).unwrap(), "premise");
+        store.remove_pack(1).unwrap();
+        assert!(!read_index_cache(dir.path()).unwrap().torn);
+
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut w = PackWriter::new();
+        w.add(ChunkId::of(b"c"), b"c");
+        store.write_pack(w).unwrap();
+        assert!(
+            dir.path().join("000000000002.pack").exists()
+                && !dir.path().join("000000000001.pack").exists(),
+            "id 1 stays retired across the rewrite"
+        );
+    }
+
+    #[test]
     fn a_pack_without_its_index_is_ignored_on_open() {
         // The exact residue a crash between the two fsyncs leaves behind.
         let dir = tempfile::tempdir().unwrap();
@@ -1245,11 +1383,13 @@ mod tests {
         raw[n - 16..n - 8].copy_from_slice(&u64::MAX.to_le_bytes());
         fs::write(&pack, &raw).unwrap();
 
-        let pack = Pack::open(dir.path(), 0).expect("the index is intact, so the pack opens");
         assert!(
-            pack.read(ChunkId::of(&bytes)).is_err(),
-            "and the corruption is reported by the read that first needs the tail"
+            Pack::open(dir.path(), 0).is_err(),
+            "opening from the files reads the tail"
         );
+        // The cache vouches for the index and the file is its recorded
+        // length, so the store still lists the pack; the corruption is
+        // reported by the read that first needs the tail.
         let store = Store::open(dir.path()).unwrap();
         assert!(store.read(ChunkId::of(&bytes)).is_err());
     }
