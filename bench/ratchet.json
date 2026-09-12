@@ -75,5 +75,12 @@
     "unit": "mismatches",
     "value": 0.0,
     "waived": false
+  },
+  "G1.3": {
+    "recorded_at": "2026-09-12T14:38:33Z",
+    "status": "PASS",
+    "unit": "failures",
+    "value": 0.0,
+    "waived": false
   }
 }

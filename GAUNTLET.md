@@ -246,3 +246,13 @@ Delivery state (§0.6): **NOT DELIVERABLE**
 |---|---|---|---|---|---|---|
 | G1.3 | Universal undo | HARD [A] | `== 0 failures` | 0 failures | FAIL<br><sub>coverage contract not satisfied: only 0 in-process sequences, 100,000 required</sub> | new |
 
+
+### Iteration 16 — 2026-09-12T14:38:33Z
+
+Stages measured: **G1** IN PROGRESS  
+Delivery state (§0.6): **NOT DELIVERABLE**
+
+| Gate | Title | Type | Metric target | Measured | Status | Δ |
+|---|---|---|---|---|---|---|
+| G1.3 | Universal undo | HARD [A] | `== 0 failures` | 0 failures | PASS<br><sub>0 failures over 100,000 in-process + 1,000 CLI sequences</sub> | = |
+
