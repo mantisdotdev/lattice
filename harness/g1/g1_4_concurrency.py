@@ -64,14 +64,21 @@ def worker(repo: Path, ws: int, ops: int, seed: int) -> dict:
             continue
         end = time.monotonic()
         if proc.returncode != 0:
+            # What the command SAID is recorded as well as what it wrote to
+            # stderr: with `--json` an engine reports its error on stdout, and
+            # a record that keeps only stderr cannot tell a lock that waited
+            # too long from a corrupt repository (ADR-21). The verdict does not
+            # read either field.
             failures.append({"workspace": ws, "op": name,
-                             "stderr": proc.stderr.strip()[:160]})
+                             "stderr": proc.stderr.strip()[:160],
+                             "stdout": proc.stdout.strip()[:160]})
             continue
         try:
             doc = json.loads(proc.stdout)
         except json.JSONDecodeError:
             failures.append({"workspace": ws, "op": name,
-                             "stderr": "unparseable --json output"})
+                             "stderr": "unparseable --json output",
+                             "stdout": proc.stdout.strip()[:160]})
             continue
         events.append({"workspace": ws, "op": name, "start": start, "end": end,
                        "oplog_seq": doc.get("oplog_seq")})

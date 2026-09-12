@@ -114,9 +114,9 @@
       "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
       "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
     },
-    "frozen_at": "2026-09-03T12:01:06Z",
+    "frozen_at": "2026-09-12T11:27:49Z",
     "harness": "harness/g1/g1_4_concurrency.py",
-    "sha256": "f88e1e67658425fc58b1049f35c6b2b8f541e1d8dc929d488c6f327bfb89f8fd"
+    "sha256": "0b842fb4962e747db3b5dfd8aec55d21a25feee2b4d6a43c31c8cea6997e2fe5"
   },
   "G1.5": {
     "dependencies": {
