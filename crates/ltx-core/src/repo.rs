@@ -96,6 +96,12 @@ impl Checkpoint {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyReport {
     pub structure_verified: bool,
+    /// Distinct chunks read back and found intact. A chunk many checkpoints
+    /// share is verified once — it is content-addressed, so it is the same
+    /// bytes wherever it is named — which is what makes a complete verify of
+    /// a long history cost the size of the store rather than the size of the
+    /// store times the number of checkpoints: the G1.4 run's verify was
+    /// re-reading every chunk of every one of its thousands of checkpoints.
     pub chunks_verified: u64,
     pub chunks_absent: u64,
     /// Chunks a tree names that a redaction destroyed. Absent by design, and
@@ -3573,12 +3579,13 @@ impl Repo {
         let redacted = self.redacted_chunks()?;
         let known: std::collections::HashSet<&str> =
             checkpoints.iter().map(|c| c.id.as_str()).collect();
+        let mut seen: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
         for cp in &checkpoints {
             report.checkpoints += 1;
             if self.change_a_checkpoint_took(&cp.id)?.is_some() {
                 report.checkpoints_partial += 1;
             }
-            if let Err(e) = self.verify_tree(&cp.tree, &mut report, &redacted) {
+            if let Err(e) = self.verify_tree(&cp.tree, &mut report, &redacted, &mut seen) {
                 report.structure_verified = false;
                 report
                     .errors
@@ -3674,10 +3681,16 @@ impl Repo {
         tree_id: &str,
         report: &mut VerifyReport,
         redacted: &std::collections::HashSet<ChunkId>,
+        seen: &mut std::collections::HashSet<ChunkId>,
     ) -> Result<()> {
         let Some(id) = ChunkId::from_hex(tree_id) else {
             return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
         };
+        // A subtree already walked is the same subtree — its address is its
+        // content — so everything under it has been counted once already.
+        if !seen.insert(id) {
+            return Ok(());
+        }
         let Some(bytes) = self.store.read(id)? else {
             // A missing TREE is a hole in the history structure itself, not
             // merely absent file content. It is recorded as an error, and the
@@ -3696,13 +3709,16 @@ impl Repo {
 
         for node in tree.entries.values() {
             match node {
-                Node::Directory { tree } => self.verify_tree(tree, report, redacted)?,
+                Node::Directory { tree } => self.verify_tree(tree, report, redacted, seen)?,
                 Node::Symlink { .. } => {}
                 Node::File { chunks, .. } => {
                     for hex in chunks {
                         let Some(cid) = ChunkId::from_hex(hex) else {
                             return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
                         };
+                        if !seen.insert(cid) {
+                            continue;
+                        }
                         // `store.read` re-hashes and errors on mismatch, so a
                         // successful read IS the verification.
                         match self.store.read(cid) {
@@ -7682,6 +7698,31 @@ mod tests {
             fs::read(out.join("sub/.lattice/config")).unwrap(),
             b"nested",
             "a .lattice directory nested below the root must round-trip"
+        );
+    }
+
+    #[test]
+    fn verify_reads_each_chunk_once_however_many_checkpoints_share_it() {
+        // Three checkpoints share two files and each adds one of its own.
+        // Every stored chunk is then reachable, and each is verified exactly
+        // once: the count equals the store's chunk count less the
+        // checkpoint bodies, which are not tree content.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        for i in 0..3 {
+            fs::write(dir.path().join("c.txt"), format!("c{i}")).unwrap();
+            repo.save("share", None).unwrap();
+        }
+
+        let report = repo.verify(true).unwrap();
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.checkpoints, 3);
+        assert_eq!(
+            report.chunks_verified + report.checkpoints,
+            repo.store().chunk_count().unwrap() as u64,
+            "each shared chunk is verified once, not once per checkpoint"
         );
     }
 
