@@ -160,6 +160,42 @@ about performance:
    > is blocked on the same ordering thin leans on, recorded above for
    > `rewrite_pack_without`.
 
+   > **Corrected a fourth time, 2026-09-12, from the next full run.** With
+   > the store opening its packs lazily and thin's walk bounded, the run still
+   > slowed: 71 ms an operation at entry 8,000, 176 at 20,000. Sampling `save`
+   > on a clone at entry 23,630 (2,785 packs) put 43 of 94 samples inside the
+   > `open` syscall, one per pack index, ~36 µs each on APFS: every command
+   > that reads content was opening every pack. The store now keeps one
+   > append-only index cache beside the packs — every pack's index bytes in a
+   > single file, a tombstone when a pack is removed, a torn tail read up to
+   > the tear and rewritten whole by the next write — and a pack id is never
+   > reused while the cache remembers it, which is the one way a cached index
+   > could describe a pack it was not written for. Each record also carries
+   > the pack's byte length, checked against the file when the packs open, so
+   > a torn pack is skipped exactly as an unindexed one is and never vouched
+   > for; both cache writes are fsynced. Derived and disposable: the directory
+   > listing still says which packs exist.
+   > `bench/results/raw/adr9-g1-4-index-cache.json`, the two binaries run
+   > alternately on the same clone by
+   > `python3 scripts/probe_ab_commands.py OLD NEW CLONE/repo --runs 3`, which
+   > creates a fresh workspace, writes a new file before every run, and prints
+   > the medians it quotes:
+   >
+   > ```json
+   > {
+   >   "save_before_ms": 305,
+   >   "save_after_ms": 153,
+   >   "undo_before_ms": 270,
+   >   "undo_after_ms": 137,
+   >   "thin_before_ms": 206,
+   >   "thin_after_ms": 90
+   > }
+   > ```
+   >
+   > What remains is linear in the working tree — a save or a capture hashes
+   > every file, and this harness adds one per operation per workspace — and
+   > the cache read itself, about half a kilobyte per pack.
+
 ## Consequences
 
 - **G1.1 cannot pass under its frozen harness even with every verb built.**
