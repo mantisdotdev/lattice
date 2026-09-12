@@ -123,6 +123,41 @@ pub struct VerifyReport {
     pub errors: Vec<String>,
 }
 
+/// The most addresses a verify remembers before it stops remembering and
+/// simply reads repeats again. Sixty-odd bytes each, so this is a few hundred
+/// megabytes at most — "nothing from outside is unbounded", and a repository's
+/// chunk count comes from outside. Past the cap verify is slower, never wrong
+/// and never refused.
+const MAX_VERIFY_MEMO: usize = 5_000_000;
+
+/// Addresses a verify has already read, bounded by `MAX_VERIFY_MEMO`.
+#[derive(Default)]
+struct VerifyMemo(std::collections::HashSet<ChunkId>);
+
+impl VerifyMemo {
+    /// Whether `id` still needs reading: true the first time it is seen, and
+    /// always once the memo is full.
+    fn remember(&mut self, id: ChunkId) -> bool {
+        if self.0.contains(&id) {
+            return false;
+        }
+        if self.0.len() < MAX_VERIFY_MEMO {
+            self.0.insert(id);
+        }
+        true
+    }
+}
+
+/// What a verify has walked so far — trees and file chunks apart, because
+/// the store is one address space: a file holding the bytes of a tree's
+/// serialisation has that tree's address, and reading it as a file verifies
+/// nothing about what the tree names.
+#[derive(Default)]
+struct VerifiedSoFar {
+    trees: VerifyMemo,
+    chunks: VerifyMemo,
+}
+
 /// Debug prints the root only. The store and op-log are large and their
 /// contents are the repository's data, which has no business in a log line.
 impl std::fmt::Debug for Repo {
@@ -3579,13 +3614,13 @@ impl Repo {
         let redacted = self.redacted_chunks()?;
         let known: std::collections::HashSet<&str> =
             checkpoints.iter().map(|c| c.id.as_str()).collect();
-        let mut seen: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+        let mut walked = VerifiedSoFar::default();
         for cp in &checkpoints {
             report.checkpoints += 1;
             if self.change_a_checkpoint_took(&cp.id)?.is_some() {
                 report.checkpoints_partial += 1;
             }
-            if let Err(e) = self.verify_tree(&cp.tree, &mut report, &redacted, &mut seen) {
+            if let Err(e) = self.verify_tree(&cp.tree, &mut report, &redacted, &mut walked) {
                 report.structure_verified = false;
                 report
                     .errors
@@ -3681,14 +3716,16 @@ impl Repo {
         tree_id: &str,
         report: &mut VerifyReport,
         redacted: &std::collections::HashSet<ChunkId>,
-        seen: &mut std::collections::HashSet<ChunkId>,
+        walked: &mut VerifiedSoFar,
     ) -> Result<()> {
         let Some(id) = ChunkId::from_hex(tree_id) else {
             return Err(Error::Corrupt(format!("{tree_id} is not a tree address")));
         };
         // A subtree already walked is the same subtree — its address is its
         // content — so everything under it has been counted once already.
-        if !seen.insert(id) {
+        // Walked AS A TREE: a file whose bytes happen to be a tree's
+        // serialisation shares its address, and must not stand in for it.
+        if !walked.trees.remember(id) {
             return Ok(());
         }
         let Some(bytes) = self.store.read(id)? else {
@@ -3709,14 +3746,14 @@ impl Repo {
 
         for node in tree.entries.values() {
             match node {
-                Node::Directory { tree } => self.verify_tree(tree, report, redacted, seen)?,
+                Node::Directory { tree } => self.verify_tree(tree, report, redacted, walked)?,
                 Node::Symlink { .. } => {}
                 Node::File { chunks, .. } => {
                     for hex in chunks {
                         let Some(cid) = ChunkId::from_hex(hex) else {
                             return Err(Error::Corrupt(format!("{hex} is not a chunk address")));
                         };
-                        if !seen.insert(cid) {
+                        if !walked.chunks.remember(cid) {
                             continue;
                         }
                         // `store.read` re-hashes and errors on mismatch, so a
@@ -7724,6 +7761,56 @@ mod tests {
             repo.store().chunk_count().unwrap() as u64,
             "each shared chunk is verified once, not once per checkpoint"
         );
+    }
+
+    #[test]
+    fn verify_still_walks_a_tree_whose_bytes_a_file_also_holds() {
+        // A file whose content is exactly a tree's serialisation shares the
+        // tree's address. Sorted before the directory, it is read first — and
+        // that must not count as having walked the tree, or a chunk missing
+        // under the directory would go unreported.
+        let (dir, mut repo) = counted_ids(repo());
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/inner.txt"), b"inner content").unwrap();
+        let first = repo.save("with sub", None).unwrap();
+        let root = Tree::from_bytes(
+            &repo
+                .store()
+                .read(ChunkId::from_hex(&first.checkpoint.tree).unwrap())
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let Some(Node::Directory { tree: sub_tree }) = root.entries.get(b"sub".as_slice()) else {
+            panic!("premise: sub is a directory node");
+        };
+        let sub_id = ChunkId::from_hex(sub_tree).unwrap();
+        let sub_bytes = repo.store().read(sub_id).unwrap().unwrap();
+        fs::write(dir.path().join("0-looks-like-a-tree.bin"), &sub_bytes).unwrap();
+        repo.save("with the tree's bytes as a file", None).unwrap();
+
+        // Take the inner file's chunk away, from every pack that holds it.
+        let inner = ChunkId::of(b"inner content");
+        let holders: Vec<u64> = repo
+            .store()
+            .packs_with_chunks()
+            .unwrap()
+            .into_iter()
+            .filter(|(_, chunks)| chunks.contains(&inner))
+            .map(|(pack, _)| pack)
+            .collect();
+        let doomed: std::collections::HashSet<ChunkId> = [inner].into_iter().collect();
+        for pack in holders {
+            repo.store.rewrite_pack_without(pack, &doomed).unwrap();
+        }
+
+        let report = repo.verify(true).unwrap();
+
+        assert_eq!(
+            report.chunks_absent, 1,
+            "the missing file under sub/ must be reported: {report:?}"
+        );
+        assert!(!report.errors.is_empty());
     }
 
     #[test]
