@@ -1,0 +1,99 @@
+{
+  "iteration": 14,
+  "timestamp": "2026-09-12T11:15:50Z",
+  "stages_measured": [
+    "G1"
+  ],
+  "delivery_state": "NOT DELIVERABLE",
+  "delivery_reasons": [
+    "8 gate(s) in G0 were not measured in this run",
+    "12 gate(s) in G1 were not measured in this run",
+    "8 gate(s) in G2 were not measured in this run",
+    "6 gate(s) in G3 were not measured in this run",
+    "7 gate(s) in G4 were not measured in this run",
+    "8 gate(s) in G5 were not measured in this run",
+    "5 gate(s) in G6 were not measured in this run"
+  ],
+  "ratchet_violations": [],
+  "stage_state": {
+    "G1": "BLOCKED"
+  },
+  "results": [
+    {
+      "gate": "G1.4",
+      "stage": "G1",
+      "title": "Concurrency safety",
+      "metric": "corruption/deadlock/linearizability failures over 8 workspaces \u00d7 10000 ops",
+      "type": "HARD",
+      "class": "A",
+      "perf": false,
+      "timing": false,
+      "target": 0.0,
+      "cmp": "==",
+      "unit": "failures",
+      "value": 7.0,
+      "status": "FAIL",
+      "note": "7 op failures, 0 deadlocks, 0 linearizability violations, 0 successful ops with no op-log position, verify clean",
+      "evidence": [],
+      "detail": {
+        "workspaces": 8,
+        "ops_total": 80000,
+        "seed": 20260903,
+        "operation_counts": {
+          "internals thin": 8009,
+          "assign .": 7849,
+          "switch main": 8047,
+          "undo": 7910,
+          "split": 8166,
+          "internals compact": 8027,
+          "start line": 8007,
+          "lens use": 7964,
+          "save concurrent edit": 7967,
+          "sync --dry-run": 8054
+        },
+        "deadlocks": [],
+        "linearizability_violations": [],
+        "unsequenced_operations": [],
+        "failures": [
+          {
+            "workspace": 0,
+            "op": "split",
+            "stderr": ""
+          },
+          {
+            "workspace": 2,
+            "op": "lens use",
+            "stderr": ""
+          },
+          {
+            "workspace": 2,
+            "op": "split",
+            "stderr": ""
+          },
+          {
+            "workspace": 3,
+            "op": "lens use",
+            "stderr": ""
+          },
+          {
+            "workspace": 5,
+            "op": "undo",
+            "stderr": ""
+          },
+          {
+            "workspace": 6,
+            "op": "sync --dry-run",
+            "stderr": ""
+          },
+          {
+            "workspace": 6,
+            "op": "switch main",
+            "stderr": ""
+          }
+        ],
+        "verify_stderr": ""
+      },
+      "duration_s": 18378.488
+    }
+  ]
+}
