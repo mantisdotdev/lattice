@@ -160,6 +160,36 @@ about performance:
    > is blocked on the same ordering thin leans on, recorded above for
    > `rewrite_pack_without`.
 
+   > **Corrected a fourth time, 2026-09-12, from the next full run.** With
+   > the store opening its packs lazily and thin's walk bounded, the run still
+   > slowed: 71 ms an operation at entry 8,000, 176 at 20,000. Sampling `save`
+   > on a clone at entry 23,630 (2,785 packs) put 43 of 94 samples inside the
+   > `open` syscall, one per pack index, ~36 µs each on APFS: every command
+   > that reads content was opening every pack. The store now keeps one
+   > append-only index cache beside the packs — every pack's index bytes in a
+   > single file, a tombstone when a pack is removed, a torn tail read up to
+   > the tear and rewritten whole by the next write — and a pack id is never
+   > reused while the cache remembers it, which is the one way a cached index
+   > could describe a pack it was not written for. Derived and disposable:
+   > the directory listing still says which packs exist.
+   > `bench/results/raw/adr9-g1-4-index-cache.json`, binaries alternated on
+   > the same clone:
+   >
+   > ```json
+   > {
+   >   "save_before_ms": 305,
+   >   "save_after_ms": 153,
+   >   "undo_before_ms": 270,
+   >   "undo_after_ms": 137,
+   >   "thin_before_ms": 206,
+   >   "thin_after_ms": 90
+   > }
+   > ```
+   >
+   > What remains is linear in the working tree — a save or a capture hashes
+   > every file, and this harness adds one per operation per workspace — and
+   > the cache read itself, about half a kilobyte per pack.
+
 ## Consequences
 
 - **G1.1 cannot pass under its frozen harness even with every verb built.**

@@ -1,0 +1,64 @@
+{
+  "probe": "G1.4 full run on the release binary at merge commit 63a6852 (PR #22), started 2026-09-12 04:51:58 IST; per-window throughput from the run's archive segments; timings on a copy-on-write clone of the run at op-log entry 23,630 in a freshly created workspace, the two binaries run alternately, three runs each, medians",
+  "gate": "G1.4",
+  "throughput_windows": [
+    {
+      "from_seq": 4015,
+      "to_seq": 8027,
+      "ms_per_op": 71
+    },
+    {
+      "from_seq": 8027,
+      "to_seq": 12012,
+      "ms_per_op": 84
+    },
+    {
+      "from_seq": 12012,
+      "to_seq": 16015,
+      "ms_per_op": 108
+    },
+    {
+      "from_seq": 16015,
+      "to_seq": 20012,
+      "ms_per_op": 176
+    }
+  ],
+  "clone_packs": 2785,
+  "clone_files_in_workspace": 1619,
+  "profile": {
+    "command": "save on the clone, macOS sample(1)",
+    "samples": 94,
+    "samples_in_open_syscalls_from_Pack_open": 43
+  },
+  "save_before_ms": 305,
+  "save_after_ms": 153,
+  "undo_before_ms": 270,
+  "undo_after_ms": 137,
+  "thin_before_ms": 206,
+  "thin_after_ms": 90,
+  "status_before_ms": 379,
+  "status_after_ms": 259,
+  "medians_ms": {
+    "old": {
+      "workspace list": 76,
+      "save probe": 305,
+      "switch main": 73,
+      "start line": 82,
+      "undo": 270,
+      "internals thin": 206,
+      "assign .": 80,
+      "status": 379
+    },
+    "new": {
+      "workspace list": 66,
+      "save probe": 153,
+      "switch main": 69,
+      "start line": 66,
+      "undo": 137,
+      "internals thin": 90,
+      "assign .": 79,
+      "status": 259
+    }
+  },
+  "index_cache_bytes_at_2785_packs": 1454766
+}
