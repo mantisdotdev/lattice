@@ -33,7 +33,7 @@ const EXIT_NO_REPOSITORY: u8 = 3;
     disable_help_subcommand = true
 )]
 struct Cli {
-    /// Emit a stable JSON object instead of prose.
+    /// Emit stable JSON instead of prose.
     #[arg(long, global = true)]
     json: bool,
 
@@ -73,7 +73,7 @@ enum Command {
         #[arg(long)]
         limit: Option<usize>,
     },
-    /// Check the repository against its own hashes.
+    /// Check that history and content are intact.
     Verify {
         /// Fetch anything missing and verify everything. Only this form may be
         /// read as an unqualified "verified".
@@ -101,11 +101,11 @@ enum Command {
         /// The line to continue on.
         name: String,
     },
-    /// Put working-tree paths into a change.
+    /// Put working-state paths into a change.
     Assign {
         /// The change to add to. It must already be open: this never creates
-        /// one, so a mistyped id cannot mint a change. Without it, paths go
-        /// to the current change, and a line with none starts one.
+        /// one, so a mistyped id cannot create a change by accident. Without
+        /// it, paths go to the current change, and a line with none starts one.
         #[arg(long = "to", value_name = "CHANGE")]
         to: Option<String>,
         /// What to assign. A directory assigns everything under it.
