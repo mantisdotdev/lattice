@@ -176,5 +176,11 @@
     "frozen_at": "2026-09-11T13:46:56Z",
     "harness": "harness/g2/g2_4_error_recoverability.py",
     "sha256": "414e48b69a890e2fb12a72235bd216c067cf7d0fd8792e486249b75737537419"
+  },
+  "G2.5": {
+    "dependencies": {},
+    "frozen_at": "2026-09-13T13:06:17Z",
+    "harness": "harness/g2/g2_5_json_contract.py",
+    "sha256": "b41fe0793036ea8db6c90784d53df3d722f903271840a22d33681fb899edb7e8"
   }
 }
