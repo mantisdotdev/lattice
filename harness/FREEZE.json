@@ -187,6 +187,6 @@
     "dependencies": {},
     "frozen_at": "2026-09-13T13:06:31Z",
     "harness": "harness/g2/g2_6_changesets.py",
-    "sha256": "63e593ebf1a1c5248ffa92ad3fd72d240e957e107346eca46c1f63615504d46d"
+    "sha256": "4b73bcc2cfb989e3d40995fd11872c12cb6727a4ea8f7e0e3d5d35d7cb0902d3"
   }
 }
