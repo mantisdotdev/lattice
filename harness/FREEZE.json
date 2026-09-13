@@ -193,6 +193,6 @@
     "dependencies": {},
     "frozen_at": "2026-09-13T14:23:29Z",
     "harness": "harness/g2/g2_8_thinning.py",
-    "sha256": "7a20d6ff0031ea31222b25c322d3a5803803fe99ee7887e8b76e1044645ee38d"
+    "sha256": "090a08f2453bbb42adcb4e569dbcd520334f9353868e5f18cdc6469419d742c2"
   }
 }

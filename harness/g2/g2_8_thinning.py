@@ -203,9 +203,11 @@ def main() -> int:
     args = ap.parse_args()
     LTX = args.ltx.resolve()
     if not LTX.exists():
-        print(json.dumps({"gate": GATE, "status": "not-implemented",
+        # A HARD gate with no instrument is a measurement failure, never
+        # N/A-yet: exit nonzero so gauntlet records FAIL(harness-error).
+        print(json.dumps({"gate": GATE,
                           "note": "ltx binary not built (target/release/ltx)"}))
-        return 0
+        return 1
 
     rng = random.Random(SEED)
     work = Path(tempfile.mkdtemp(prefix="g2-8-"))
