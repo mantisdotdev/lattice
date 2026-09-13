@@ -62,7 +62,28 @@ not yet checkpointed) and **snapshot** (a checkpoint, coined differently).
 - G2.3 exists and measures 0 violations over 26 screens at the commit that
   fixes the four wordings; the harness demonstrably fails against a shim
   binary that advertises `commit` and `stash` (`--ltx` exists for that check
-  and nothing else).
+  and nothing else). The frozen harness's own output, from the run behind
+  that claim:
+
+  ```json
+  {
+    "gate": "G2.3",
+    "value": 0,
+    "unit": "violations",
+    "note": "0 violation(s) across 26 help screens; vocabulary: 16 concept forms, 190 vetted words, 66 banned",
+    "detail": {
+      "violations": [],
+      "screens_walked": [
+        "(root)", "assign", "change", "change list", "checkout", "init",
+        "lens", "lens list", "lens use", "line", "line list", "log",
+        "merge", "redact", "save", "split", "start", "status", "switch",
+        "sync", "thin", "undo", "verify", "workspace", "workspace list",
+        "workspace new"
+      ]
+    },
+    "coverage": { "ok": true, "note": "" }
+  }
+  ```
 - Runtime *output* vocabulary is not covered here. §5.1 deliberately puts
   "chunks" in `verify`'s mouth; a future revision owns that surface. G2.4
   already holds error documents to the seven concepts via its `concept` field.
