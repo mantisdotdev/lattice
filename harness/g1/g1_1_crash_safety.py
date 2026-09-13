@@ -68,7 +68,12 @@ SHIM_SO = REPO / "harness" / "lib" / "iofault" / "libiofault.so"
 # §6: the fault injector must demonstrate hits in every declared critical
 # section. These names are emitted by the shim's journal as region markers
 # derived from the path being written, so the product never declares them.
-CRITICAL_SECTIONS = ["store_write", "compaction", "thinning", "merge", "sync"]
+# "merge" is not a section (ADR-24): the engine keeps merge state inside the
+# op-log entry itself — single publish, no merge-named files — so merge's
+# durable writes ARE store writes, and requiring a /merge path made the gate
+# unpassable by design rather than by defect. Merge is in the operation pool
+# instead, so kills land inside its capture-publish-materialise window.
+CRITICAL_SECTIONS = ["store_write", "compaction", "thinning", "sync"]
 MIN_HITS_PER_SECTION = 1
 
 # Operations the trials interleave, so crashes land across the surface rather
@@ -77,6 +82,7 @@ OPERATION_POOL = [
     ["save", "trial checkpoint"],
     ["start", "crash-line"],
     ["switch", "main"],
+    ["merge", "crash-line"],
     ["undo"],
     ["sync", "--dry-run"],
     ["internals", "compact"],

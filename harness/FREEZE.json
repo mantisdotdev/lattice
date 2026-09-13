@@ -58,14 +58,16 @@
   },
   "G1.1": {
     "dependencies": {
+      "harness/lib/check_no_harness_leak.py": "84c321680ec0a8efeb379032610a03d5c933f3906f96c00b41407e54bd130b82",
       "harness/lib/iofault/Makefile": "a1133f8f5d94843c8d449f46c4fcbe457ba88605ee703967b4fc56cac10d2d0b",
       "harness/lib/iofault/iofault.c": "0720b2a0e92fcefeab6c10dc30bec3974fea0b44cb5116005497578cfe7e5984",
-      "harness/lib/iofault/replay.py": "adb8b318eb7a9525a16e8aa3d2f3a2791c2ee9d0309f9cf5f781d4955099aa4a",
+      "harness/lib/iofault/libiofault.dylib": "ca523d31b46f2a93b1a9bc39f56a844ebbb1be6ada256b28ab0142eaa27624a2",
+      "harness/lib/iofault/replay.py": "620872816adb5b0b056a1c2add7ff8f8cd73fcc772f7b951c65c7e5d4908a834",
       "harness/lib/ltxrun.py": "9c103a60d299c1f9abd855d0b3d2261b07d17f6a1275c4787c3118f16ac0567c"
     },
-    "frozen_at": "2026-09-03T12:01:06Z",
+    "frozen_at": "2026-09-13T07:36:32Z",
     "harness": "harness/g1/g1_1_crash_safety.py",
-    "sha256": "8ef8d8cc054126b72b422960ac4ed20872d8941c0489dad5cc5f8935ef7b4c06"
+    "sha256": "e11395e4dc69af80e7d81a4f040494af02b2d56a32c6a1c7db1317194c820ff7"
   },
   "G1.10": {
     "dependencies": {
