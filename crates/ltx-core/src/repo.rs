@@ -359,6 +359,32 @@ impl Repo {
         Self::open_at(root, &Self::repo_dir(root), Reached::Root)
     }
 
+    /// Rebuild the metadata index from its append-only mirror (ADR-25),
+    /// quarantining whatever stands at `meta.redb` first. Walks to the
+    /// repository the way `discover` does, workspace pointer included, and
+    /// holds the repository lock for the rebuild, as any writer would.
+    /// Returns false when there is no mirror to rebuild from.
+    pub fn heal_metadata(start: &Path) -> Result<bool> {
+        let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+        let mut cursor = start.as_path();
+        let repository = loop {
+            let marker = Self::repo_dir(cursor);
+            if marker.is_dir() {
+                let pointer = marker.join(MARKER_FILE);
+                if pointer.is_file() {
+                    break read_workspace_marker(&pointer)?;
+                }
+                break marker;
+            }
+            match cursor.parent() {
+                Some(p) => cursor = p,
+                None => return Err(Error::NotARepository(start.clone())),
+            }
+        };
+        let _lock = platform::lock_exclusive(&repository.join("lock"), LOCK_WAIT)?;
+        OpLog::heal(&repository.join("meta.redb"))
+    }
+
     /// Open the repository at `repository`, working in the tree at `root`.
     ///
     /// The workspace half of `discover`. Separate from `open` only in that the

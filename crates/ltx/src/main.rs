@@ -206,7 +206,7 @@ enum Internals {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli) {
+    match run_with_recovery(&cli) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             let code = match e.category() {
@@ -230,6 +230,55 @@ fn main() -> ExitCode {
             }
             ExitCode::from(code)
         }
+    }
+}
+
+/// The metadata index (redb) answers some power-loss damage by panicking
+/// mid-command rather than erring, and not only at open (ADR-25). A panic
+/// that reaches here is damage speaking: rebuild the index from its
+/// append-only mirror and run the command once more — "a crash leaves a
+/// merge the next command finishes" (ADR-16 §6), made literal for the index
+/// itself. A second panic is reported as the corruption it is.
+fn run_with_recovery(cli: &Cli) -> Result<u8> {
+    let first = catch_run(cli);
+    let panic_text = match first {
+        Ok(result) => return result,
+        Err(text) => text,
+    };
+    let cwd = std::env::current_dir()?;
+    if !Repo::heal_metadata(&cwd)? {
+        return Err(ltx_core::Error::Corrupt(format!(
+            "this command crashed inside the metadata index and no mirror \
+             exists to rebuild it: {panic_text}"
+        )));
+    }
+    match catch_run(cli) {
+        Ok(result) => result,
+        Err(second) => Err(ltx_core::Error::Corrupt(format!(
+            "the metadata index was rebuilt from its mirror and still \
+             crashed this command: {second}"
+        ))),
+    }
+}
+
+/// Run the command, converting a panic into the text it carried. The
+/// default panic hook is silenced for the attempt, so a crash that the
+/// recovery path absorbs does not spray a backtrace over output the JSON
+/// contract owns; an unrecovered crash still surfaces through the error
+/// document, text included.
+fn catch_run(cli: &Cli) -> std::result::Result<Result<u8>, String> {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli)));
+    std::panic::set_hook(previous_hook);
+    match outcome {
+        Ok(result) => Ok(result),
+        Err(panic) => Err(panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("panic with no message")
+            .to_string()),
     }
 }
 

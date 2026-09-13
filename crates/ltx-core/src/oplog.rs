@@ -893,6 +893,21 @@ impl OpLog {
         }
     }
 
+    /// Quarantine whatever stands at `db_path` and rebuild it from the
+    /// mirror beside it, holding the result to the open probe. False when
+    /// no mirror exists — there is nothing to rebuild from. The caller
+    /// holds the repository lock; this function does not know about locks.
+    pub(crate) fn heal(db_path: &std::path::Path) -> Result<bool> {
+        let mirror_path = Mirror::path_beside(db_path);
+        if !mirror_path.exists() {
+            return Ok(false);
+        }
+        let cause = Error::Corrupt("a command crashed inside the metadata index".into());
+        Self::rebuild_database_from_mirror(db_path, &mirror_path, &cause)?;
+        Self::open_and_probe(db_path)?;
+        Ok(true)
+    }
+
     /// Quarantine the unopenable database and rebuild it from the mirror.
     /// Nothing is deleted: the damaged file is renamed beside its
     /// replacement, so what happened can still be examined. The rebuilt

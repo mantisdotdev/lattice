@@ -42,6 +42,19 @@ rebuilt database must pass the same probe. The damaged file is renamed
 replayed through the same table-application code live commits use, in
 chunks, so rebuild cost is streaming, not resident.
 
+**A panic mid-command rebuilds and retries, once.** The probe catches
+damage the open path can reach, but redb also asserts deep in commands
+whose reads walk regions no cheap probe visits (`log --forensic` was the
+witness). So the CLI runs every command under a panic guard: a panic
+quarantines the index, rebuilds it from the mirror under the repository
+lock, and runs the command a second time; a second panic is reported as
+the corruption it is. The guard silences the default panic hook for the
+attempt, so a recovered crash never sprays a backtrace over output the
+JSON contract owns. A panic from a plain bug takes the same road — a
+needless but harmless rebuild, then the same crash, reported with its
+text — which errs on the side of the user's repository, not the
+developer's backtrace.
+
 **Torn mirror tails truncate silently.** A frame whose fsync did not
 complete was never acknowledged to any caller; removing it loses nothing
 anyone was promised.
