@@ -165,6 +165,12 @@
     "harness": "harness/g1/g1_9_storage_honesty.py",
     "sha256": "894f719cba1857851ca5c46f81c24cddf39266a8b5f6783850fce0ae4b5e3102"
   },
+  "G2.3": {
+    "dependencies": {},
+    "frozen_at": "2026-09-13T09:42:51Z",
+    "harness": "harness/g2/g2_3_concept_lint.py",
+    "sha256": "68c95226c19bcc9f7c0fb6c1992fd0d057fc82f3f5c057f2c56738e04066ee33"
+  },
   "G2.4": {
     "dependencies": {},
     "frozen_at": "2026-09-11T13:46:56Z",
