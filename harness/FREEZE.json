@@ -182,5 +182,11 @@
     "frozen_at": "2026-09-13T13:06:17Z",
     "harness": "harness/g2/g2_5_json_contract.py",
     "sha256": "b41fe0793036ea8db6c90784d53df3d722f903271840a22d33681fb899edb7e8"
+  },
+  "G2.6": {
+    "dependencies": {},
+    "frozen_at": "2026-09-13T13:06:31Z",
+    "harness": "harness/g2/g2_6_changesets.py",
+    "sha256": "63e593ebf1a1c5248ffa92ad3fd72d240e957e107346eca46c1f63615504d46d"
   }
 }
