@@ -206,7 +206,7 @@ enum Internals {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli) {
+    match run_with_recovery(&cli) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             let code = match e.category() {
@@ -230,6 +230,86 @@ fn main() -> ExitCode {
             }
             ExitCode::from(code)
         }
+    }
+}
+
+/// The history store (redb) answers some power-loss damage by panicking
+/// mid-command rather than erring, and not only at open (ADR-25). A panic
+/// that reaches here is damage speaking: repair history from the
+/// repository's own append-only record, then — for a command that only
+/// READS — run it once more: "a crash leaves a merge the next command
+/// finishes" (ADR-16 §6), made literal. A command that WRITES is never
+/// rerun by the machinery: repair-then-rerun could commit its operation
+/// twice (the record is written before the store, so the crashed attempt
+/// may already be durable), and only the user can decide that. A second
+/// panic is reported as the corruption it is.
+fn run_with_recovery(cli: &Cli) -> Result<u8> {
+    let first = catch_run(cli);
+    let panic_text = match first {
+        Ok(result) => return result,
+        Err(text) => text,
+    };
+    let cwd = std::env::current_dir()?;
+    if !Repo::heal_metadata(&cwd)? {
+        return Err(ltx_core::Error::Corrupt(format!(
+            "this command crashed reading the repository's history, and this \
+             repository predates the record needed to repair it: {panic_text}"
+        )));
+    }
+    if command_changes_state(&cli.command) {
+        return Err(ltx_core::Error::Corrupt(format!(
+            "this command crashed while writing history; the repository has \
+             been repaired from its own record — check `ltx log` for whether \
+             the operation landed before running it again ({panic_text})"
+        )));
+    }
+    match catch_run(cli) {
+        Ok(result) => result,
+        Err(second) => Err(ltx_core::Error::Corrupt(format!(
+            "the repository's history was repaired from its record and this \
+             command still crashed: {second}"
+        ))),
+    }
+}
+
+/// Whether a command writes history. The recovery path above may only
+/// auto-retry commands that read: retrying a writer after repair could
+/// commit its operation twice. Mirrors the `state_changing` flags the
+/// binary publishes through `internals command-surface`; anything new
+/// defaults to true, the refusing side.
+fn command_changes_state(cmd: &Command) -> bool {
+    match cmd {
+        Command::Status
+        | Command::Log { .. }
+        | Command::Verify { .. }
+        | Command::Checkout { .. }
+        | Command::Line(LineCmd::List)
+        | Command::Change(ChangeCmd::List)
+        | Command::Workspace(WorkspaceCmd::List)
+        | Command::Lens(LensCmd::List) => false,
+        Command::Sync { dry_run } => !dry_run,
+        _ => true,
+    }
+}
+
+/// Run the command, converting a panic into the text it carried. The
+/// default panic hook is silenced for the attempt, so a crash that the
+/// recovery path absorbs does not spray a backtrace over output the JSON
+/// contract owns; an unrecovered crash still surfaces through the error
+/// document, text included.
+fn catch_run(cli: &Cli) -> std::result::Result<Result<u8>, String> {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli)));
+    std::panic::set_hook(previous_hook);
+    match outcome {
+        Ok(result) => Ok(result),
+        Err(panic) => Err(panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("panic with no message")
+            .to_string()),
     }
 }
 
