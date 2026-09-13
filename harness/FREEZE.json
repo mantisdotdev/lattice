@@ -188,5 +188,11 @@
     "frozen_at": "2026-09-13T14:23:27Z",
     "harness": "harness/g2/g2_6_changesets.py",
     "sha256": "732eebbe38858c28efac7c7e4e00bcd77647c26a2e09c8aeed9c2eaafe1f3726"
+  },
+  "G2.8": {
+    "dependencies": {},
+    "frozen_at": "2026-09-13T15:25:18Z",
+    "harness": "harness/g2/g2_8_thinning.py",
+    "sha256": "904d59ccc10efea8c093c7ccdafe9f3fd072036e32fa874f274b5f5d0aededb9"
   }
 }
