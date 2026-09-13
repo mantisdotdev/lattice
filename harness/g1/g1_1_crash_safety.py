@@ -68,7 +68,12 @@ SHIM_SO = REPO / "harness" / "lib" / "iofault" / "libiofault.so"
 # §6: the fault injector must demonstrate hits in every declared critical
 # section. These names are emitted by the shim's journal as region markers
 # derived from the path being written, so the product never declares them.
-CRITICAL_SECTIONS = ["store_write", "compaction", "thinning", "merge", "sync"]
+# "merge" is not a section (ADR-24): the engine keeps merge state inside the
+# op-log entry itself — single publish, no merge-named files — so merge's
+# durable writes ARE store writes, and requiring a /merge path made the gate
+# unpassable by design rather than by defect. Merge is in the operation pool
+# instead, so kills land inside its capture-publish-materialise window.
+CRITICAL_SECTIONS = ["store_write", "compaction", "thinning", "sync"]
 MIN_HITS_PER_SECTION = 1
 
 # Operations the trials interleave, so crashes land across the surface rather
@@ -77,6 +82,7 @@ OPERATION_POOL = [
     ["save", "trial checkpoint"],
     ["start", "crash-line"],
     ["switch", "main"],
+    ["merge", "crash-line"],
     ["undo"],
     ["sync", "--dry-run"],
     ["internals", "compact"],
@@ -111,6 +117,21 @@ def durable_checkpoints(repo: Path) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return doc.get("checkpoints", [])
+
+
+def establish_crash_line(repo: Path, env: dict | None = None) -> str | None:
+    """Give the trial repo the line the pool merges — one checkpoint of its
+    own, then back to main. Every pool operation must be valid in whatever
+    single draw a trial makes; without this, `merge crash-line` could only
+    ever report not-found (ADR-24), and 129 trials of iteration 18's
+    validation run counted that setup artifact as failures."""
+    (repo / "crash-line.txt").write_text("work on crash-line\n")
+    for argv in (["start", "crash-line"], ["save", "crash line work"],
+                 ["switch", "main"]):
+        proc = L.run(argv, cwd=repo, env=env)
+        if proc.returncode != 0:
+            return f"baseline `ltx {' '.join(argv)}` failed: {proc.stderr[:120]}"
+    return None
 
 
 def verify(repo: Path) -> tuple[bool, str]:
@@ -178,6 +199,9 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int,
     if save.returncode != 0:
         return {"trial": trial, "ok": False, "injected": False,
                 "why": f"baseline save failed: {save.stderr[:160]}"}
+    problem = establish_crash_line(repo)
+    if problem:
+        return {"trial": trial, "ok": False, "injected": False, "why": problem}
     before = durable_checkpoints(repo)
     if not before:
         return {"trial": trial, "ok": False, "injected": False,
@@ -281,6 +305,9 @@ def powerloss_trial(work: Path, rng: random.Random, trial: int,
     if save.returncode != 0:
         return {"trial": trial, "ok": False,
                 "why": f"baseline save failed: {save.stderr[:160]}"}
+    problem = establish_crash_line(repo, env=env)
+    if problem:
+        return {"trial": trial, "ok": False, "why": problem}
 
     before = durable_checkpoints(repo)
     if not before:

@@ -37,11 +37,11 @@ SECTOR = 512
 
 # Map a path inside the store to the critical section it belongs to, so
 # coverage is derived from what was actually touched rather than declared by
-# the product. §6 names these five.
+# the product. §6 names these four; merge is deliberately absent (ADR-24) —
+# the engine's merge state rides the op-log entry, which store_write covers.
 SECTION_MARKERS = [
     ("compaction", ("/compact", ".compact", "/archive")),
     ("thinning", ("/thin", ".thin", "/ephemeral")),
-    ("merge", ("/merge", ".merge", "/conflict")),
     ("sync", ("/sync", ".sync", "/remote", "/fetch")),
     ("store_write", ("/pack", ".pack", "/objects", "/chunks", "/oplog", ".redb")),
 ]
