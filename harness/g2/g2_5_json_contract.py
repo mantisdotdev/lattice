@@ -223,14 +223,17 @@ def validate(doc, schema, path="$") -> list[str]:
 
 
 def run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    # Strict, not errors="replace": stable JSON is valid UTF-8, and replacing
+    # bad bytes with U+FFFD would hand the schema a string that never existed.
     return subprocess.run([str(LTX), *argv, "--json"], cwd=cwd, capture_output=True,
-                          text=True, errors="replace", timeout=TIMEOUT_S, check=False)
+                          text=True, encoding="utf-8", errors="strict",
+                          timeout=TIMEOUT_S, check=False)
 
 
 def published_normal_paths() -> set[str]:
     proc = subprocess.run([str(LTX), "internals", "command-surface", "--json"],
-                          capture_output=True, text=True, errors="replace",
-                          timeout=TIMEOUT_S, check=False)
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="strict", timeout=TIMEOUT_S, check=False)
     if proc.returncode != 0:
         raise RuntimeError("the binary publishes no command surface")
     names = {c["name"] for c in json.loads(proc.stdout)["commands"]}
@@ -293,7 +296,7 @@ def main() -> int:
         return 1
     try:
         published = published_normal_paths()
-    except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
+    except (RuntimeError, json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
         print(json.dumps({"gate": GATE, "note": str(exc)}))
         return 1
 
@@ -307,6 +310,13 @@ def main() -> int:
                 (repo / write[0]).write_text(write[1])
             try:
                 proc = run(argv, repo)
+            except UnicodeDecodeError as exc:
+                # Not a setup failure: bytes that are not UTF-8 are a breach
+                # of the contract by the command that emitted them.
+                exercised.add(name)
+                rows.append({"command": name, "argv": argv,
+                             "problems": [f"output is not UTF-8: {exc}"]})
+                continue
             except (subprocess.TimeoutExpired, OSError) as exc:
                 setup_failures.append(f"{name}: {exc}")
                 continue

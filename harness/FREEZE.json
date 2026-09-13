@@ -179,8 +179,8 @@
   },
   "G2.5": {
     "dependencies": {},
-    "frozen_at": "2026-09-13T10:34:02Z",
+    "frozen_at": "2026-09-13T13:06:17Z",
     "harness": "harness/g2/g2_5_json_contract.py",
-    "sha256": "f8d82843aa0eb3cc64cd6865e1462b83f80064d5ba96d5cd3d6d099f8216f2d8"
+    "sha256": "b41fe0793036ea8db6c90784d53df3d722f903271840a22d33681fb899edb7e8"
   }
 }
