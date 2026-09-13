@@ -89,6 +89,7 @@ not yet checkpointed) and **snapshot** (a checkpoint, coined differently).
     "coverage": { "ok": true, "note": "" }
   }
   ```
+
 - Runtime *output* vocabulary is not covered here. §5.1 deliberately puts
   "chunks" in `verify`'s mouth; a future revision owns that surface. G2.4
   already holds error documents to the seven concepts via its `concept` field.
