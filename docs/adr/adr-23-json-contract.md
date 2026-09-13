@@ -52,7 +52,27 @@ structurally, with the six causal categories and seven concepts as enums.
   normal-path command's success path plus one provoked error, validated by
   a stdlib subset validator (bare CI runners have no jsonschema). Measures
   0 gaps at this commit; demonstrably reports 22 against a shim that
-  answers `{"ok": true}` to everything.
+  answers `{"ok": true}` to everything. The frozen harness's own output,
+  from the run behind that claim:
+
+  <!-- evidence: output of `python3 harness/g2/g2_5_json_contract.py` against the
+  binary built at this ADR's PR, detail.steps elided for length; the recorded
+  measurement lands as a gauntlet iteration on the results branch once this
+  merges, and G2.5's scorecard in GAUNTLET.md is the durable citation. -->
+  {
+    "gate": "G2.5",
+    "value": 0,
+    "unit": "gaps",
+    "note": "0 gap(s): 22 schemas, 22 commands exercised, 23 outputs valid",
+    "detail": {
+      "gaps": [],
+      "steps": "23 steps, all problem-free (elided; rerun the harness for the full list)"
+    },
+    "coverage": {
+      "ok": true,
+      "note": ""
+    }
+  }
 - The scenario pins today's `sync` semantics: `--dry-run` with no remote
   configured succeeds with `remote: null`. When remotes ship, the schema
   and scenario change with them, through a refreeze.

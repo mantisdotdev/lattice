@@ -187,8 +187,10 @@ def validate(doc, schema, path="$") -> list[str]:
     """Violations of the schema subset this contract uses. Empty means valid."""
     errs = []
     if "const" in schema:
-        if doc != schema["const"]:
-            errs.append(f"{path}: expected {schema['const']!r}, got {doc!r}")
+        expected = schema["const"]
+        # Python equality lets 1 == True; JSON does not. Type first.
+        if doc != expected or isinstance(doc, bool) != isinstance(expected, bool):
+            errs.append(f"{path}: expected {expected!r}, got {doc!r}")
         return errs
     if "enum" in schema:
         if doc not in schema["enum"]:
@@ -236,8 +238,11 @@ def published_normal_paths() -> set[str]:
 
 
 def docs_gaps() -> list[dict]:
-    """Commands missing from docs/json-contract.md, or documented without
-    every top-level field of their schema named in backticks."""
+    """Commands missing from docs/json-contract.md, or whose `Fields:` line
+    disagrees with the schema in either direction. Backticks in prose are
+    free (nested fields, values, `ltx` itself); the one line that starts
+    with `Fields:` is the checked contract, so a field removed from the
+    schema but still documented is a gap too."""
     gaps = []
     if not DOCS.exists():
         return [{"command": name, "gap": "docs file missing"} for name in SCHEMAS]
@@ -254,12 +259,22 @@ def docs_gaps() -> list[dict]:
         if name not in sections:
             gaps.append({"command": name, "gap": "no docs section"})
             continue
+        fields_lines = [ln for ln in sections[name].splitlines()
+                        if ln.strip().startswith("Fields:")]
+        if len(fields_lines) != 1:
+            gaps.append({"command": name,
+                         "gap": f"{len(fields_lines)} `Fields:` lines, need exactly 1"})
+            continue
         fields = set(schema["properties"])
-        documented = set(re.findall(r"`([a-z0-9_]+)`", sections[name]))
+        documented = set(re.findall(r"`([a-z0-9_]+)`", fields_lines[0]))
         missing = sorted(fields - documented)
+        stale = sorted(documented - fields)
         if missing:
             gaps.append({"command": name,
                          "gap": f"docs omit field(s): {', '.join(missing)}"})
+        if stale:
+            gaps.append({"command": name,
+                         "gap": f"docs list field(s) the schema lacks: {', '.join(stale)}"})
     return gaps
 
 
@@ -315,6 +330,9 @@ def main() -> int:
     gaps = []
     unschemaed = sorted(published - set(SCHEMAS))
     gaps += [{"command": c, "gap": "published but no schema"} for c in unschemaed]
+    unpublished = sorted((set(SCHEMAS) - {"error document"}) - published)
+    gaps += [{"command": c, "gap": "in the contract but not published by "
+              "internals command-surface"} for c in unpublished]
     unexercised = sorted(set(SCHEMAS) - exercised)
     gaps += [{"command": c, "gap": "schema but never exercised"} for c in unexercised]
     invalid = {}
@@ -325,7 +343,7 @@ def main() -> int:
              for c, p in sorted(invalid.items())]
     gaps += docs_gaps()
 
-    coverage_ok = (not setup_failures and not unexercised
+    coverage_ok = (not setup_failures and not unexercised and not unpublished
                    and len(exercised) >= MIN_COMMANDS)
     coverage_note = "; ".join(
         ([f"steps that did not run: {'; '.join(setup_failures)}"] if setup_failures else [])
