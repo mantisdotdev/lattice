@@ -572,15 +572,232 @@ impl Entry {
     }
 }
 
+/// One frame of the append-only mirror: exactly the triple `commit_batch`
+/// writes into the index tables, so replaying frames reproduces those tables.
+#[derive(Serialize, Deserialize)]
+struct MirrorFrame {
+    entry: Entry,
+    lines: Option<LineState>,
+    format: Option<u64>,
+}
+
+/// The op-log's append-only mirror (ADR-25).
+///
+/// ADR-3 bought crash atomicity from redb for exactly this metadata — and
+/// G1.1 measured the purchase failing: redb 2.6.3 can abort on open with an
+/// internal page-manager assertion, not an error, after legal torn-write
+/// power loss, leaving the only queryable copy of history unopenable. An
+/// index that can panic must be an index that can burn: every batch is
+/// appended here and fsynced BEFORE the database commit, and a database that
+/// cannot open is quarantined and rebuilt from these frames. Frames are
+/// length-prefixed and checksummed; a torn tail is truncated away, which is
+/// safe because a frame whose fsync did not finish was never acknowledged to
+/// any caller.
+struct Mirror {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+const MIRROR_MAGIC: &[u8; 8] = b"LTXMIRR1";
+const MIRROR_CHECKSUM_LEN: usize = 8;
+/// No frame is unbounded: an entry plus one LineState snapshot is small, and
+/// a length prefix past this cap is damage, not a frame.
+const MIRROR_MAX_FRAME: u32 = 64 * 1024 * 1024;
+/// Rebuild and migration stream in transactions of this many frames, so a
+/// long history is never held in memory whole.
+const MIRROR_REPLAY_CHUNK: usize = 512;
+
+impl Mirror {
+    fn path_beside(db_path: &std::path::Path) -> std::path::PathBuf {
+        db_path.with_file_name("oplog.append")
+    }
+
+    /// Open or create the mirror and scan it. Returns the mirror positioned
+    /// for appending, the highest sequence it holds, and how many frames are
+    /// intact. Anything after the last intact frame is truncated.
+    fn open(path: &std::path::Path) -> Result<(Self, u64, u64)> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let created = !path.exists();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        let mut header = [0u8; 8];
+        let mut good_end: u64 = MIRROR_MAGIC.len() as u64;
+        let mut last_seq = 0u64;
+        let mut frames = 0u64;
+        let header_ok = file.read_exact(&mut header).is_ok() && &header == MIRROR_MAGIC;
+        if header_ok {
+            loop {
+                match Self::read_frame(&mut file) {
+                    Ok(Some((frame, end))) => {
+                        last_seq = frame.entry.seq;
+                        frames += 1;
+                        good_end = end;
+                    }
+                    // Clean end, or a torn/checksum-failed tail: everything
+                    // before `good_end` is intact, everything after was never
+                    // acknowledged.
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        } else {
+            // Empty file or damaged header. A header that never made it to
+            // disk means no frame was ever acknowledged from this file.
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(MIRROR_MAGIC)?;
+            file.sync_all()?;
+        }
+        file.set_len(good_end)?;
+        file.seek(SeekFrom::End(0))?;
+        if created {
+            // The file's NAME is durable only once its directory is synced;
+            // fsync on the file alone does not commit the directory entry.
+            if let Some(dir) = path.parent() {
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+            }
+        }
+        Ok((
+            Mirror {
+                file,
+                path: path.to_path_buf(),
+            },
+            last_seq,
+            frames,
+        ))
+    }
+
+    /// Every intact frame of THIS mirror, streamed from a fresh read handle
+    /// so the append position is undisturbed.
+    fn frames_iter(&self) -> Result<MirrorFrames> {
+        Self::frames(&self.path)
+    }
+
+    /// The next intact frame, or None at a clean end-of-file. A frame cut
+    /// short or failing its checksum is an error — the caller treats the
+    /// rest of the file as a torn tail.
+    fn read_frame(file: &mut std::fs::File) -> Result<Option<(MirrorFrame, u64)>> {
+        use std::io::{Read, Seek};
+        let mut len_buf = [0u8; 4];
+        match file.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        let len = u32::from_le_bytes(len_buf);
+        if len == 0 || len > MIRROR_MAX_FRAME {
+            return Err(Error::Corrupt(format!(
+                "mirror frame length {len} is not a frame"
+            )));
+        }
+        let mut sum = [0u8; MIRROR_CHECKSUM_LEN];
+        file.read_exact(&mut sum)?;
+        let mut payload = vec![0u8; len as usize];
+        file.read_exact(&mut payload)?;
+        if blake3::hash(&payload).as_bytes()[..MIRROR_CHECKSUM_LEN] != sum {
+            return Err(Error::Corrupt("mirror frame checksum mismatch".into()));
+        }
+        let frame: MirrorFrame = serde_json::from_slice(&payload)?;
+        let end = file.stream_position()?;
+        Ok(Some((frame, end)))
+    }
+
+    fn encode(batch: &[(Entry, Option<LineState>, Option<u64>)]) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        for (entry, lines, format) in batch {
+            let payload = serde_json::to_vec(&MirrorFrame {
+                entry: entry.clone(),
+                lines: lines.clone(),
+                format: *format,
+            })?;
+            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&blake3::hash(&payload).as_bytes()[..MIRROR_CHECKSUM_LEN]);
+            buf.extend_from_slice(&payload);
+        }
+        Ok(buf)
+    }
+
+    /// Append a batch and make it durable. `sync_all` is the real barrier on
+    /// every supported platform (F_FULLFSYNC on macOS, per ADR-18).
+    fn append(&mut self, batch: &[(Entry, Option<LineState>, Option<u64>)]) -> Result<()> {
+        use std::io::Write;
+        let buf = Self::encode(batch)?;
+        self.file.write_all(&buf)?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    fn offset(&mut self) -> Result<u64> {
+        use std::io::Seek;
+        Ok(self.file.stream_position()?)
+    }
+
+    /// Roll an unacknowledged append back out, so a database commit that
+    /// failed cannot resurrect its batch on a later open.
+    fn truncate_to(&mut self, offset: u64) -> Result<()> {
+        use std::io::{Seek, SeekFrom};
+        self.file.set_len(offset)?;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    /// Every intact frame, streamed in order.
+    fn frames(path: &std::path::Path) -> Result<MirrorFrames> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)?;
+        let mut header = [0u8; 8];
+        let usable = file.read_exact(&mut header).is_ok() && &header == MIRROR_MAGIC;
+        if !usable {
+            file.seek(SeekFrom::End(0))?;
+        }
+        Ok(MirrorFrames { file, done: !usable })
+    }
+}
+
+struct MirrorFrames {
+    file: std::fs::File,
+    done: bool,
+}
+
+impl Iterator for MirrorFrames {
+    type Item = MirrorFrame;
+
+    fn next(&mut self) -> Option<MirrorFrame> {
+        if self.done {
+            return None;
+        }
+        match Mirror::read_frame(&mut self.file) {
+            Ok(Some((frame, _))) => Some(frame),
+            // A torn tail ends replay exactly where open() truncates it.
+            Ok(None) | Err(_) => {
+                self.done = true;
+                None
+            }
+        }
+    }
+}
+
 /// Append-only operation log over redb.
 ///
 /// redb rather than a hand-rolled file because ADR-3 buys crash atomicity here
 /// rather than building it: this is the metadata whose torn write G1.1 punishes
 /// hardest, and §0.8's novelty budget says to buy where a proven design exists.
+/// What G1.1 then measured is that the bought atomicity has a failure mode of
+/// its own, so the log now also keeps the append-only mirror above (ADR-25)
+/// and treats the database as rebuildable.
 pub struct OpLog {
     db: Database,
     group: Mutex<GroupState>,
     ready: Condvar,
+    /// None only for the in-memory test constructor; every on-disk log
+    /// mirrors (ADR-25).
+    mirror: Mutex<Option<Mirror>>,
 }
 
 #[derive(Default)]
@@ -625,13 +842,102 @@ struct GroupState {
 
 impl OpLog {
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Self::from_database(Database::create(path)?)
+        let mirror_path = Mirror::path_beside(path);
+        let db = match Self::open_database_guarded(path) {
+            Ok(db) => db,
+            Err(open_error) => {
+                if !mirror_path.exists() {
+                    return Err(open_error);
+                }
+                Self::rebuild_database_from_mirror(path, &mirror_path, &open_error)?
+            }
+        };
+        let mirror = Mirror::open(&mirror_path)?;
+        Self::from_parts(db, Some(mirror))
+    }
+
+    /// redb 2.6.3 can refuse an open by PANICKING — a page-manager assertion
+    /// — on states that are legal under power loss, not only by returning an
+    /// error. Both roads must lead to the same place: the mirror rebuild.
+    fn open_database_guarded(path: &std::path::Path) -> Result<Database> {
+        let owned = path.to_path_buf();
+        match std::panic::catch_unwind(move || Database::create(&owned)) {
+            Ok(Ok(db)) => Ok(db),
+            Ok(Err(e)) => Err(redb::Error::from(e).into()),
+            Err(panic) => {
+                let text = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("panic with no message");
+                Err(Error::Corrupt(format!(
+                    "operation-log index refused to open: {text}"
+                )))
+            }
+        }
+    }
+
+    /// Quarantine the unopenable database and rebuild it from the mirror.
+    /// Nothing is deleted: the damaged file is renamed beside its
+    /// replacement, so what happened can still be examined.
+    fn rebuild_database_from_mirror(
+        db_path: &std::path::Path,
+        mirror_path: &std::path::Path,
+        cause: &Error,
+    ) -> Result<Database> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let quarantine = db_path.with_file_name(format!("meta.redb.corrupt-{stamp}"));
+        std::fs::rename(db_path, &quarantine).map_err(|e| {
+            Error::Corrupt(format!(
+                "operation-log index is unopenable ({cause}) and could not be \
+                 quarantined for rebuild: {e}"
+            ))
+        })?;
+        let db = Database::create(db_path).map_err(|e| {
+            Error::Corrupt(format!(
+                "operation-log index is unopenable ({cause}) and a replacement \
+                 could not be created: {e}"
+            ))
+        })?;
+        let mut pending: Vec<(Entry, Option<LineState>, Option<u64>)> = Vec::new();
+        for frame in Mirror::frames(mirror_path)? {
+            pending.push((frame.entry, frame.lines, frame.format));
+            if pending.len() >= MIRROR_REPLAY_CHUNK {
+                Self::write_tables(&db, &pending)?;
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            Self::write_tables(&db, &pending)?;
+        }
+        Ok(db)
+    }
+
+    /// One write transaction applying `batch` to all four tables — shared by
+    /// rebuild, heal-forward and `commit_batch`, so a replayed batch can
+    /// never mean something different from a live one.
+    fn write_tables(
+        db: &Database,
+        batch: &[(Entry, Option<LineState>, Option<u64>)],
+    ) -> Result<()> {
+        let tx = db.begin_write()?;
+        Self::apply_batch_to_tables(&tx, batch)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Build an OpLog over an already-created redb Database, recovering the
     /// group-commit counters from durable state. Shared by `open` and, in
-    /// tests, by a constructor over a fault-injecting backend.
+    /// tests, by a constructor over a fault-injecting backend (which gets no
+    /// mirror, and with it none of the mirror's healing).
     fn from_database(db: Database) -> Result<Self> {
+        Self::from_parts(db, None)
+    }
+
+    fn from_parts(db: Database, mirror: Option<(Mirror, u64, u64)>) -> Result<Self> {
         {
             let tx = db.begin_write()?;
             tx.open_table(ENTRIES)?;
@@ -640,6 +946,50 @@ impl OpLog {
             tx.open_table(SAVED)?;
             tx.commit()?;
         }
+        let db_last = {
+            let tx = db.begin_read()?;
+            let table = tx.open_table(ENTRIES)?;
+            let value = match table.last()? {
+                Some((k, _)) => k.value(),
+                None => 0,
+            };
+            value
+        };
+        let mirror = match mirror {
+            None => None,
+            Some((mut m, mirror_last, mirror_frames)) => {
+                if mirror_last > db_last {
+                    // The mirror is ahead: power was lost between the mirror
+                    // fsync and the database commit. The frames are the
+                    // acknowledged truth — heal the database forward.
+                    let mut pending: Vec<(Entry, Option<LineState>, Option<u64>)> = Vec::new();
+                    for frame in m.frames_iter()? {
+                        if frame.entry.seq <= db_last {
+                            continue;
+                        }
+                        pending.push((frame.entry, frame.lines, frame.format));
+                        if pending.len() >= MIRROR_REPLAY_CHUNK {
+                            Self::write_tables(&db, &pending)?;
+                            pending.clear();
+                        }
+                    }
+                    if !pending.is_empty() {
+                        Self::write_tables(&db, &pending)?;
+                    }
+                } else if mirror_frames == 0 && db_last > 0 {
+                    // A repository from before the mirror existed: write the
+                    // whole mirror now, so the next unopenable database has
+                    // something to rebuild from.
+                    Self::write_full_mirror(&db, &mut m)?;
+                } else if mirror_last < db_last {
+                    // Shorter than the database it mirrors — a partial legacy
+                    // file with no authority. Rewrite it whole.
+                    m.truncate_to(MIRROR_MAGIC.len() as u64)?;
+                    Self::write_full_mirror(&db, &mut m)?;
+                }
+                Some(m)
+            }
+        };
         let last = {
             let tx = db.begin_read()?;
             let table = tx.open_table(ENTRIES)?;
@@ -667,7 +1017,55 @@ impl OpLog {
                 ..Default::default()
             }),
             ready: Condvar::new(),
+            mirror: Mutex::new(mirror),
         })
+    }
+
+    /// Write the whole mirror from the database — the migration path for a
+    /// repository older than the mirror. Intermediate LineState snapshots no
+    /// longer exist anywhere, so the final frame carries the current one; a
+    /// rebuild from this mirror reproduces the tables exactly as they stand.
+    fn write_full_mirror(db: &Database, mirror: &mut Mirror) -> Result<()> {
+        let (lines_now, format_now, last_seq) = {
+            let tx = db.begin_read()?;
+            let lines = tx
+                .open_table(LINES)?
+                .get(LINES_KEY)?
+                .map(|v| serde_json::from_slice::<LineState>(v.value()))
+                .transpose()?;
+            let format = tx.open_table(HEADS)?.get(FORMAT_KEY)?.map(|v| v.value());
+            let last = tx
+                .open_table(ENTRIES)?
+                .last()?
+                .map(|(k, _)| k.value())
+                .unwrap_or(0);
+            (lines, format, last)
+        };
+        let mut from = 0u64;
+        loop {
+            let chunk: Vec<(Entry, Option<LineState>, Option<u64>)> = {
+                let tx = db.begin_read()?;
+                let table = tx.open_table(ENTRIES)?;
+                let mut out = Vec::new();
+                for item in table.range(from..)?.take(MIRROR_REPLAY_CHUNK) {
+                    let (_, v) = item?;
+                    let entry: Entry = serde_json::from_slice(v.value())?;
+                    let is_last = entry.seq == last_seq;
+                    out.push((
+                        entry,
+                        if is_last { lines_now.clone() } else { None },
+                        if is_last { format_now } else { None },
+                    ));
+                }
+                out
+            };
+            let Some((last_entry, _, _)) = chunk.last() else {
+                break;
+            };
+            from = last_entry.seq + 1;
+            mirror.append(&chunk)?;
+        }
+        Ok(())
     }
 
     pub fn head(&self) -> Result<Option<Entry>> {
@@ -873,7 +1271,45 @@ impl OpLog {
         if batch.is_empty() {
             return Ok(0);
         }
-        let tx = self.db.begin_write()?;
+        // Mirror first (ADR-25): once these frames are fsynced, the batch
+        // survives even a database that refuses to open ever again. If the
+        // database commit below then fails, the frames are rolled back out —
+        // a batch whose caller was told "no" must not resurrect on a later
+        // open's heal-forward.
+        let mut mirror_guard = self.mirror.lock().unwrap();
+        let rollback_to = match mirror_guard.as_mut() {
+            Some(m) => {
+                let offset = m.offset()?;
+                m.append(batch)?;
+                Some(offset)
+            }
+            None => None,
+        };
+        let committed: Result<u64> = (|| {
+            let tx = self.db.begin_write()?;
+            Self::apply_batch_to_tables(&tx, batch)?;
+            // redb's commit is the durability barrier; it fsyncs.
+            tx.commit()?;
+            Ok(batch.last().map(|(e, _, _)| e.seq).unwrap_or(0))
+        })();
+        if committed.is_err() {
+            if let (Some(m), Some(offset)) = (mirror_guard.as_mut(), rollback_to) {
+                // Best effort: if this truncate fails too, the log poisons on
+                // the commit error anyway.
+                let _ = m.truncate_to(offset);
+            }
+        }
+        committed
+    }
+
+    /// The one meaning of "apply a batch": entries, the line publishes that
+    /// must land in the same transaction (ADR-16 §7), the format rung, and
+    /// the Save index. Shared by live commits, heal-forward and rebuild, so
+    /// a replayed batch can never mean something different from a live one.
+    fn apply_batch_to_tables(
+        tx: &redb::WriteTransaction,
+        batch: &[(Entry, Option<LineState>, Option<u64>)],
+    ) -> Result<()> {
         {
             let mut table = tx.open_table(ENTRIES)?;
             for (entry, _, _) in batch {
@@ -915,9 +1351,7 @@ impl OpLog {
                 }
             }
         }
-        // redb's commit is the durability barrier; it fsyncs.
-        tx.commit()?;
-        Ok(batch.last().map(|(e, _, _)| e.seq).unwrap_or(0))
+        Ok(())
     }
 
     /// The sequence of the `Save` that recorded this checkpoint, if any.
@@ -1629,6 +2063,137 @@ mod tests {
         let second = log.append(Operation::Thin { collected: 1 }).unwrap();
         assert_eq!(second.seq, 2);
         assert_eq!(second.prev, first.id);
+        assert!(log.verify_chain().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_database_rebuilds_from_the_mirror_when_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+            log.append(Operation::Save {
+                message: "first".into(),
+                checkpoint: "abc".into(),
+                line: "main".into(),
+                change: None,
+            })
+            .unwrap();
+        }
+        // The index is damaged beyond opening; the mirror is the survivor.
+        std::fs::write(&path, b"not a database at all").unwrap();
+        let log = OpLog::open(&path).unwrap();
+        assert_eq!(log.len().unwrap(), 2);
+        assert!(log.verify_chain().unwrap().is_none());
+        assert_eq!(
+            log.saved_checkpoints().unwrap(),
+            vec![("abc".to_string(), 2)]
+        );
+        let quarantined = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("meta.redb.corrupt-")
+            });
+        assert!(quarantined, "the damaged file is kept beside its replacement");
+    }
+
+    #[test]
+    fn a_torn_mirror_tail_is_truncated_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+        }
+        let mirror = dir.path().join("oplog.append");
+        let intact = std::fs::metadata(&mirror).unwrap().len();
+        let mut bytes = std::fs::read(&mirror).unwrap();
+        bytes.extend_from_slice(&[7u8; 9]); // meaningless torn tail
+        std::fs::write(&mirror, &bytes).unwrap();
+        let log = OpLog::open(&path).unwrap();
+        assert_eq!(log.len().unwrap(), 1);
+        assert_eq!(
+            std::fs::metadata(&mirror).unwrap().len(),
+            intact,
+            "open truncated the tail away"
+        );
+        log.append(Operation::Init).unwrap();
+        assert_eq!(log.len().unwrap(), 2, "appending after truncation works");
+    }
+
+    #[test]
+    fn a_mirror_ahead_of_the_database_heals_it_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.redb");
+        let entry3 = {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+            let e2 = log.append(Operation::Init).unwrap();
+            let at = 12345u64;
+            let id = Entry::compute_id(3, &e2.id, at, &Operation::Init, FORMAT_VERSION).unwrap();
+            Entry {
+                seq: 3,
+                prev: e2.id.clone(),
+                id,
+                at_unix_ms: at,
+                operation: Operation::Init,
+                format: FORMAT_VERSION,
+            }
+        };
+        // Hand-write the next frame into the mirror alone, as if power died
+        // between the mirror fsync and the database commit.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join("oplog.append"))
+                .unwrap();
+            let payload = serde_json::to_vec(&MirrorFrame {
+                entry: entry3.clone(),
+                lines: None,
+                format: None,
+            })
+            .unwrap();
+            file.write_all(&(payload.len() as u32).to_le_bytes()).unwrap();
+            file.write_all(&blake3::hash(&payload).as_bytes()[..MIRROR_CHECKSUM_LEN])
+                .unwrap();
+            file.write_all(&payload).unwrap();
+        }
+        let log = OpLog::open(&path).unwrap();
+        assert_eq!(log.len().unwrap(), 3, "the mirror's extra frame healed forward");
+        assert_eq!(log.head().unwrap().unwrap().id, entry3.id);
+        assert!(log.verify_chain().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_repository_without_a_mirror_grows_one_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+            log.append(Operation::Save {
+                message: "first".into(),
+                checkpoint: "abc".into(),
+                line: "main".into(),
+                change: None,
+            })
+            .unwrap();
+        }
+        // A pre-mirror repository: the file never existed.
+        std::fs::remove_file(dir.path().join("oplog.append")).unwrap();
+        {
+            let _ = OpLog::open(&path).unwrap();
+        }
+        // The migrated mirror must be enough to survive the database dying.
+        std::fs::write(&path, b"garbage").unwrap();
+        let log = OpLog::open(&path).unwrap();
+        assert_eq!(log.len().unwrap(), 2);
+        assert_eq!(log.saved_checkpoints().unwrap().len(), 1);
         assert!(log.verify_chain().unwrap().is_none());
     }
 }
