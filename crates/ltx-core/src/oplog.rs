@@ -843,27 +843,43 @@ struct GroupState {
 impl OpLog {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let mirror_path = Mirror::path_beside(path);
-        let db = match Self::open_database_guarded(path) {
+        let db = match Self::open_and_probe(path) {
             Ok(db) => db,
             Err(open_error) => {
                 if !mirror_path.exists() {
                     return Err(open_error);
                 }
-                Self::rebuild_database_from_mirror(path, &mirror_path, &open_error)?
+                Self::rebuild_database_from_mirror(path, &mirror_path, &open_error)?;
+                // The rebuilt database proves itself under the same probe; a
+                // rebuild that cannot pass it has nothing left to hide behind.
+                Self::open_and_probe(path)?
             }
         };
         let mirror = Mirror::open(&mirror_path)?;
         Self::from_parts(db, Some(mirror))
     }
 
-    /// redb 2.6.3 can refuse an open by PANICKING — a page-manager assertion
-    /// — on states that are legal under power loss, not only by returning an
-    /// error. Both roads must lead to the same place: the mirror rebuild.
-    fn open_database_guarded(path: &std::path::Path) -> Result<Database> {
+    /// redb 2.6.3 can refuse power-loss damage by PANICKING, not erring —
+    /// and at two different moments. `page_manager.rs:266` asserts during
+    /// open itself; `page_manager.rs:243` (raw_file_len >= header layout)
+    /// only fires at first USE, so a database can open cleanly and then kill
+    /// whatever command touches it next. The probe transaction forces that
+    /// first use to happen here, inside the guard, so both roads lead to the
+    /// same place: the mirror rebuild.
+    fn open_and_probe(path: &std::path::Path) -> Result<Database> {
         let owned = path.to_path_buf();
-        match std::panic::catch_unwind(move || Database::create(&owned)) {
-            Ok(Ok(db)) => Ok(db),
-            Ok(Err(e)) => Err(redb::Error::from(e).into()),
+        let attempt = std::panic::catch_unwind(move || -> Result<Database> {
+            let db = Database::create(&owned).map_err(redb::Error::from)?;
+            let tx = db.begin_write()?;
+            tx.open_table(ENTRIES)?;
+            tx.open_table(HEADS)?;
+            tx.open_table(LINES)?;
+            tx.open_table(SAVED)?;
+            tx.commit()?;
+            Ok(db)
+        });
+        match attempt {
+            Ok(result) => result,
             Err(panic) => {
                 let text = panic
                     .downcast_ref::<String>()
@@ -879,12 +895,14 @@ impl OpLog {
 
     /// Quarantine the unopenable database and rebuild it from the mirror.
     /// Nothing is deleted: the damaged file is renamed beside its
-    /// replacement, so what happened can still be examined.
+    /// replacement, so what happened can still be examined. The rebuilt
+    /// database is dropped on return; the caller reopens it through the
+    /// probe, holding it to the same standard as any other open.
     fn rebuild_database_from_mirror(
         db_path: &std::path::Path,
         mirror_path: &std::path::Path,
         cause: &Error,
-    ) -> Result<Database> {
+    ) -> Result<()> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -913,7 +931,7 @@ impl OpLog {
         if !pending.is_empty() {
             Self::write_tables(&db, &pending)?;
         }
-        Ok(db)
+        Ok(())
     }
 
     /// One write transaction applying `batch` to all four tables — shared by

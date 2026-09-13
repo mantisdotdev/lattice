@@ -30,9 +30,14 @@ publish, format rung)` triple `commit_batch` writes to the tables —
 length-prefixed, blake3-checksummed. `File::sync_all` is the barrier (the
 platform's true one, F_FULLFSYNC on macOS, per ADR-18).
 
-**A database that cannot open is quarantined and rebuilt from the mirror.**
-Open runs under a panic guard, because redb refuses this class of damage by
-asserting, not by erring. The damaged file is renamed
+**A database that cannot open — or cannot survive first use — is
+quarantined and rebuilt from the mirror.** Open runs under a panic guard
+that also PROBES the database with one transaction over all four tables,
+because redb refuses this class of damage by asserting, not erring, and at
+two different moments: `page_manager.rs:266` during open, and
+`page_manager.rs:243` (file shorter than the header's layout) only at first
+use, where it would kill whatever command touched the database next. The
+rebuilt database must pass the same probe. The damaged file is renamed
 `meta.redb.corrupt-<millis>` — examined, never deleted — and the frames are
 replayed through the same table-application code live commits use, in
 chunks, so rebuild cost is streaming, not resident.
