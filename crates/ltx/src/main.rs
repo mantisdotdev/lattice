@@ -233,12 +233,16 @@ fn main() -> ExitCode {
     }
 }
 
-/// The metadata index (redb) answers some power-loss damage by panicking
+/// The history store (redb) answers some power-loss damage by panicking
 /// mid-command rather than erring, and not only at open (ADR-25). A panic
-/// that reaches here is damage speaking: rebuild the index from its
-/// append-only mirror and run the command once more — "a crash leaves a
-/// merge the next command finishes" (ADR-16 §6), made literal for the index
-/// itself. A second panic is reported as the corruption it is.
+/// that reaches here is damage speaking: repair history from the
+/// repository's own append-only record, then — for a command that only
+/// READS — run it once more: "a crash leaves a merge the next command
+/// finishes" (ADR-16 §6), made literal. A command that WRITES is never
+/// rerun by the machinery: repair-then-rerun could commit its operation
+/// twice (the record is written before the store, so the crashed attempt
+/// may already be durable), and only the user can decide that. A second
+/// panic is reported as the corruption it is.
 fn run_with_recovery(cli: &Cli) -> Result<u8> {
     let first = catch_run(cli);
     let panic_text = match first {
@@ -248,16 +252,43 @@ fn run_with_recovery(cli: &Cli) -> Result<u8> {
     let cwd = std::env::current_dir()?;
     if !Repo::heal_metadata(&cwd)? {
         return Err(ltx_core::Error::Corrupt(format!(
-            "this command crashed inside the metadata index and no mirror \
-             exists to rebuild it: {panic_text}"
+            "this command crashed reading the repository's history, and this \
+             repository predates the record needed to repair it: {panic_text}"
+        )));
+    }
+    if command_changes_state(&cli.command) {
+        return Err(ltx_core::Error::Corrupt(format!(
+            "this command crashed while writing history; the repository has \
+             been repaired from its own record — check `ltx log` for whether \
+             the operation landed before running it again ({panic_text})"
         )));
     }
     match catch_run(cli) {
         Ok(result) => result,
         Err(second) => Err(ltx_core::Error::Corrupt(format!(
-            "the metadata index was rebuilt from its mirror and still \
-             crashed this command: {second}"
+            "the repository's history was repaired from its record and this \
+             command still crashed: {second}"
         ))),
+    }
+}
+
+/// Whether a command writes history. The recovery path above may only
+/// auto-retry commands that read: retrying a writer after repair could
+/// commit its operation twice. Mirrors the `state_changing` flags the
+/// binary publishes through `internals command-surface`; anything new
+/// defaults to true, the refusing side.
+fn command_changes_state(cmd: &Command) -> bool {
+    match cmd {
+        Command::Status
+        | Command::Log { .. }
+        | Command::Verify { .. }
+        | Command::Checkout { .. }
+        | Command::Line(LineCmd::List)
+        | Command::Change(ChangeCmd::List)
+        | Command::Workspace(WorkspaceCmd::List)
+        | Command::Lens(LensCmd::List) => false,
+        Command::Sync { dry_run } => !dry_run,
+        _ => true,
     }
 }
 

@@ -593,6 +593,12 @@ struct MirrorFrame {
 /// length-prefixed and checksummed; a torn tail is truncated away, which is
 /// safe because a frame whose fsync did not finish was never acknowledged to
 /// any caller.
+enum FrameRead {
+    Frame(MirrorFrame, u64),
+    End,
+    TornTail,
+}
+
 struct Mirror {
     file: std::fs::File,
     path: std::path::PathBuf,
@@ -600,9 +606,6 @@ struct Mirror {
 
 const MIRROR_MAGIC: &[u8; 8] = b"LTXMIRR1";
 const MIRROR_CHECKSUM_LEN: usize = 8;
-/// No frame is unbounded: an entry plus one LineState snapshot is small, and
-/// a length prefix past this cap is damage, not a frame.
-const MIRROR_MAX_FRAME: u32 = 64 * 1024 * 1024;
 /// Rebuild and migration stream in transactions of this many frames, so a
 /// long history is never held in memory whole.
 const MIRROR_REPLAY_CHUNK: usize = 512;
@@ -628,19 +631,20 @@ impl Mirror {
         let mut good_end: u64 = MIRROR_MAGIC.len() as u64;
         let mut last_seq = 0u64;
         let mut frames = 0u64;
+        let file_len = file.metadata()?.len();
         let header_ok = file.read_exact(&mut header).is_ok() && &header == MIRROR_MAGIC;
         if header_ok {
             loop {
-                match Self::read_frame(&mut file) {
-                    Ok(Some((frame, end))) => {
+                match Self::read_frame(&mut file, file_len)? {
+                    FrameRead::Frame(frame, end) => {
                         last_seq = frame.entry.seq;
                         frames += 1;
                         good_end = end;
                     }
-                    // Clean end, or a torn/checksum-failed tail: everything
-                    // before `good_end` is intact, everything after was never
-                    // acknowledged.
-                    Ok(None) | Err(_) => break,
+                    // A clean end, or a torn tail: everything before
+                    // `good_end` is intact, everything after was never
+                    // acknowledged. Mid-file damage propagated above.
+                    FrameRead::End | FrameRead::TornTail => break,
                 }
             }
         } else {
@@ -655,11 +659,10 @@ impl Mirror {
         file.seek(SeekFrom::End(0))?;
         if created {
             // The file's NAME is durable only once its directory is synced;
-            // fsync on the file alone does not commit the directory entry.
+            // fsync on the file alone does not commit the directory entry,
+            // and a mirror whose name can vanish is not a recovery source.
             if let Some(dir) = path.parent() {
-                if let Ok(d) = std::fs::File::open(dir) {
-                    let _ = d.sync_all();
-                }
+                crate::platform::sync_dir(dir)?;
             }
         }
         Ok((
@@ -678,33 +681,50 @@ impl Mirror {
         Self::frames(&self.path)
     }
 
-    /// The next intact frame, or None at a clean end-of-file. A frame cut
-    /// short or failing its checksum is an error — the caller treats the
-    /// rest of the file as a torn tail.
-    fn read_frame(file: &mut std::fs::File) -> Result<Option<(MirrorFrame, u64)>> {
+    /// One read of the mirror, with damage classified rather than folded:
+    /// a frame that runs past end-of-file or fails inside the FINAL claimed
+    /// frame is a torn tail — writes that never finished their fsync and
+    /// were never acknowledged, safe to truncate. A frame that fails with
+    /// bytes still after it is mid-file damage, and everything beyond it is
+    /// unframed noise: accepting the prefix would silently discard
+    /// acknowledged history, so it surfaces as an error instead.
+    fn read_frame(file: &mut std::fs::File, file_len: u64) -> Result<FrameRead> {
         use std::io::{Read, Seek};
+        let start = file.stream_position()?;
         let mut len_buf = [0u8; 4];
         match file.read_exact(&mut len_buf) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(if start == file_len { FrameRead::End } else { FrameRead::TornTail });
+            }
             Err(e) => return Err(e.into()),
         }
-        let len = u32::from_le_bytes(len_buf);
-        if len == 0 || len > MIRROR_MAX_FRAME {
-            return Err(Error::Corrupt(format!(
-                "mirror frame length {len} is not a frame"
-            )));
+        let len = u64::from(u32::from_le_bytes(len_buf));
+        let claimed_end = start + 4 + MIRROR_CHECKSUM_LEN as u64 + len;
+        // Bounded by the file that holds it, not by an arbitrary cap: a
+        // garbage length claims more bytes than exist and reads as a torn
+        // tail; a legitimate large frame simply fits.
+        if len == 0 || claimed_end > file_len {
+            return Ok(FrameRead::TornTail);
         }
         let mut sum = [0u8; MIRROR_CHECKSUM_LEN];
         file.read_exact(&mut sum)?;
         let mut payload = vec![0u8; len as usize];
         file.read_exact(&mut payload)?;
-        if blake3::hash(&payload).as_bytes()[..MIRROR_CHECKSUM_LEN] != sum {
-            return Err(Error::Corrupt("mirror frame checksum mismatch".into()));
+        let intact = blake3::hash(&payload).as_bytes()[..MIRROR_CHECKSUM_LEN] == sum;
+        let frame = if intact {
+            serde_json::from_slice::<MirrorFrame>(&payload).ok()
+        } else {
+            None
+        };
+        match frame {
+            Some(frame) => Ok(FrameRead::Frame(frame, claimed_end)),
+            None if claimed_end == file_len => Ok(FrameRead::TornTail),
+            None => Err(Error::Corrupt(format!(
+                "the operation-log mirror is damaged mid-file at byte {start}; \
+                 refusing to rebuild from a silent prefix"
+            ))),
         }
-        let frame: MirrorFrame = serde_json::from_slice(&payload)?;
-        let end = file.stream_position()?;
-        Ok(Some((frame, end)))
     }
 
     fn encode(batch: &[(Entry, Option<LineState>, Option<u64>)]) -> Result<Vec<u8>> {
@@ -747,37 +767,75 @@ impl Mirror {
         Ok(())
     }
 
+    /// Take this mirror out of service by renaming it aside, durably. Used
+    /// when frames that must not survive cannot be truncated away: with no
+    /// mirror present, the next open writes a fresh one from the database.
+    /// Returns a description of what happened rather than a Result, because
+    /// every caller is already on an error path and needs the words.
+    fn invalidate(&mut self) -> String {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let aside = self.path.with_file_name(format!("oplog.append.invalid-{stamp}"));
+        match std::fs::rename(&self.path, &aside) {
+            Ok(()) => {
+                let synced = self
+                    .path
+                    .parent()
+                    .map(crate::platform::sync_dir)
+                    .unwrap_or(Ok(()));
+                match synced {
+                    Ok(()) => format!("renamed aside to {}", aside.display()),
+                    Err(e) => format!(
+                        "renamed aside to {} (directory sync failed: {e})",
+                        aside.display()
+                    ),
+                }
+            }
+            Err(e) => format!("NOT renamed aside ({e}); manual removal of the \
+                               mirror file is required before reopening"),
+        }
+    }
+
     /// Every intact frame, streamed in order.
     fn frames(path: &std::path::Path) -> Result<MirrorFrames> {
         use std::io::{Read, Seek, SeekFrom};
         let mut file = std::fs::File::open(path)?;
+        let file_len = file.metadata()?.len();
         let mut header = [0u8; 8];
         let usable = file.read_exact(&mut header).is_ok() && &header == MIRROR_MAGIC;
         if !usable {
             file.seek(SeekFrom::End(0))?;
         }
-        Ok(MirrorFrames { file, done: !usable })
+        Ok(MirrorFrames { file, file_len, done: !usable })
     }
 }
 
 struct MirrorFrames {
     file: std::fs::File,
+    file_len: u64,
     done: bool,
 }
 
 impl Iterator for MirrorFrames {
-    type Item = MirrorFrame;
+    type Item = Result<MirrorFrame>;
 
-    fn next(&mut self) -> Option<MirrorFrame> {
+    fn next(&mut self) -> Option<Result<MirrorFrame>> {
         if self.done {
             return None;
         }
-        match Mirror::read_frame(&mut self.file) {
-            Ok(Some((frame, _))) => Some(frame),
+        match Mirror::read_frame(&mut self.file, self.file_len) {
+            Ok(FrameRead::Frame(frame, _)) => Some(Ok(frame)),
             // A torn tail ends replay exactly where open() truncates it.
-            Ok(None) | Err(_) => {
+            Ok(FrameRead::End | FrameRead::TornTail) => {
                 self.done = true;
                 None
+            }
+            // Mid-file damage: the consumer must not accept the prefix.
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
             }
         }
     }
@@ -855,7 +913,32 @@ impl OpLog {
                 Self::open_and_probe(path)?
             }
         };
-        let mirror = Mirror::open(&mirror_path)?;
+        let mirror = match Mirror::open(&mirror_path) {
+            Ok(mirror) => mirror,
+            Err(damage) => {
+                // The database is standing and just passed its probe; the
+                // mirror is the damaged party. Quarantine it and start a
+                // fresh one — from_parts rewrites it whole from the
+                // database, which holds only acknowledged batches. Both
+                // sides damaged is the branch above, which reports.
+                let stamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let aside =
+                    mirror_path.with_file_name(format!("oplog.append.invalid-{stamp}"));
+                std::fs::rename(&mirror_path, &aside).map_err(|e| {
+                    Error::Corrupt(format!(
+                        "the operation-log mirror is damaged ({damage}) and \
+                         could not be set aside: {e}"
+                    ))
+                })?;
+                if let Some(dir) = mirror_path.parent() {
+                    crate::platform::sync_dir(dir)?;
+                }
+                Mirror::open(&mirror_path)?
+            }
+        };
         Self::from_parts(db, Some(mirror))
     }
 
@@ -929,6 +1012,12 @@ impl OpLog {
                  quarantined for rebuild: {e}"
             ))
         })?;
+        // The rename must be durable before a replacement exists under the
+        // old name: a crash here must find either the damaged file or the
+        // quarantine, never a half-made namespace.
+        if let Some(dir) = db_path.parent() {
+            crate::platform::sync_dir(dir)?;
+        }
         let db = Database::create(db_path).map_err(|e| {
             Error::Corrupt(format!(
                 "operation-log index is unopenable ({cause}) and a replacement \
@@ -937,6 +1026,7 @@ impl OpLog {
         })?;
         let mut pending: Vec<(Entry, Option<LineState>, Option<u64>)> = Vec::new();
         for frame in Mirror::frames(mirror_path)? {
+            let frame = frame?;
             pending.push((frame.entry, frame.lines, frame.format));
             if pending.len() >= MIRROR_REPLAY_CHUNK {
                 Self::write_tables(&db, &pending)?;
@@ -945,6 +1035,11 @@ impl OpLog {
         }
         if !pending.is_empty() {
             Self::write_tables(&db, &pending)?;
+        }
+        // The replacement's NAME must be as durable as its contents before
+        // anyone relies on it standing where the damaged file stood.
+        if let Some(dir) = db_path.parent() {
+            crate::platform::sync_dir(dir)?;
         }
         Ok(())
     }
@@ -997,6 +1092,7 @@ impl OpLog {
                     // acknowledged truth — heal the database forward.
                     let mut pending: Vec<(Entry, Option<LineState>, Option<u64>)> = Vec::new();
                     for frame in m.frames_iter()? {
+                        let frame = frame?;
                         if frame.entry.seq <= db_last {
                             continue;
                         }
@@ -1325,11 +1421,23 @@ impl OpLog {
             tx.commit()?;
             Ok(batch.last().map(|(e, _, _)| e.seq).unwrap_or(0))
         })();
-        if committed.is_err() {
+        if let Err(commit_err) = &committed {
             if let (Some(m), Some(offset)) = (mirror_guard.as_mut(), rollback_to) {
-                // Best effort: if this truncate fails too, the log poisons on
-                // the commit error anyway.
-                let _ = m.truncate_to(offset);
+                if let Err(rollback_err) = m.truncate_to(offset) {
+                    // The mirror now holds frames whose caller was told "no",
+                    // and a later open would commit them through heal-forward.
+                    // Invalidate the whole file durably: the next open finds
+                    // no mirror and writes a fresh one from the database,
+                    // which by definition holds only acknowledged batches.
+                    let disposition = m.invalidate();
+                    *mirror_guard = None;
+                    return Err(Error::Corrupt(format!(
+                        "a batch failed to commit ({commit_err}), its mirror \
+                         frames could not be rolled back ({rollback_err}), and \
+                         the mirror was {disposition} so a later open cannot \
+                         resurrect the refused batch"
+                    )));
+                }
             }
         }
         committed
@@ -2228,5 +2336,45 @@ mod tests {
         assert_eq!(log.len().unwrap(), 2);
         assert_eq!(log.saved_checkpoints().unwrap().len(), 1);
         assert!(log.verify_chain().unwrap().is_none());
+    }
+
+    #[test]
+    fn mid_file_mirror_damage_never_rebuilds_a_silent_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.redb");
+        {
+            let log = OpLog::open(&path).unwrap();
+            log.append(Operation::Init).unwrap();
+            log.append(Operation::Init).unwrap();
+            log.append(Operation::Init).unwrap();
+        }
+        let mirror = dir.path().join("oplog.append");
+        let mut bytes = std::fs::read(&mirror).unwrap();
+        // Flip one payload byte INSIDE the second frame: after the magic,
+        // frame one spans 4 (len) + 8 (checksum) + its payload.
+        let len1 = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let frame2_payload = 8 + 4 + 8 + len1 + 4 + 8 + 2;
+        bytes[frame2_payload] ^= 0xFF;
+        std::fs::write(&mirror, &bytes).unwrap();
+
+        // With the database also gone, rebuild must REFUSE the prefix.
+        let quarantined_db = dir.path().join("meta.redb.gone");
+        std::fs::rename(&path, &quarantined_db).unwrap();
+        std::fs::write(&path, b"garbage").unwrap();
+        let refused = OpLog::open(&path);
+        assert!(refused.is_err(), "a damaged mirror must not rebuild silently");
+
+        // With a healthy database back, the damaged mirror is set aside and
+        // rewritten whole; nothing is lost and the log reopens clean.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&quarantined_db, &path).unwrap();
+        let log = OpLog::open(&path).unwrap();
+        assert_eq!(log.len().unwrap(), 3);
+        assert!(log.verify_chain().unwrap().is_none());
+        let set_aside = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("oplog.append.invalid-"));
+        assert!(set_aside, "the damaged mirror is kept for examination");
     }
 }
