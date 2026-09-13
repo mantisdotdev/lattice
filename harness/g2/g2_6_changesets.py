@@ -97,17 +97,20 @@ def write_groups(repo: Path, groups: dict[str, list[str]]) -> list[str]:
 
 
 def change_state(repo: Path):
-    """The partition as a comparable value: (frozenset of path-groups,
-    the current change's group, {change id: group})."""
+    """The partition as a comparable value: (canonical group sequence,
+    the current change's group, {change id: group}). The group sequence is
+    a sorted tuple of sorted tuples rather than a set of sets, so a
+    duplicate group on an extra open change cannot collapse away — a
+    harness that can pass without measuring is worse than no harness."""
     doc = must(["change", "list"], repo)
-    groups = frozenset(frozenset(c["assigned"]) for c in doc["changes"])
-    current = next((frozenset(c["assigned"]) for c in doc["changes"] if c["current"]), None)
-    by_id = {c["id"]: frozenset(c["assigned"]) for c in doc["changes"]}
+    groups = tuple(sorted(tuple(sorted(c["assigned"])) for c in doc["changes"]))
+    current = next((tuple(sorted(c["assigned"])) for c in doc["changes"] if c["current"]), None)
+    by_id = {c["id"]: tuple(sorted(c["assigned"])) for c in doc["changes"]}
     return groups, current, by_id
 
 
-def expected_partition(groups: dict[str, list[str]]) -> frozenset:
-    return frozenset(frozenset(members) for members in groups.values())
+def expected_partition(groups: dict[str, list[str]]):
+    return tuple(sorted(tuple(sorted(members)) for members in groups.values()))
 
 
 # ------------------------------------------------------------------ scenarios
@@ -121,7 +124,7 @@ def scripted_split(groups: dict[str, list[str]]):
         paths = write_groups(repo, groups)
         assigned = must(["assign", *sorted(groups)], repo)
         pre = change_state(repo)
-        if pre[0] != frozenset({frozenset(paths)}):
+        if pre[0] != (tuple(paths),):
             return [f"assign did not produce one change of all paths: {pre[0]}"]
         out = must(["split"], repo)
         failures = []
@@ -137,8 +140,9 @@ def scripted_split(groups: dict[str, list[str]]):
             failures.append(f"into named {len(out['into'])} changes for "
                             f"{len(groups)} groups")
         must(["undo"], repo)
-        if change_state(repo)[:2] != pre[:2]:
-            failures.append("undo did not restore the pre-split assignment")
+        if change_state(repo) != pre:
+            failures.append("undo did not restore the pre-split assignment "
+                            "on the same change id with the same currency")
         return failures
     return scenario
 
@@ -151,16 +155,19 @@ def one_group_is_noop(work: Path, name: str) -> list[str]:
     out = must(["split"], repo)
     if out["into"] or out["moved"]:
         return [f"one group split into {out['into']}, moved {out['moved']}"]
-    if change_state(repo)[:2] != pre[:2]:
-        return ["a no-op split changed the assignment"]
+    if change_state(repo) != pre:
+        return ["a no-op split changed the change state"]
     return []
 
 
 def nothing_current_is_noop(work: Path, name: str) -> list[str]:
     repo = fresh_repo(work, name)
+    pre = change_state(repo)
     out = must(["split"], repo)
     if out["change"] is not None or out["into"] or out["moved"]:
         return [f"split with nothing current reported {out}"]
+    if change_state(repo) != pre:
+        return ["split with nothing current changed the change state"]
     return []
 
 
@@ -169,9 +176,12 @@ def resplit_moves_nothing(work: Path, name: str) -> list[str]:
     write_groups(repo, {"a.txt": ["a.txt"], "b.txt": ["b.txt"]})
     must(["assign", "a.txt", "b.txt"], repo)
     must(["split"], repo)
+    settled = change_state(repo)
     out = must(["split"], repo)
     if out["into"] or out["moved"]:
         return [f"second split moved {out['moved']} into {out['into']}"]
+    if change_state(repo) != settled:
+        return ["a second split changed the change state while reporting no moves"]
     return []
 
 
@@ -235,43 +245,68 @@ def double_undo_takes_assignment_away(work: Path, name: str) -> list[str]:
     must(["undo"], repo)
     must(["undo"], repo)
     state = change_state(repo)
-    if state[0] != frozenset():
+    if state[0] != ():
         return [f"after undoing split and assign, changes remain: {state[0]}"]
     return []
 
 
+def oplog_last_seq(repo: Path) -> int:
+    doc = must(["internals", "oplog"], repo)
+    ops = doc.get("operations", [])
+    return ops[-1]["seq"] if ops else 0
+
+
+# Whether each kill demonstrably landed while the split was in flight or
+# after its publish (its op-log entry exists), filled by interrupted_split
+# and read by the §6 coverage contract in main(). A kill that fired before
+# the process reached the operation leaves no footprint and proves nothing;
+# a kill after capture but before the single publish leaves the same
+# nothing and proves everything — the two are indistinguishable from
+# outside, which is WHY coverage is asserted over the family of eight
+# timings rather than per scenario: enough kills must be seen to intersect
+# the operation for the sweep to have measured it.
+KILL_FOOTPRINTS: list[bool] = []
+MIN_KILLS_LANDED = 3
+
+
 def interrupted_split(kill_ms: int):
     """SIGKILL a wide split mid-flight; the surviving state must be all or
-    nothing, then completable, then undoable."""
+    nothing, then completable, then undoable — back to the full pre-split
+    state, change id and currency included."""
     def scenario(work: Path, name: str) -> list[str]:
         groups = {f"g{i:02d}": [f"g{i:02d}/f.txt"] for i in range(KILL_GROUPS)}
         repo = fresh_repo(work, name)
-        paths = write_groups(repo, groups)
+        write_groups(repo, groups)
         must(["assign", *sorted(groups)], repo)
-        pre_groups = frozenset({frozenset(paths)})
+        pre = change_state(repo)
         want = expected_partition(groups)
+        pre_seq = oplog_last_seq(repo)
+
         proc = subprocess.Popen([str(LTX), "split", "--json"], cwd=repo,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(kill_ms / 1000.0)
         proc.kill()
         proc.wait(timeout=TIMEOUT_S)
+        KILL_FOOTPRINTS.append(oplog_last_seq(repo) > pre_seq)
+
         failures = []
         verify = must(["verify"], repo)
         if not verify["ok"]:
             failures.append(f"verify not clean after kill: {verify['errors'][:2]}")
-        observed = change_state(repo)[0]
-        if observed not in (pre_groups, want):
+        observed = change_state(repo)
+        if observed[0] not in (pre[0], want):
             failures.append(
                 f"half a split is visible after a {kill_ms}ms kill: "
-                f"{sorted(map(sorted, observed))}")
-        if observed != want:
+                f"{observed[0]}")
+        if observed[0] != want:
             must(["split"], repo)
             if change_state(repo)[0] != want:
                 failures.append("split after the kill did not complete the partition")
         must(["undo"], repo)
-        if change_state(repo)[0] != pre_groups:
+        after_undo = change_state(repo)
+        if after_undo != pre:
             failures.append("undo after the interrupted split did not restore "
-                            "the one-change assignment")
+                            "the pre-split state, change id and currency included")
         return failures
     return scenario
 
@@ -328,16 +363,22 @@ def main() -> int:
         shutil.rmtree(work, ignore_errors=True)
 
     failed = [r for r in rows if r["failures"]]
-    coverage_ok = not not_run and len(rows) == len(SCENARIOS)
-    coverage_note = (f"{len(not_run)} scenario(s) did not run: "
-                     + ", ".join(p["scenario"] for p in not_run)) if not_run else ""
+    kills_landed = sum(KILL_FOOTPRINTS)
+    coverage_ok = (not not_run and len(rows) == len(SCENARIOS)
+                   and kills_landed >= MIN_KILLS_LANDED)
+    coverage_note = "; ".join(
+        ([f"{len(not_run)} scenario(s) did not run: "
+          + ", ".join(p["scenario"] for p in not_run)] if not_run else [])
+        + ([f"only {kills_landed} of {len(KILL_FOOTPRINTS)} kills left a "
+            f"footprint, {MIN_KILLS_LANDED} required — the sweep may have "
+            f"missed the operation"] if kills_landed < MIN_KILLS_LANDED else []))
 
     print(json.dumps({
         "gate": GATE,
         "value": len(failed),
         "unit": "failures",
         "note": (f"{len(failed)} of {len(rows)} scenarios failed; "
-                 f"{len(KILL_POINTS_MS)} interrupted mid-split"),
+                 f"{len(KILL_POINTS_MS)} kills, {kills_landed} with a footprint"),
         "detail": {"scenarios": rows, "not_run": not_run},
         "coverage": {"ok": coverage_ok, "note": coverage_note},
     }))
