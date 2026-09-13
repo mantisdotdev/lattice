@@ -65,6 +65,11 @@ not yet checkpointed) and **snapshot** (a checkpoint, coined differently).
   and nothing else). The frozen harness's own output, from the run behind
   that claim:
 
+  <!-- evidence: output of `python3 harness/g2/g2_3_concept_lint.py` against the
+  binary built at this ADR's PR (the run CodeRabbit asked to see beside the
+  claim); the recorded measurement lands as a gauntlet iteration on the results
+  branch once this merges, and G2.3's scorecard in GAUNTLET.md is the durable
+  citation. -->
   ```json
   {
     "gate": "G2.3",
