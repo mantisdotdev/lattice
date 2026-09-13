@@ -271,14 +271,16 @@ def main() -> int:
     args = ap.parse_args()
     LTX = args.ltx.resolve()
     if not LTX.exists():
-        print(json.dumps({"gate": GATE, "status": "not-implemented",
+        # A HARD gate with no instrument is a measurement failure, never
+        # N/A-yet: exit nonzero so gauntlet records FAIL(harness-error).
+        print(json.dumps({"gate": GATE,
                           "note": "ltx binary not built (target/release/ltx)"}))
-        return 0
+        return 1
     try:
         published = published_normal_paths()
     except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
-        print(json.dumps({"gate": GATE, "status": "not-implemented", "note": str(exc)}))
-        return 0
+        print(json.dumps({"gate": GATE, "note": str(exc)}))
+        return 1
 
     work = Path(tempfile.mkdtemp(prefix="g2-5-"))
     repo = work / "r"
