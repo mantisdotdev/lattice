@@ -11,6 +11,32 @@ critical section(s): merge." The coverage contract required at least one
 injected fault inside a `merge` section, where a section is derived from the
 path being written (`/merge`, `.merge`, `/conflict`).
 
+<!-- evidence: the G1.1 block of iteration 18's recorded artifact on the
+results branch (commit "Record iterations 18 and 19: G2.4 passes; G1.1 fails
+its own coverage gate", 2026-09-13), detail truncated to the fields quoted
+here; the artifact merges to main with that branch's results PR. -->
+```json
+  {
+    "gate": "G1.1",
+    "status": "FAIL",
+    "measured": null,
+    "note": "coverage contract not satisfied: fault injector never hit critical section(s): merge",
+    "detail": {
+      "sigkill_trials_attempted": 2005,
+      "sigkill_trials_injected": 2000,
+      "powerloss_trials": 1000,
+      "checkpoints_lost_total": 0,
+      "critical_section_hits": {
+        "store_write": 994,
+        "compaction": 113,
+        "thinning": 82,
+        "merge": 0,
+        "sync": 92
+      }
+    }
+  }
+```
+
 No such path exists to hit. The engine deliberately keeps merge state inside
 the op-log entry itself: the tip move and the parked target tree go out in
 one publish, so a crash before the working files are written leaves a merge
@@ -35,8 +61,12 @@ crashes were never landed inside merge's capture–publish–materialise window
   contract is that every operation is valid in whatever single draw a trial
   makes: the first validation run left the line out of the baseline, and
   129 of 3,003 trials counted `merge`'s legitimate not-found error as
-  failures — a setup artifact, recorded in iteration 18's successor and
-  fixed here, not a byte lost (checkpoints_lost_total was 0).
+  failures — a setup artifact, not a byte lost (checkpoints_lost_total
+  was 0). That interim run's artifact was overwritten by the runs that
+  followed; its figures are recorded in PR #29's description and the
+  validation-progression comment on PR #32, and the durable scorecard is
+  the gauntlet iteration the results branch records once the amended
+  harness measures on main.
 - `replay.py` loses the dead `merge` marker tuple; classification of a path
   no engine writes is not coverage, it is decoration.
 
