@@ -119,6 +119,21 @@ def durable_checkpoints(repo: Path) -> list[dict]:
     return doc.get("checkpoints", [])
 
 
+def establish_crash_line(repo: Path, env: dict | None = None) -> str | None:
+    """Give the trial repo the line the pool merges — one checkpoint of its
+    own, then back to main. Every pool operation must be valid in whatever
+    single draw a trial makes; without this, `merge crash-line` could only
+    ever report not-found (ADR-24), and 129 trials of iteration 18's
+    validation run counted that setup artifact as failures."""
+    (repo / "crash-line.txt").write_text("work on crash-line\n")
+    for argv in (["start", "crash-line"], ["save", "crash line work"],
+                 ["switch", "main"]):
+        proc = L.run(argv, cwd=repo, env=env)
+        if proc.returncode != 0:
+            return f"baseline `ltx {' '.join(argv)}` failed: {proc.stderr[:120]}"
+    return None
+
+
 def verify(repo: Path) -> tuple[bool, str]:
     proc = L.run(["verify", "--complete", "--json"], cwd=repo, timeout=3600)
     if proc.returncode != 0:
@@ -184,6 +199,9 @@ def sigkill_trial(work: Path, rng: random.Random, trial: int,
     if save.returncode != 0:
         return {"trial": trial, "ok": False, "injected": False,
                 "why": f"baseline save failed: {save.stderr[:160]}"}
+    problem = establish_crash_line(repo)
+    if problem:
+        return {"trial": trial, "ok": False, "injected": False, "why": problem}
     before = durable_checkpoints(repo)
     if not before:
         return {"trial": trial, "ok": False, "injected": False,
@@ -287,6 +305,9 @@ def powerloss_trial(work: Path, rng: random.Random, trial: int,
     if save.returncode != 0:
         return {"trial": trial, "ok": False,
                 "why": f"baseline save failed: {save.stderr[:160]}"}
+    problem = establish_crash_line(repo, env=env)
+    if problem:
+        return {"trial": trial, "ok": False, "why": problem}
 
     before = durable_checkpoints(repo)
     if not before:

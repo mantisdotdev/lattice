@@ -30,9 +30,13 @@ crashes were never landed inside merge's capture–publish–materialise window
   path the design refuses to create made the gate unpassable by design
   rather than by defect.
 - `["merge", "crash-line"]` joins the operation pool, so seeded kills land
-  inside real merges (fast-forward moves, already-held no-ops, and the
-  not-found error path before `crash-line` exists — all three shapes occur
-  across trials).
+  inside real merges. Every trial's baseline now establishes `crash-line`
+  with one checkpoint of its own and returns to main, because the pool's
+  contract is that every operation is valid in whatever single draw a trial
+  makes: the first validation run left the line out of the baseline, and
+  129 of 3,003 trials counted `merge`'s legitimate not-found error as
+  failures — a setup artifact, recorded in iteration 18's successor and
+  fixed here, not a byte lost (checkpoints_lost_total was 0).
 - `replay.py` loses the dead `merge` marker tuple; classification of a path
   no engine writes is not coverage, it is decoration.
 
