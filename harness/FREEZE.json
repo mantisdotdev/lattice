@@ -167,9 +167,9 @@
   },
   "G2.3": {
     "dependencies": {},
-    "frozen_at": "2026-09-13T07:20:34Z",
+    "frozen_at": "2026-09-13T09:42:51Z",
     "harness": "harness/g2/g2_3_concept_lint.py",
-    "sha256": "202d17e3df497ab454b8e42c73212a3087c94df29f84ac35ea0775efad343449"
+    "sha256": "68c95226c19bcc9f7c0fb6c1992fd0d057fc82f3f5c057f2c56738e04066ee33"
   },
   "G2.4": {
     "dependencies": {},
